@@ -111,12 +111,12 @@ async def list_tokens() -> TokenListResponse:
             try:
                 info = await client.get_token_info(token_id)
                 tokens.append(TokenInfo(
-                    token_id=info.get("token_id", token_id),
-                    token_type=info.get("token_type", 0),
-                    token_type_name=info.get("token_type_name", "Unknown"),
-                    chain_id=info.get("chain_id"),
-                    chain_name=info.get("chain_name"),
-                    token_address=info.get("token_address"),
+                    token_id=info.token_id,
+                    token_type=info.token_type,
+                    token_type_name=info.token_type_name,
+                    chain_id=info.chain_id,
+                    chain_name=info.chain_name,
+                    token_address=info.token_address,
                 ))
             except Exception:
                 logger.warning(f"Failed to fetch token info for {token_id}")

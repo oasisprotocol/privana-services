@@ -85,12 +85,8 @@ class SwapExecutor:
             if status == SwapStatus.PENDING_LOCK:
                 return await self._step_confirm_lock(swap)
             elif status == SwapStatus.LOCKED:
-                return await self._step_approve(swap)
-            elif status == SwapStatus.APPROVING:
                 return await self._step_execute(swap)
-            elif status == SwapStatus.EXECUTING:
-                return await self._step_monitor(swap)
-            elif status == SwapStatus.MONITORING:
+            elif status in (SwapStatus.EXECUTING, SwapStatus.MONITORING):
                 return await self._step_monitor(swap)
             elif status == SwapStatus.SETTLING:
                 return await self._step_settle(swap)
@@ -140,55 +136,6 @@ class SwapExecutor:
             return self._get_swap(swap.id)
 
         return self._get_swap(swap.id)
-
-    async def _step_approve(self, swap: SwapRecord) -> SwapRecord:
-        db = get_db()
-        quote_row = db.execute("SELECT * FROM quotes WHERE id = ?", (swap.quote_id,)).fetchone()
-        if quote_row is None:
-            self._update_swap(swap.id, status=SwapStatus.SWAP_FAILED, error="Quote not found")
-            return self._get_swap(swap.id)
-
-        quote = dict(quote_row)
-        lifi_response = json.loads(quote["lifi_response"])
-        tx_request = lifi_response.get("transactionRequest", {})
-
-        from_info = await self.accounting.get_token_info(swap.from_token_id)
-        needs_approval = from_info.token_type == 1
-
-        if needs_approval:
-            self._update_swap(swap.id, status=SwapStatus.APPROVING)
-            token_address = from_info.token_address
-            if not token_address:
-                self._update_swap(
-                    swap.id, status=SwapStatus.APPROVAL_FAILED,
-                    error="Token address not found"
-                )
-                return self._get_swap(swap.id)
-
-            approval_to = tx_request.get("to", "")
-            approve_calldata = self._encode_erc20_approve(
-                approval_to, int(swap.from_amount)
-            )
-
-            try:
-                result = await self.accounting.relay_execute(
-                    chain_id=swap.from_chain_id,
-                    to=token_address,
-                    data=approve_calldata,
-                    value=0,
-                    gas_limit=100_000,
-                )
-                approval_tx = result.detail or result.submission_id
-                self._update_swap(swap.id, approval_tx_hash=approval_tx)
-            except Exception as exc:
-                logger.error(f"Approval failed for swap {swap.id}: {exc}")
-                self._update_swap(
-                    swap.id, status=SwapStatus.APPROVAL_FAILED,
-                    error=f"Approval relay failed: {exc}"
-                )
-                return self._get_swap(swap.id)
-
-        return await self._step_execute(swap)
 
     async def _step_execute(self, swap: SwapRecord) -> SwapRecord:
         db = get_db()
@@ -341,13 +288,6 @@ class SwapExecutor:
         set_clause = ", ".join(f"{k} = ?" for k in fields)
         values = list(fields.values()) + [swap_id]
         db_write(db, f"UPDATE swaps SET {set_clause} WHERE id = ?", tuple(values))
-
-    @staticmethod
-    def _encode_erc20_approve(spender: str, amount: int) -> str:
-        selector = "095ea7b3"
-        padded_spender = spender.lower().replace("0x", "").rjust(64, "0")
-        padded_amount = hex(amount)[2:].rjust(64, "0")
-        return "0x" + selector + padded_spender + padded_amount
 
     def get_active_swaps(self) -> list[SwapRecord]:
         db = get_db()

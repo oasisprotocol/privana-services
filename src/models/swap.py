@@ -10,12 +10,10 @@ class SwapStatus(str, Enum):
     QUOTED = "quoted"
     PENDING_LOCK = "pending_lock"
     LOCKED = "locked"
-    APPROVING = "approving"
     EXECUTING = "executing"
     MONITORING = "monitoring"
     SETTLING = "settling"
     COMPLETED = "completed"
-    APPROVAL_FAILED = "approval_failed"
     SWAP_FAILED = "swap_failed"
     SETTLE_FAILED = "settle_failed"
     REFUNDING = "refunding"
@@ -26,7 +24,6 @@ class SwapStatus(str, Enum):
         return self in {
             SwapStatus.PENDING_LOCK,
             SwapStatus.LOCKED,
-            SwapStatus.APPROVING,
             SwapStatus.EXECUTING,
             SwapStatus.MONITORING,
             SwapStatus.SETTLING,
@@ -43,7 +40,6 @@ class SwapStatus(str, Enum):
     @property
     def is_failure(self) -> bool:
         return self in {
-            SwapStatus.APPROVAL_FAILED,
             SwapStatus.SWAP_FAILED,
             SwapStatus.SETTLE_FAILED,
         }

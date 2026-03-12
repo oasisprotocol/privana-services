@@ -1,9 +1,15 @@
 import logging
-from typing import Any, Optional
+from typing import Optional
 
 import httpx
 
 from src.config import load_settings
+from src.models.accounting import (
+    Balance,
+    LockedFundsResponse,
+    SubmissionResponse,
+    TokenInfo,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -14,19 +20,19 @@ class AccountingClient:
         self.base_url = settings.accounting_api_base_url
         self.client = httpx.AsyncClient(timeout=30.0)
 
-    async def get_balance(self, user_address: str, token_id: str) -> dict[str, Any]:
+    async def get_balance(self, user_address: str, token_id: str) -> Balance:
         response = await self.client.get(
             f"{self.base_url}/v1/accounting/balances/{user_address}/{token_id}"
         )
         response.raise_for_status()
-        return response.json()
+        return Balance(**response.json())
 
-    async def get_token_info(self, token_id: str) -> dict[str, Any]:
+    async def get_token_info(self, token_id: str) -> TokenInfo:
         response = await self.client.get(
             f"{self.base_url}/v1/accounting/tokens/{token_id}"
         )
         response.raise_for_status()
-        return response.json()
+        return TokenInfo(**response.json())
 
     async def lock_funds(
         self,
@@ -36,7 +42,7 @@ class AccountingClient:
         amount: int,
         expiry: int,
         signature: str,
-    ) -> dict[str, Any]:
+    ) -> SubmissionResponse:
         payload = {
             "user_address": user_address,
             "service_address": service_address,
@@ -52,20 +58,20 @@ class AccountingClient:
         if response.status_code != 200:
             logger.error(f"Lock funds failed: {response.status_code} - {response.text}")
         response.raise_for_status()
-        return response.json()
+        return SubmissionResponse(**response.json())
 
-    async def unlock_funds(self, user_address: str, lock_id: int) -> dict[str, Any]:
+    async def unlock_funds(self, user_address: str, lock_id: int) -> SubmissionResponse:
         payload = {"user_address": user_address, "lock_id": lock_id}
         response = await self.client.post(
             f"{self.base_url}/v1/accounting/funds/unlock",
             json=payload,
         )
         response.raise_for_status()
-        return response.json()
+        return SubmissionResponse(**response.json())
 
     async def get_locked_funds(
         self, user_address: str, service_address: Optional[str] = None
-    ) -> dict[str, Any]:
+    ) -> LockedFundsResponse:
         params = {}
         if service_address:
             params["service_address"] = service_address
@@ -74,7 +80,7 @@ class AccountingClient:
             params=params,
         )
         response.raise_for_status()
-        return response.json()
+        return LockedFundsResponse(**response.json())
 
     async def relay_execute(
         self,
@@ -83,7 +89,7 @@ class AccountingClient:
         data: str,
         value: int = 0,
         gas_limit: int = 200_000,
-    ) -> dict[str, Any]:
+    ) -> SubmissionResponse:
         payload = {
             "chain_id": chain_id,
             "to": to,
@@ -98,7 +104,7 @@ class AccountingClient:
         if response.status_code != 200:
             logger.error(f"Relay execute failed: {response.status_code} - {response.text}")
         response.raise_for_status()
-        return response.json()
+        return SubmissionResponse(**response.json())
 
     async def relay_settle_swap(
         self,
@@ -107,7 +113,7 @@ class AccountingClient:
         output_token_id: str,
         output_amount: int,
         swap_tx_hash: Optional[str] = None,
-    ) -> dict[str, Any]:
+    ) -> SubmissionResponse:
         payload = {
             "user_address": user_address,
             "lock_id": lock_id,
@@ -123,14 +129,14 @@ class AccountingClient:
         if response.status_code != 200:
             logger.error(f"Relay settle failed: {response.status_code} - {response.text}")
         response.raise_for_status()
-        return response.json()
+        return SubmissionResponse(**response.json())
 
-    async def relay_status(self, tx_hash: str) -> dict[str, Any]:
+    async def relay_status(self, tx_hash: str) -> SubmissionResponse:
         response = await self.client.get(
             f"{self.base_url}/v1/accounting/relay/status/{tx_hash}"
         )
         response.raise_for_status()
-        return response.json()
+        return SubmissionResponse(**response.json())
 
     async def close(self) -> None:
         await self.client.aclose()

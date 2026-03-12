@@ -48,7 +48,10 @@ class SwapExecutor:
             signature=lock_signature,
         )
 
-        submission_id = lock_result.get("submission_id", "")
+        if lock_result.status not in ("submitted", "confirmed", "pending"):
+            raise ValueError(f"Lock submission failed: {lock_result.detail or lock_result.status}")
+
+        submission_id = lock_result.submission_id
 
         swap_id = str(uuid.uuid4())
         now = int(time.time())
@@ -119,14 +122,13 @@ class SwapExecutor:
             logger.warning(f"Failed to poll locked funds for swap {swap.id}: {exc}")
             return self._get_swap(swap.id)
 
-        locks = locked_resp.get("locks", [])
         matched_lock_id = None
-        for lock in locks:
+        for lock in locked_resp.locks:
             if (
-                lock.get("token_id", "").lower() == swap.from_token_id.lower()
-                and str(lock.get("amount", "")) == str(swap.from_amount)
+                lock.token_id.lower() == swap.from_token_id.lower()
+                and str(lock.amount) == str(swap.from_amount)
             ):
-                matched_lock_id = lock.get("lock_id")
+                matched_lock_id = lock.lock_id
                 break
 
         if matched_lock_id is not None:
@@ -151,11 +153,11 @@ class SwapExecutor:
         tx_request = lifi_response.get("transactionRequest", {})
 
         from_info = await self.accounting.get_token_info(swap.from_token_id)
-        needs_approval = from_info.get("token_type") == 1
+        needs_approval = from_info.token_type == 1
 
         if needs_approval:
             self._update_swap(swap.id, status=SwapStatus.APPROVING)
-            token_address = from_info.get("token_address")
+            token_address = from_info.token_address
             if not token_address:
                 self._update_swap(
                     swap.id, status=SwapStatus.APPROVAL_FAILED,
@@ -176,7 +178,7 @@ class SwapExecutor:
                     value=0,
                     gas_limit=100_000,
                 )
-                approval_tx = result.get("tx_hash", "")
+                approval_tx = result.detail or result.submission_id
                 self._update_swap(swap.id, approval_tx_hash=approval_tx)
             except Exception as exc:
                 logger.error(f"Approval failed for swap {swap.id}: {exc}")
@@ -214,7 +216,7 @@ class SwapExecutor:
                 value=value,
                 gas_limit=gas_limit,
             )
-            swap_tx_hash = result.get("tx_hash", "")
+            swap_tx_hash = result.detail or result.submission_id
             tool_used = lifi_response.get("tool", "")
             self._update_swap(
                 swap.id,

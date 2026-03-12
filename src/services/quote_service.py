@@ -32,13 +32,13 @@ class QuoteService:
         from_info = await self.accounting.get_token_info(from_token_id)
         to_info = await self.accounting.get_token_info(to_token_id)
 
-        from_chain_id = from_info.get("chain_id")
-        to_chain_id = to_info.get("chain_id")
-        if not from_chain_id or not to_chain_id:
+        if not from_info.chain_id or not to_info.chain_id:
             raise ValueError("Token chain info not available")
 
-        from_on_chain = self._resolve_on_chain_address(from_info)
-        to_on_chain = self._resolve_on_chain_address(to_info)
+        from_chain_id = from_info.chain_id
+        to_chain_id = to_info.chain_id
+        from_on_chain = from_info.token_address or "0x0000000000000000000000000000000000000000"
+        to_on_chain = to_info.token_address or "0x0000000000000000000000000000000000000000"
 
         lifi_response = await self.lifi.get_quote(
             from_chain=from_chain_id,
@@ -108,13 +108,6 @@ class QuoteService:
         if row is None:
             return None
         return dict(row)
-
-    @staticmethod
-    def _resolve_on_chain_address(token_info: dict) -> str:
-        if token_info.get("token_address"):
-            return token_info["token_address"]
-        return "0x0000000000000000000000000000000000000000"
-
 
 _service_instance: Optional[QuoteService] = None
 

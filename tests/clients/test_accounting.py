@@ -1,8 +1,8 @@
 from src.models.accounting import (
-    AccountingBalance,
-    AccountingLockedFundsResponse,
-    AccountingSubmissionResponse,
-    AccountingTokenInfo,
+    Balance,
+    LockedFundsResponse,
+    SubmissionResponse,
+    TokenInfo,
 )
 
 
@@ -57,16 +57,16 @@ SAMPLE_SUBMISSION = {
 }
 
 
-class TestAccountingTokenInfoModel:
+class TestTokenInfoModel:
     def test_parse_native_token(self):
-        info = AccountingTokenInfo(**SAMPLE_TOKEN_NATIVE)
+        info = TokenInfo(**SAMPLE_TOKEN_NATIVE)
         assert info.token_type == 0
         assert info.token_type_name == "NativeEVM"
         assert info.chain_id == 84532
         assert info.token_address is None
 
     def test_parse_erc20_token(self):
-        info = AccountingTokenInfo(**SAMPLE_TOKEN_ERC20)
+        info = TokenInfo(**SAMPLE_TOKEN_ERC20)
         assert info.token_type == 1
         assert info.token_type_name == "ERC20"
         assert info.chain_id == 84532
@@ -79,15 +79,15 @@ class TestAccountingTokenInfoModel:
             "token_type_name": "NativeEVM",
             "data": "0x00",
         }
-        info = AccountingTokenInfo(**minimal)
+        info = TokenInfo(**minimal)
         assert info.chain_id is None
         assert info.chain_name is None
         assert info.token_address is None
 
 
-class TestAccountingBalanceModel:
+class TestBalanceModel:
     def test_parse_balance(self):
-        bal = AccountingBalance(**SAMPLE_BALANCE)
+        bal = Balance(**SAMPLE_BALANCE)
         assert bal.balance == "1000000000000000000"
         assert bal.token_symbol == "ETH"
         assert bal.chain_id == "84532"
@@ -98,14 +98,14 @@ class TestAccountingBalanceModel:
             "token_id": "0x01",
             "balance": "0",
         }
-        bal = AccountingBalance(**minimal)
+        bal = Balance(**minimal)
         assert bal.token_symbol is None
         assert bal.chain_id is None
 
 
-class TestAccountingLockedFundsModel:
+class TestLockedFundsModel:
     def test_parse_locked_funds(self):
-        resp = AccountingLockedFundsResponse(**SAMPLE_LOCKED_FUNDS)
+        resp = LockedFundsResponse(**SAMPLE_LOCKED_FUNDS)
         assert len(resp.locks) == 1
         assert resp.locks[0].lock_id == 1
         assert resp.locks[0].amount == 500000000000000000
@@ -119,14 +119,14 @@ class TestAccountingLockedFundsModel:
             "locks": [],
             "total_locked": 0,
         }
-        resp = AccountingLockedFundsResponse(**data)
+        resp = LockedFundsResponse(**data)
         assert len(resp.locks) == 0
         assert resp.total_locked == 0
 
 
-class TestAccountingSubmissionModel:
+class TestSubmissionModel:
     def test_parse_submission(self):
-        sub = AccountingSubmissionResponse(**SAMPLE_SUBMISSION)
+        sub = SubmissionResponse(**SAMPLE_SUBMISSION)
         assert sub.submission_id == "sub_abc123"
         assert sub.status == "submitted"
         assert sub.detail is None
@@ -137,5 +137,5 @@ class TestAccountingSubmissionModel:
             "status": "confirmed",
             "detail": "0xdeadbeef",
         }
-        sub = AccountingSubmissionResponse(**data)
+        sub = SubmissionResponse(**data)
         assert sub.detail == "0xdeadbeef"

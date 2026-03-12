@@ -5,7 +5,7 @@ from typing import Optional
 from pydantic import BaseModel
 
 
-class AccountingTokenInfo(BaseModel):
+class TokenInfo(BaseModel):
     token_id: str
     token_type: int
     token_type_name: str
@@ -15,7 +15,7 @@ class AccountingTokenInfo(BaseModel):
     token_address: Optional[str] = None
 
 
-class AccountingBalance(BaseModel):
+class Balance(BaseModel):
     user_address: str
     token_id: str
     balance: str
@@ -23,7 +23,7 @@ class AccountingBalance(BaseModel):
     chain_id: Optional[str] = None
 
 
-class AccountingLockInfo(BaseModel):
+class LockInfo(BaseModel):
     lock_id: int
     user_address: str
     service_address: str
@@ -33,14 +33,14 @@ class AccountingLockInfo(BaseModel):
     is_expired: bool = False
 
 
-class AccountingLockedFundsResponse(BaseModel):
+class LockedFundsResponse(BaseModel):
     user_address: str
     service_address: Optional[str] = None
-    locks: list[AccountingLockInfo]
+    locks: list[LockInfo]
     total_locked: int
 
 
-class AccountingSubmissionResponse(BaseModel):
+class SubmissionResponse(BaseModel):
     submission_id: str
     status: str
     detail: Optional[str] = None

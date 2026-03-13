@@ -101,6 +101,10 @@ class SwapExecutor:
         return self._get_swap(swap_id)
 
     async def _step_confirm_lock(self, swap: SwapRecord) -> SwapRecord:
+        swap = self._get_swap(swap.id)
+        if SwapStatus(swap.status) != SwapStatus.PENDING_LOCK:
+            return swap
+
         now = int(time.time())
         if now - swap.created_at > 120:
             self._update_swap(
@@ -138,6 +142,10 @@ class SwapExecutor:
         return self._get_swap(swap.id)
 
     async def _step_execute(self, swap: SwapRecord) -> SwapRecord:
+        swap = self._get_swap(swap.id)
+        if SwapStatus(swap.status) != SwapStatus.LOCKED:
+            return swap
+
         db = get_db()
         quote_row = db.execute("SELECT * FROM quotes WHERE id = ?", (swap.quote_id,)).fetchone()
         if quote_row is None:
@@ -181,6 +189,10 @@ class SwapExecutor:
         return self._get_swap(swap.id)
 
     async def _step_monitor(self, swap: SwapRecord) -> SwapRecord:
+        swap = self._get_swap(swap.id)
+        if SwapStatus(swap.status) not in (SwapStatus.EXECUTING, SwapStatus.MONITORING):
+            return swap
+
         if not swap.swap_tx_hash:
             self._update_swap(
                 swap.id, status=SwapStatus.SWAP_FAILED,
@@ -229,6 +241,10 @@ class SwapExecutor:
         return self._get_swap(swap.id)
 
     async def _step_settle(self, swap: SwapRecord) -> SwapRecord:
+        swap = self._get_swap(swap.id)
+        if SwapStatus(swap.status) != SwapStatus.SETTLING:
+            return swap
+
         if swap.lock_id is None:
             self._update_swap(
                 swap.id, status=SwapStatus.SETTLE_FAILED,
@@ -257,11 +273,18 @@ class SwapExecutor:
         return self._get_swap(swap.id)
 
     async def _step_refund(self, swap: SwapRecord) -> SwapRecord:
+        swap = self._get_swap(swap.id)
+        status = SwapStatus(swap.status)
+
+        if status == SwapStatus.REFUNDED:
+            return swap
+
         if swap.lock_id is None:
             self._update_swap(swap.id, status=SwapStatus.REFUNDED)
             return self._get_swap(swap.id)
 
-        self._update_swap(swap.id, status=SwapStatus.REFUNDING)
+        if status != SwapStatus.REFUNDING:
+            self._update_swap(swap.id, status=SwapStatus.REFUNDING)
 
         try:
             await self.accounting.unlock_funds(

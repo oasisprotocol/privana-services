@@ -86,7 +86,7 @@ class SwapExecutor:
                 return await self._step_confirm_lock(swap)
             elif status == SwapStatus.LOCKED:
                 return await self._step_execute(swap)
-            elif status in (SwapStatus.EXECUTING, SwapStatus.MONITORING):
+            elif status == SwapStatus.MONITORING:
                 return await self._step_monitor(swap)
             elif status == SwapStatus.SETTLING:
                 return await self._step_settle(swap)
@@ -156,8 +156,6 @@ class SwapExecutor:
         lifi_response = json.loads(quote["lifi_response"])
         tx_request = lifi_response.get("transactionRequest", {})
 
-        self._update_swap(swap.id, status=SwapStatus.EXECUTING)
-
         try:
             to_addr = tx_request.get("to", "")
             calldata = tx_request.get("data", "0x")
@@ -190,7 +188,7 @@ class SwapExecutor:
 
     async def _step_monitor(self, swap: SwapRecord) -> SwapRecord:
         swap = self._get_swap(swap.id)
-        if SwapStatus(swap.status) not in (SwapStatus.EXECUTING, SwapStatus.MONITORING):
+        if SwapStatus(swap.status) != SwapStatus.MONITORING:
             return swap
 
         if not swap.swap_tx_hash:

@@ -315,6 +315,7 @@ class SwapExecutor:
                     raise ValueError(
                         f"Invalid transition: {current.value} → {new_status.value}"
                     )
+                logger.info(f"Swap {swap_id}: {current.value} → {new_status.value}")
         fields["updated_at"] = int(time.time())
         set_clause = ", ".join(f"{k} = ?" for k in fields)
         values = list(fields.values()) + [swap_id]

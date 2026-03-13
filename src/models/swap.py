@@ -45,6 +45,20 @@ class SwapStatus(str, Enum):
         }
 
 
+VALID_TRANSITIONS: dict[SwapStatus, set[SwapStatus]] = {
+    SwapStatus.PENDING_LOCK: {SwapStatus.LOCKED, SwapStatus.SWAP_FAILED},
+    SwapStatus.LOCKED: {SwapStatus.EXECUTING, SwapStatus.SWAP_FAILED},
+    SwapStatus.EXECUTING: {SwapStatus.MONITORING, SwapStatus.SWAP_FAILED},
+    SwapStatus.MONITORING: {SwapStatus.SETTLING, SwapStatus.SWAP_FAILED},
+    SwapStatus.SETTLING: {SwapStatus.COMPLETED, SwapStatus.SETTLE_FAILED},
+    SwapStatus.SWAP_FAILED: {SwapStatus.REFUNDING, SwapStatus.REFUNDED},
+    SwapStatus.SETTLE_FAILED: {SwapStatus.REFUNDING, SwapStatus.REFUNDED},
+    SwapStatus.REFUNDING: {SwapStatus.REFUNDED},
+}
+
+SUBMISSION_ACCEPTED = frozenset({"submitted", "confirmed", "pending"})
+
+
 class QuoteRecord(BaseModel):
     id: str
     user_address: str

@@ -8,7 +8,7 @@ from src.clients.accounting import get_accounting_client
 from src.clients.lifi import get_lifi_client
 from src.config import load_settings
 from src.db import db_write, get_db
-from src.models.swap import SwapRecord, SwapStatus
+from src.models.swap import SUBMISSION_ACCEPTED, VALID_TRANSITIONS, SwapRecord, SwapStatus
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +48,7 @@ class SwapExecutor:
             signature=lock_signature,
         )
 
-        if lock_result.status not in ("submitted", "confirmed", "pending"):
+        if lock_result.status not in SUBMISSION_ACCEPTED:
             raise ValueError(f"Lock submission failed: {lock_result.detail or lock_result.status}")
 
         submission_id = lock_result.submission_id
@@ -284,6 +284,16 @@ class SwapExecutor:
 
     def _update_swap(self, swap_id: str, **fields) -> None:
         db = get_db()
+        if "status" in fields and isinstance(fields["status"], SwapStatus):
+            new_status = fields["status"]
+            row = db.execute("SELECT status FROM swaps WHERE id = ?", (swap_id,)).fetchone()
+            if row is not None:
+                current = SwapStatus(row["status"])
+                allowed = VALID_TRANSITIONS.get(current, set())
+                if new_status not in allowed:
+                    raise ValueError(
+                        f"Invalid transition: {current.value} → {new_status.value}"
+                    )
         fields["updated_at"] = int(time.time())
         set_clause = ", ".join(f"{k} = ?" for k in fields)
         values = list(fields.values()) + [swap_id]

@@ -9,6 +9,7 @@ from src.clients.lifi import get_lifi_client
 from src.config import load_settings
 from src.db import db_write, get_db
 from src.models.api import QuoteResponse
+from src.validation import validate_address, validate_amount, validate_token_id
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +30,11 @@ class QuoteService:
         user_address: str,
         slippage: float = 0.03,
     ) -> QuoteResponse:
+        validate_token_id(from_token_id, "from_token_id")
+        validate_token_id(to_token_id, "to_token_id")
+        validate_amount(from_amount, "from_amount")
+        validate_address(user_address, "user_address")
+
         from_info = await self.accounting.get_token_info(from_token_id)
         to_info = await self.accounting.get_token_info(to_token_id)
 

@@ -33,6 +33,10 @@ class QuoteService:
         validate_amount(from_amount, "from_amount")
         validate_address(user_address, "user_address")
 
+        existing = self._find_existing_quote(user_address, from_token_id, to_token_id, from_amount)
+        if existing is not None:
+            return existing
+
         from_info = await self.accounting.get_token_info(from_token_id)
         to_info = await self.accounting.get_token_info(to_token_id)
 
@@ -105,6 +109,50 @@ class QuoteService:
             tool_used=tool_used,
             approval_address=approval_address,
             expires_at=expires_at,
+        )
+
+    def _find_existing_quote(
+        self,
+        user_address: str,
+        from_token_id: str,
+        to_token_id: str,
+        from_amount: str,
+    ) -> Optional[QuoteResponse]:
+        db = get_db()
+        now = int(time.time())
+        row = db.execute(
+            """SELECT * FROM quotes
+               WHERE user_address = ? AND from_token_id = ? AND to_token_id = ?
+               AND from_amount = ? AND expires_at > ?
+               ORDER BY created_at DESC LIMIT 1""",
+            (user_address.lower(), from_token_id.lower(), to_token_id.lower(), from_amount, now),
+        ).fetchone()
+
+        if row is None:
+            return None
+
+        quote = dict(row)
+        lifi_response = json.loads(quote["lifi_response"])
+        estimate = lifi_response.get("estimate", {})
+        to_amount_gross = estimate.get("toAmount", "0")
+        fee_bps = self.settings.fee_bps
+        fee_amount = (int(to_amount_gross) * fee_bps) // 10_000
+
+        return QuoteResponse(
+            quote_id=quote["id"],
+            from_token_id=quote["from_token_id"],
+            to_token_id=quote["to_token_id"],
+            from_chain_id=quote["from_chain_id"],
+            to_chain_id=quote["to_chain_id"],
+            from_amount=quote["from_amount"],
+            to_amount_gross=to_amount_gross,
+            to_amount_estimate=quote["to_amount_estimate"],
+            to_amount_min=quote["to_amount_min"],
+            fee_bps=fee_bps,
+            fee_amount=str(fee_amount),
+            tool_used=lifi_response.get("tool"),
+            approval_address=quote["approval_address"],
+            expires_at=quote["expires_at"],
         )
 
     def get_stored_quote(self, quote_id: str) -> Optional[dict]:

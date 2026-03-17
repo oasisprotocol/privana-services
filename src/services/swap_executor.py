@@ -8,7 +8,7 @@ from src.clients.accounting import get_accounting_client
 from src.clients.lifi import get_lifi_client
 from src.config import load_settings
 from src.db import db_write, get_db
-from src.models.swap import SwapRecord, SwapStatus
+from src.models.swap import SUBMISSION_ACCEPTED, VALID_TRANSITIONS, SwapRecord, SwapStatus
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +48,7 @@ class SwapExecutor:
             signature=lock_signature,
         )
 
-        if lock_result.status not in ("submitted", "confirmed", "pending"):
+        if lock_result.status not in SUBMISSION_ACCEPTED:
             raise ValueError(f"Lock submission failed: {lock_result.detail or lock_result.status}")
 
         submission_id = lock_result.submission_id
@@ -85,11 +85,7 @@ class SwapExecutor:
             if status == SwapStatus.PENDING_LOCK:
                 return await self._step_confirm_lock(swap)
             elif status == SwapStatus.LOCKED:
-                return await self._step_approve(swap)
-            elif status == SwapStatus.APPROVING:
                 return await self._step_execute(swap)
-            elif status == SwapStatus.EXECUTING:
-                return await self._step_monitor(swap)
             elif status == SwapStatus.MONITORING:
                 return await self._step_monitor(swap)
             elif status == SwapStatus.SETTLING:
@@ -105,6 +101,10 @@ class SwapExecutor:
         return self._get_swap(swap_id)
 
     async def _step_confirm_lock(self, swap: SwapRecord) -> SwapRecord:
+        swap = self._get_swap(swap.id)
+        if SwapStatus(swap.status) != SwapStatus.PENDING_LOCK:
+            return swap
+
         now = int(time.time())
         if now - swap.created_at > 120:
             self._update_swap(
@@ -141,56 +141,11 @@ class SwapExecutor:
 
         return self._get_swap(swap.id)
 
-    async def _step_approve(self, swap: SwapRecord) -> SwapRecord:
-        db = get_db()
-        quote_row = db.execute("SELECT * FROM quotes WHERE id = ?", (swap.quote_id,)).fetchone()
-        if quote_row is None:
-            self._update_swap(swap.id, status=SwapStatus.SWAP_FAILED, error="Quote not found")
-            return self._get_swap(swap.id)
-
-        quote = dict(quote_row)
-        lifi_response = json.loads(quote["lifi_response"])
-        tx_request = lifi_response.get("transactionRequest", {})
-
-        from_info = await self.accounting.get_token_info(swap.from_token_id)
-        needs_approval = from_info.token_type == 1
-
-        if needs_approval:
-            self._update_swap(swap.id, status=SwapStatus.APPROVING)
-            token_address = from_info.token_address
-            if not token_address:
-                self._update_swap(
-                    swap.id, status=SwapStatus.APPROVAL_FAILED,
-                    error="Token address not found"
-                )
-                return self._get_swap(swap.id)
-
-            approval_to = tx_request.get("to", "")
-            approve_calldata = self._encode_erc20_approve(
-                approval_to, int(swap.from_amount)
-            )
-
-            try:
-                result = await self.accounting.relay_execute(
-                    chain_id=swap.from_chain_id,
-                    to=token_address,
-                    data=approve_calldata,
-                    value=0,
-                    gas_limit=100_000,
-                )
-                approval_tx = result.detail or result.submission_id
-                self._update_swap(swap.id, approval_tx_hash=approval_tx)
-            except Exception as exc:
-                logger.error(f"Approval failed for swap {swap.id}: {exc}")
-                self._update_swap(
-                    swap.id, status=SwapStatus.APPROVAL_FAILED,
-                    error=f"Approval relay failed: {exc}"
-                )
-                return self._get_swap(swap.id)
-
-        return await self._step_execute(swap)
-
     async def _step_execute(self, swap: SwapRecord) -> SwapRecord:
+        swap = self._get_swap(swap.id)
+        if SwapStatus(swap.status) != SwapStatus.LOCKED:
+            return swap
+
         db = get_db()
         quote_row = db.execute("SELECT * FROM quotes WHERE id = ?", (swap.quote_id,)).fetchone()
         if quote_row is None:
@@ -200,8 +155,6 @@ class SwapExecutor:
         quote = dict(quote_row)
         lifi_response = json.loads(quote["lifi_response"])
         tx_request = lifi_response.get("transactionRequest", {})
-
-        self._update_swap(swap.id, status=SwapStatus.EXECUTING)
 
         try:
             to_addr = tx_request.get("to", "")
@@ -234,6 +187,10 @@ class SwapExecutor:
         return self._get_swap(swap.id)
 
     async def _step_monitor(self, swap: SwapRecord) -> SwapRecord:
+        swap = self._get_swap(swap.id)
+        if SwapStatus(swap.status) != SwapStatus.MONITORING:
+            return swap
+
         if not swap.swap_tx_hash:
             self._update_swap(
                 swap.id, status=SwapStatus.SWAP_FAILED,
@@ -282,6 +239,10 @@ class SwapExecutor:
         return self._get_swap(swap.id)
 
     async def _step_settle(self, swap: SwapRecord) -> SwapRecord:
+        swap = self._get_swap(swap.id)
+        if SwapStatus(swap.status) != SwapStatus.SETTLING:
+            return swap
+
         if swap.lock_id is None:
             self._update_swap(
                 swap.id, status=SwapStatus.SETTLE_FAILED,
@@ -310,11 +271,18 @@ class SwapExecutor:
         return self._get_swap(swap.id)
 
     async def _step_refund(self, swap: SwapRecord) -> SwapRecord:
+        swap = self._get_swap(swap.id)
+        status = SwapStatus(swap.status)
+
+        if status == SwapStatus.REFUNDED:
+            return swap
+
         if swap.lock_id is None:
             self._update_swap(swap.id, status=SwapStatus.REFUNDED)
             return self._get_swap(swap.id)
 
-        self._update_swap(swap.id, status=SwapStatus.REFUNDING)
+        if status != SwapStatus.REFUNDING:
+            self._update_swap(swap.id, status=SwapStatus.REFUNDING)
 
         try:
             await self.accounting.unlock_funds(
@@ -337,17 +305,21 @@ class SwapExecutor:
 
     def _update_swap(self, swap_id: str, **fields) -> None:
         db = get_db()
+        if "status" in fields and isinstance(fields["status"], SwapStatus):
+            new_status = fields["status"]
+            row = db.execute("SELECT status FROM swaps WHERE id = ?", (swap_id,)).fetchone()
+            if row is not None:
+                current = SwapStatus(row["status"])
+                allowed = VALID_TRANSITIONS.get(current, set())
+                if new_status not in allowed:
+                    raise ValueError(
+                        f"Invalid transition: {current.value} → {new_status.value}"
+                    )
+                logger.info(f"Swap {swap_id}: {current.value} → {new_status.value}")
         fields["updated_at"] = int(time.time())
         set_clause = ", ".join(f"{k} = ?" for k in fields)
         values = list(fields.values()) + [swap_id]
         db_write(db, f"UPDATE swaps SET {set_clause} WHERE id = ?", tuple(values))
-
-    @staticmethod
-    def _encode_erc20_approve(spender: str, amount: int) -> str:
-        selector = "095ea7b3"
-        padded_spender = spender.lower().replace("0x", "").rjust(64, "0")
-        padded_amount = hex(amount)[2:].rjust(64, "0")
-        return "0x" + selector + padded_spender + padded_amount
 
     def get_active_swaps(self) -> list[SwapRecord]:
         db = get_db()

@@ -10,12 +10,9 @@ class SwapStatus(str, Enum):
     QUOTED = "quoted"
     PENDING_LOCK = "pending_lock"
     LOCKED = "locked"
-    APPROVING = "approving"
-    EXECUTING = "executing"
     MONITORING = "monitoring"
     SETTLING = "settling"
     COMPLETED = "completed"
-    APPROVAL_FAILED = "approval_failed"
     SWAP_FAILED = "swap_failed"
     SETTLE_FAILED = "settle_failed"
     REFUNDING = "refunding"
@@ -26,8 +23,6 @@ class SwapStatus(str, Enum):
         return self in {
             SwapStatus.PENDING_LOCK,
             SwapStatus.LOCKED,
-            SwapStatus.APPROVING,
-            SwapStatus.EXECUTING,
             SwapStatus.MONITORING,
             SwapStatus.SETTLING,
             SwapStatus.REFUNDING,
@@ -43,10 +38,22 @@ class SwapStatus(str, Enum):
     @property
     def is_failure(self) -> bool:
         return self in {
-            SwapStatus.APPROVAL_FAILED,
             SwapStatus.SWAP_FAILED,
             SwapStatus.SETTLE_FAILED,
         }
+
+
+VALID_TRANSITIONS: dict[SwapStatus, set[SwapStatus]] = {
+    SwapStatus.PENDING_LOCK: {SwapStatus.LOCKED, SwapStatus.SWAP_FAILED},
+    SwapStatus.LOCKED: {SwapStatus.MONITORING, SwapStatus.SWAP_FAILED},
+    SwapStatus.MONITORING: {SwapStatus.SETTLING, SwapStatus.SWAP_FAILED},
+    SwapStatus.SETTLING: {SwapStatus.COMPLETED, SwapStatus.SETTLE_FAILED},
+    SwapStatus.SWAP_FAILED: {SwapStatus.REFUNDING, SwapStatus.REFUNDED},
+    SwapStatus.SETTLE_FAILED: {SwapStatus.REFUNDING, SwapStatus.REFUNDED},
+    SwapStatus.REFUNDING: {SwapStatus.REFUNDED},
+}
+
+SUBMISSION_ACCEPTED = frozenset({"submitted", "confirmed", "pending"})
 
 
 class QuoteRecord(BaseModel):

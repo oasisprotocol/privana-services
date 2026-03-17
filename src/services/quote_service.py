@@ -13,8 +13,6 @@ from src.validation import validate_address, validate_amount, validate_token_id
 
 logger = logging.getLogger(__name__)
 
-QUOTE_TTL_SECONDS = 30
-
 
 class QuoteService:
     def __init__(self) -> None:
@@ -73,7 +71,7 @@ class QuoteService:
 
         quote_id = str(uuid.uuid4())
         now = int(time.time())
-        expires_at = now + QUOTE_TTL_SECONDS
+        expires_at = now + self.settings.quote_ttl
 
         db = get_db()
         db_write(

@@ -39,6 +39,7 @@ def load_settings(refresh: bool = False) -> Settings:
             lifi_integrator=os.getenv("LIFI_INTEGRATOR", _defaults.lifi_integrator),
             vault_evm_address=os.getenv("VAULT_EVM_ADDRESS", _defaults.vault_evm_address),
             service_address=os.getenv("SERVICE_ADDRESS", _defaults.service_address),
+            quote_ttl=_get_int("QUOTE_TTL", _defaults.quote_ttl),
             fee_bps=_get_int("FEE_BPS", _defaults.fee_bps),
             swap_poll_interval=_get_int("SWAP_POLL_INTERVAL", _defaults.swap_poll_interval),
             same_chain_timeout=_get_int("SAME_CHAIN_TIMEOUT", _defaults.same_chain_timeout),

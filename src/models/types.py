@@ -17,6 +17,7 @@ class Settings:
     vault_evm_address: str = "0x0000000000000000000000000000000000000000"
     service_address: str = "0x0000000000000000000000000000000000000000"
 
+    quote_ttl: int = 30
     fee_bps: int = 10
     swap_poll_interval: int = 5
     same_chain_timeout: int = 300

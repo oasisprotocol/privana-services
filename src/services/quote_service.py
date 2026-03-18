@@ -8,6 +8,7 @@ from src.clients.accounting import get_accounting_client
 from src.clients.lifi import get_lifi_client
 from src.config import load_settings
 from src.db import db_write, get_db
+from src.fees import calculate_fee
 from src.models.api import QuoteResponse
 from src.validation import validate_address, validate_amount, validate_token_id
 
@@ -63,9 +64,7 @@ class QuoteService:
         to_amount_min_str = estimate.get("toAmountMin", to_amount_str)
 
         fee_bps = self.settings.fee_bps
-        to_amount = int(to_amount_str)
-        fee_amount = (to_amount * fee_bps) // 10_000
-        to_amount_after_fee = to_amount - fee_amount
+        to_amount_after_fee, fee_amount = calculate_fee(int(to_amount_str), fee_bps)
         to_amount_min = int(to_amount_min_str) - fee_amount
 
         tool_used = lifi_response.get("tool")
@@ -136,7 +135,7 @@ class QuoteService:
         estimate = lifi_response.get("estimate", {})
         to_amount_gross = estimate.get("toAmount", "0")
         fee_bps = self.settings.fee_bps
-        fee_amount = (int(to_amount_gross) * fee_bps) // 10_000
+        _, fee_amount = calculate_fee(int(to_amount_gross), fee_bps)
 
         return QuoteResponse(
             quote_id=quote["id"],

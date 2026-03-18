@@ -15,11 +15,15 @@ from src.validation import validate_address, validate_amount, validate_token_id
 logger = logging.getLogger(__name__)
 
 
+CLEANUP_INTERVAL = 60
+
+
 class QuoteService:
     def __init__(self) -> None:
         self.settings = load_settings()
         self.accounting = get_accounting_client()
         self.lifi = get_lifi_client()
+        self._last_cleanup = 0
 
     async def get_quote(
         self,
@@ -29,6 +33,7 @@ class QuoteService:
         user_address: str,
         slippage: float = 0.03,
     ) -> QuoteResponse:
+        self.cleanup_expired_quotes()
         validate_token_id(from_token_id, "from_token_id")
         validate_token_id(to_token_id, "to_token_id")
         validate_amount(from_amount, "from_amount")
@@ -153,6 +158,18 @@ class QuoteService:
             approval_address=quote["approval_address"],
             expires_at=quote["expires_at"],
         )
+
+    def cleanup_expired_quotes(self) -> int:
+        now = int(time.time())
+        if now - self._last_cleanup < CLEANUP_INTERVAL:
+            return 0
+        db = get_db()
+        cursor = db_write(db, "DELETE FROM quotes WHERE expires_at < ?", (now,))
+        self._last_cleanup = now
+        deleted = cursor.rowcount
+        if deleted > 0:
+            logger.info(f"Cleaned up {deleted} expired quotes")
+        return deleted
 
     def get_stored_quote(self, quote_id: str) -> Optional[dict]:
         db = get_db()

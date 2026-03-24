@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT
+// https://github.com/oasisprotocol/accounting-module/blob/master/solidity/contracts/Accounting.sol
 pragma solidity ^0.8.24;
 
 interface IAccounting {

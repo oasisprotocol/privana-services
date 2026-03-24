@@ -4,20 +4,12 @@ pragma solidity ^0.8.24;
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "./interfaces/IAccounting.sol";
 
-contract LiqManager is Ownable {
+contract SwapManager is Ownable {
     IAccounting public accounting;
     address public liquidityProvider;
 
-    event Swap(
-        address indexed user,
-        bytes32 indexed inputTokenId,
-        bytes32 indexed outputTokenId,
-        uint256 inputAmount,
-        uint256 outputAmount
-    );
-
     event AccountingUpdated(address indexed newAccounting);
-    event LiquidityProviderUpdated(address indexed newLiqManager);
+    event LiquidityProviderUpdated(address indexed newLiquidityProvider);
 
     error ZeroAddress();
     error ZeroAmount();
@@ -58,8 +50,6 @@ contract LiqManager is Ownable {
             outputNonce,
             outputSignature
         );
-
-        emit Swap(user, inputTokenId, outputTokenId, inputAmount, outputAmount);
     }
 
     function setAccounting(address _accounting) external onlyOwner {

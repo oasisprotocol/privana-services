@@ -20,10 +20,11 @@ class QuoteResponse(BaseModel):
     from_chain_id: int
     to_chain_id: int
     from_amount: str
+    to_amount_gross: str
     to_amount_estimate: str
     to_amount_min: str
-    fee_amount: str
     fee_bps: int
+    fee_amount: str
     tool_used: Optional[str] = None
     approval_address: Optional[str] = None
     expires_at: int

@@ -6,8 +6,6 @@ import httpx
 from src.config import load_settings
 from src.models.accounting import (
     Balance,
-    LockedFundsResponse,
-    SubmissionResponse,
     TokenInfo,
 )
 
@@ -34,109 +32,12 @@ class AccountingClient:
         response.raise_for_status()
         return TokenInfo(**response.json())
 
-    async def lock_funds(
-        self,
-        user_address: str,
-        service_address: str,
-        token_id: str,
-        amount: int,
-        expiry: int,
-        signature: str,
-    ) -> SubmissionResponse:
-        payload = {
-            "user_address": user_address,
-            "service_address": service_address,
-            "token_id": token_id,
-            "amount": amount,
-            "expiry": expiry,
-            "signature": signature,
-        }
-        response = await self.client.post(
-            f"{self.base_url}/v1/accounting/funds/lock",
-            json=payload,
-        )
-        if response.status_code != 200:
-            logger.error(f"Lock funds failed: {response.status_code} - {response.text}")
-        response.raise_for_status()
-        return SubmissionResponse(**response.json())
-
-    async def unlock_funds(self, user_address: str, lock_id: int) -> SubmissionResponse:
-        payload = {"user_address": user_address, "lock_id": lock_id}
-        response = await self.client.post(
-            f"{self.base_url}/v1/accounting/funds/unlock",
-            json=payload,
-        )
-        response.raise_for_status()
-        return SubmissionResponse(**response.json())
-
-    async def get_locked_funds(
-        self, user_address: str, service_address: Optional[str] = None
-    ) -> LockedFundsResponse:
-        params = {}
-        if service_address:
-            params["service_address"] = service_address
+    async def get_transfer_nonce(self, user_address: str) -> int:
         response = await self.client.get(
-            f"{self.base_url}/v1/accounting/funds/locked/{user_address}",
-            params=params,
+            f"{self.base_url}/v1/accounting/funds/transfer/nonce/{user_address}"
         )
         response.raise_for_status()
-        return LockedFundsResponse(**response.json())
-
-    async def relay_execute(
-        self,
-        chain_id: int,
-        to: str,
-        data: str,
-        value: int = 0,
-        gas_limit: int = 200_000,
-    ) -> SubmissionResponse:
-        payload = {
-            "chain_id": chain_id,
-            "to": to,
-            "data": data,
-            "value": value,
-            "gas_limit": gas_limit,
-        }
-        response = await self.client.post(
-            f"{self.base_url}/v1/accounting/relay/execute",
-            json=payload,
-        )
-        if response.status_code != 200:
-            logger.error(f"Relay execute failed: {response.status_code} - {response.text}")
-        response.raise_for_status()
-        return SubmissionResponse(**response.json())
-
-    async def relay_settle_swap(
-        self,
-        user_address: str,
-        lock_id: int,
-        output_token_id: str,
-        output_amount: int,
-        swap_tx_hash: Optional[str] = None,
-    ) -> SubmissionResponse:
-        payload = {
-            "user_address": user_address,
-            "lock_id": lock_id,
-            "output_token_id": output_token_id,
-            "output_amount": output_amount,
-        }
-        if swap_tx_hash:
-            payload["swap_tx_hash"] = swap_tx_hash
-        response = await self.client.post(
-            f"{self.base_url}/v1/accounting/relay/settle-swap",
-            json=payload,
-        )
-        if response.status_code != 200:
-            logger.error(f"Relay settle failed: {response.status_code} - {response.text}")
-        response.raise_for_status()
-        return SubmissionResponse(**response.json())
-
-    async def relay_status(self, tx_hash: str) -> SubmissionResponse:
-        response = await self.client.get(
-            f"{self.base_url}/v1/accounting/relay/status/{tx_hash}"
-        )
-        response.raise_for_status()
-        return SubmissionResponse(**response.json())
+        return response.json()["nonce"]
 
     async def close(self) -> None:
         await self.client.aclose()

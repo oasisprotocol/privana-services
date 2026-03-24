@@ -21,26 +21,3 @@ class Balance(BaseModel):
     balance: str
     token_symbol: Optional[str] = None
     chain_id: Optional[str] = None
-
-
-class LockInfo(BaseModel):
-    lock_id: int
-    user_address: str
-    service_address: str
-    token_id: str
-    amount: int
-    expiry: int
-    is_expired: bool = False
-
-
-class LockedFundsResponse(BaseModel):
-    user_address: str
-    service_address: Optional[str] = None
-    locks: list[LockInfo]
-    total_locked: int
-
-
-class SubmissionResponse(BaseModel):
-    submission_id: str
-    status: str
-    detail: Optional[str] = None

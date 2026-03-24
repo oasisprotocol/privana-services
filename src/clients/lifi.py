@@ -18,45 +18,29 @@ class LiFiClient:
             headers["x-lifi-api-key"] = settings.lifi_api_key
         self.client = httpx.AsyncClient(timeout=30.0, headers=headers)
 
-    async def get_quote(
+    async def get_routes(
         self,
-        from_chain: int,
-        to_chain: int,
-        from_token: str,
-        to_token: str,
+        from_chain_id: int,
+        to_chain_id: int,
+        from_token_address: str,
+        to_token_address: str,
         from_amount: str,
-        from_address: str,
-        slippage: float = 0.03,
     ) -> dict[str, Any]:
-        params = {
-            "fromChain": str(from_chain),
-            "toChain": str(to_chain),
-            "fromToken": from_token,
-            "toToken": to_token,
+        payload = {
+            "fromChainId": from_chain_id,
+            "toChainId": to_chain_id,
+            "fromTokenAddress": from_token_address,
+            "toTokenAddress": to_token_address,
             "fromAmount": from_amount,
-            "fromAddress": from_address,
-            "slippage": str(slippage),
-            "integrator": self.integrator,
         }
-        logger.info(f"Li.Fi quote request: {params}")
-        response = await self.client.get(f"{self.api_url}/quote", params=params)
+        logger.info(f"Li.Fi routes request: {payload}")
+        response = await self.client.post(
+            f"{self.api_url}/advanced/routes", json=payload
+        )
         if response.status_code != 200:
-            logger.error(f"Li.Fi quote failed: {response.status_code} - {response.text}")
-        response.raise_for_status()
-        return response.json()
-
-    async def get_status(
-        self,
-        tx_hash: str,
-        from_chain: Optional[int] = None,
-        to_chain: Optional[int] = None,
-    ) -> dict[str, Any]:
-        params: dict[str, str] = {"txHash": tx_hash}
-        if from_chain is not None:
-            params["fromChain"] = str(from_chain)
-        if to_chain is not None:
-            params["toChain"] = str(to_chain)
-        response = await self.client.get(f"{self.api_url}/status", params=params)
+            logger.error(
+                f"Li.Fi routes failed: {response.status_code} - {response.text}"
+            )
         response.raise_for_status()
         return response.json()
 

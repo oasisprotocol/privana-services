@@ -20,10 +20,14 @@ _ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 
 def _validate_settings() -> None:
     errors = []
-    if settings.vault_evm_address == _ZERO_ADDRESS:
-        errors.append("VAULT_EVM_ADDRESS is not set")
-    if settings.service_address == _ZERO_ADDRESS:
-        errors.append("SERVICE_ADDRESS is not set")
+    if settings.liquidity_provider_address == _ZERO_ADDRESS:
+        errors.append("LIQUIDITY_PROVIDER_ADDRESS is not set")
+    if not settings.liquidity_provider_private_key:
+        errors.append("LIQUIDITY_PROVIDER_PRIVATE_KEY is not set")
+    if settings.accounting_contract_address == _ZERO_ADDRESS:
+        errors.append("ACCOUNTING_CONTRACT_ADDRESS is not set")
+    if settings.liq_manager_contract_address == _ZERO_ADDRESS:
+        errors.append("LIQ_MANAGER_CONTRACT_ADDRESS is not set")
     if not settings.accounting_api_base_url:
         errors.append("ACCOUNTING_API_BASE_URL is not set")
     if errors and settings.environment.lower() != "development":
@@ -39,20 +43,13 @@ def _validate_settings() -> None:
 async def lifespan(_app: FastAPI):
     from src.clients.accounting import get_accounting_client
     from src.clients.lifi import get_lifi_client
-    from src.services.status_monitor import get_status_monitor
 
     logger.info("FlexVaults Swap starting...")
 
     _validate_settings()
     get_db()
 
-    monitor = get_status_monitor()
-    await monitor.start()
-    logger.info("Status monitor started")
-
     yield
-
-    await monitor.stop()
 
     try:
         await get_accounting_client().close()

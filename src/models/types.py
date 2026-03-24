@@ -14,11 +14,12 @@ class Settings:
     lifi_api_url: str = "https://li.quest/v1"
     lifi_integrator: str = "flexvaults"
 
-    vault_evm_address: str = "0x0000000000000000000000000000000000000000"
-    service_address: str = "0x0000000000000000000000000000000000000000"
+    liquidity_provider_private_key: str = ""
+    liquidity_provider_address: str = "0x0000000000000000000000000000000000000000"
+    accounting_contract_address: str = "0x0000000000000000000000000000000000000000"
+    accounting_chain_id: int = 23295
+    liq_manager_contract_address: str = "0x0000000000000000000000000000000000000000"
+    sapphire_rpc_url: str = "https://testnet.sapphire.oasis.io"
 
     quote_ttl: int = 30
     fee_bps: int = 10
-    swap_poll_interval: int = 5
-    same_chain_timeout: int = 300
-    cross_chain_timeout: int = 1800

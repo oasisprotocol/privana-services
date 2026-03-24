@@ -1,4 +1,3 @@
-import json
 import logging
 import time
 import uuid
@@ -39,7 +38,7 @@ class QuoteService:
         validate_amount(from_amount, "from_amount")
         validate_address(user_address, "user_address")
 
-        existing = self._find_existing_quote(user_address, from_token_id, to_token_id, from_amount)
+        existing = await self._find_existing_quote(user_address, from_token_id, to_token_id, from_amount)
         if existing is not None:
             return existing
 
@@ -54,28 +53,31 @@ class QuoteService:
         from_on_chain = from_info.token_address or "0x0000000000000000000000000000000000000000"
         to_on_chain = to_info.token_address or "0x0000000000000000000000000000000000000000"
 
-        lifi_response = await self.lifi.get_quote(
-            from_chain=from_chain_id,
-            to_chain=to_chain_id,
-            from_token=from_on_chain,
-            to_token=to_on_chain,
+        lifi_response = await self.lifi.get_routes(
+            from_chain_id=from_chain_id,
+            to_chain_id=to_chain_id,
+            from_token_address=from_on_chain,
+            to_token_address=to_on_chain,
             from_amount=from_amount,
-            from_address=self.settings.vault_evm_address,
-            slippage=slippage,
         )
 
-        estimate = lifi_response.get("estimate", {})
-        to_amount_str = estimate.get("toAmount", "0")
-        to_amount_min_str = estimate.get("toAmountMin", to_amount_str)
+        routes = lifi_response.get("routes", [])
+        if not routes:
+            raise ValueError("No routes available for this swap")
+        best_route = routes[0]
+        to_amount_str = best_route.get("toAmount", "0")
+        to_amount_min_str = best_route.get("toAmountMin", to_amount_str)
+        route_tool = None
+        steps = best_route.get("steps", [])
+        if steps:
+            route_tool = steps[0].get("tool")
 
         fee_bps = self.settings.fee_bps
         to_amount_after_fee, fee_amount = calculate_fee(int(to_amount_str), fee_bps)
         to_amount_min = int(to_amount_min_str) - fee_amount
 
-        tool_used = lifi_response.get("tool")
-
-        tx_request = lifi_response.get("transactionRequest", {})
-        approval_address = tx_request.get("to")
+        transfer_nonce = await self.accounting.get_transfer_nonce(user_address)
+        liquidity_provider = self.settings.liquidity_provider_address
 
         quote_id = str(uuid.uuid4())
         now = int(time.time())
@@ -86,15 +88,14 @@ class QuoteService:
             db,
             """INSERT INTO quotes
                (id, user_address, from_token_id, to_token_id, from_chain_id, to_chain_id,
-                from_amount, to_amount_estimate, to_amount_min, lifi_response,
-                approval_address, expires_at, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                from_amount, to_amount_gross, to_amount_estimate, to_amount_min,
+                route_tool, liquidity_provider, expires_at, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 quote_id, user_address.lower(), from_token_id.lower(), to_token_id.lower(),
                 from_chain_id, to_chain_id,
-                from_amount, str(to_amount_after_fee), str(max(to_amount_min, 0)),
-                json.dumps(lifi_response),
-                approval_address, expires_at, now,
+                from_amount, to_amount_str, str(to_amount_after_fee), str(max(to_amount_min, 0)),
+                route_tool, liquidity_provider, expires_at, now,
             ),
         )
 
@@ -110,12 +111,13 @@ class QuoteService:
             to_amount_min=str(max(to_amount_min, 0)),
             fee_bps=fee_bps,
             fee_amount=str(fee_amount),
-            tool_used=tool_used,
-            approval_address=approval_address,
+            tool_used=route_tool,
+            liquidity_provider=liquidity_provider,
+            transfer_nonce=transfer_nonce,
             expires_at=expires_at,
         )
 
-    def _find_existing_quote(
+    async def _find_existing_quote(
         self,
         user_address: str,
         from_token_id: str,
@@ -136,11 +138,9 @@ class QuoteService:
             return None
 
         quote = dict(row)
-        lifi_response = json.loads(quote["lifi_response"])
-        estimate = lifi_response.get("estimate", {})
-        to_amount_gross = estimate.get("toAmount", "0")
         fee_bps = self.settings.fee_bps
-        _, fee_amount = calculate_fee(int(to_amount_gross), fee_bps)
+        _, fee_amount = calculate_fee(int(quote["to_amount_gross"]), fee_bps)
+        transfer_nonce = await self.accounting.get_transfer_nonce(user_address)
 
         return QuoteResponse(
             quote_id=quote["id"],
@@ -149,13 +149,14 @@ class QuoteService:
             from_chain_id=quote["from_chain_id"],
             to_chain_id=quote["to_chain_id"],
             from_amount=quote["from_amount"],
-            to_amount_gross=to_amount_gross,
+            to_amount_gross=quote["to_amount_gross"],
             to_amount_estimate=quote["to_amount_estimate"],
             to_amount_min=quote["to_amount_min"],
             fee_bps=fee_bps,
             fee_amount=str(fee_amount),
-            tool_used=lifi_response.get("tool"),
-            approval_address=quote["approval_address"],
+            tool_used=quote["route_tool"],
+            liquidity_provider=quote["liquidity_provider"],
+            transfer_nonce=transfer_nonce,
             expires_at=quote["expires_at"],
         )
 

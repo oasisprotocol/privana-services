@@ -99,3 +99,9 @@ data/
 *.db
 *.db-journal
 *.db-wal
+
+# Solidity / Hardhat
+solidity/node_modules/
+solidity/artifacts/
+solidity/cache/
+solidity/typechain-types/

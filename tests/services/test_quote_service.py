@@ -245,6 +245,7 @@ class TestGetQuote:
             liquidity_provider_address="0x152E6a7125665764a4F1F1df80E8f5D49Bf0239c",
         )
         service._last_cleanup = 0
+        service._token_map = {}
 
         service.accounting = MagicMock()
         service.accounting.get_transfer_nonce = AsyncMock(return_value=5)

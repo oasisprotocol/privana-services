@@ -16,16 +16,6 @@ logger = logging.getLogger(__name__)
 
 CLEANUP_INTERVAL = 60
 
-TESTNET_TO_MAINNET = {
-    84532: {
-        "chain_id": 1,
-        "tokens": {
-            "0x8eEDCff0b07609Cfb5e2775dFf21EDbACc30D0df": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
-            "0xA9B8D8039cb3FF9d9Fff6decD18EA7bb792e51D3": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
-        },
-    },
-}
-
 
 class QuoteService:
     def __init__(self) -> None:
@@ -63,25 +53,11 @@ class QuoteService:
         from_on_chain = from_info.token_address or "0x0000000000000000000000000000000000000000"
         to_on_chain = to_info.token_address or "0x0000000000000000000000000000000000000000"
 
-        lifi_from_chain = from_chain_id
-        lifi_to_chain = to_chain_id
-        lifi_from_token = from_on_chain
-        lifi_to_token = to_on_chain
-
-        if from_chain_id in TESTNET_TO_MAINNET:
-            mapping = TESTNET_TO_MAINNET[from_chain_id]
-            lifi_from_chain = mapping["chain_id"]
-            lifi_from_token = mapping["tokens"].get(from_on_chain, from_on_chain)
-        if to_chain_id in TESTNET_TO_MAINNET:
-            mapping = TESTNET_TO_MAINNET[to_chain_id]
-            lifi_to_chain = mapping["chain_id"]
-            lifi_to_token = mapping["tokens"].get(to_on_chain, to_on_chain)
-
         lifi_response = await self.lifi.get_routes(
-            from_chain_id=lifi_from_chain,
-            to_chain_id=lifi_to_chain,
-            from_token_address=lifi_from_token,
-            to_token_address=lifi_to_token,
+            from_chain_id=from_chain_id,
+            to_chain_id=to_chain_id,
+            from_token_address=from_on_chain,
+            to_token_address=to_on_chain,
             from_amount=from_amount,
         )
 

@@ -21,5 +21,6 @@ class Settings:
     liq_manager_contract_address: str = "0x0000000000000000000000000000000000000000"
     sapphire_rpc_url: str = "https://testnet.sapphire.oasis.io"
 
-    quote_ttl: int = 30
+    quote_ttl: int = 60
     fee_bps: int = 10
+    max_swap_amount_usd: int = 100_000

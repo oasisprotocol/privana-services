@@ -24,3 +24,4 @@ class Settings:
     quote_ttl: int = 60
     fee_bps: int = 10
     max_swap_amount_usd: int = 100_000
+    lifi_token_map: str = ""

@@ -1,3 +1,4 @@
+import json
 import logging
 import time
 import uuid
@@ -17,12 +18,23 @@ logger = logging.getLogger(__name__)
 CLEANUP_INTERVAL = 60
 
 
+def _parse_token_map(raw: str) -> dict:
+    if not raw.strip():
+        return {}
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        logger.warning("Failed to parse LIFI_TOKEN_MAP, ignoring")
+        return {}
+
+
 class QuoteService:
     def __init__(self) -> None:
         self.settings = load_settings()
         self.accounting = get_accounting_client()
         self.lifi = get_lifi_client()
         self._last_cleanup = 0
+        self._token_map = _parse_token_map(self.settings.lifi_token_map)
 
     async def get_quote(
         self,
@@ -53,11 +65,27 @@ class QuoteService:
         from_on_chain = from_info.token_address or "0x0000000000000000000000000000000000000000"
         to_on_chain = to_info.token_address or "0x0000000000000000000000000000000000000000"
 
+        lifi_from_chain = from_chain_id
+        lifi_to_chain = to_chain_id
+        lifi_from_token = from_on_chain
+        lifi_to_token = to_on_chain
+
+        chain_key = str(from_chain_id)
+        if chain_key in self._token_map:
+            mapping = self._token_map[chain_key]
+            lifi_from_chain = mapping.get("chain_id", from_chain_id)
+            lifi_from_token = mapping.get("tokens", {}).get(from_on_chain, from_on_chain)
+        chain_key = str(to_chain_id)
+        if chain_key in self._token_map:
+            mapping = self._token_map[chain_key]
+            lifi_to_chain = mapping.get("chain_id", to_chain_id)
+            lifi_to_token = mapping.get("tokens", {}).get(to_on_chain, to_on_chain)
+
         lifi_response = await self.lifi.get_routes(
-            from_chain_id=from_chain_id,
-            to_chain_id=to_chain_id,
-            from_token_address=from_on_chain,
-            to_token_address=to_on_chain,
+            from_chain_id=lifi_from_chain,
+            to_chain_id=lifi_to_chain,
+            from_token_address=lifi_from_token,
+            to_token_address=lifi_to_token,
             from_amount=from_amount,
         )
 

@@ -60,6 +60,7 @@ def load_settings(refresh: bool = False) -> Settings:
             quote_ttl=_get_int("QUOTE_TTL", _defaults.quote_ttl),
             fee_bps=_get_int("FEE_BPS", _defaults.fee_bps),
             max_swap_amount_usd=_get_int("MAX_SWAP_AMOUNT_USD", _defaults.max_swap_amount_usd),
+            lifi_token_map=os.getenv("LIFI_TOKEN_MAP", _defaults.lifi_token_map),
         )
     return _settings
 

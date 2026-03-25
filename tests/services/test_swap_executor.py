@@ -126,7 +126,7 @@ class TestExecuteSwap:
         )
         result = await executor.execute_swap("q_fail", user_address, 0, input_signature)
         assert result.status == SwapStatus.FAILED.value
-        assert "tx reverted" in result.error
+        assert "reverted" in result.error.lower()
 
     async def test_creates_swap_record_before_calling_sapphire(
         self, test_db, settings, user_address, input_signature

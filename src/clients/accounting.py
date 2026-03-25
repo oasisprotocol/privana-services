@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from typing import Optional
 
@@ -11,6 +12,22 @@ from src.models.accounting import (
 
 logger = logging.getLogger(__name__)
 
+MAX_RETRIES = 3
+RETRY_DELAY = 1.0
+
+
+async def _request_with_retry(client: httpx.AsyncClient, method: str, url: str, **kwargs) -> httpx.Response:
+    for attempt in range(MAX_RETRIES):
+        try:
+            response = await client.request(method, url, **kwargs)
+            response.raise_for_status()
+            return response
+        except (httpx.ConnectError, httpx.ReadError, httpx.RemoteProtocolError) as exc:
+            if attempt == MAX_RETRIES - 1:
+                raise
+            logger.warning(f"Accounting API request failed (attempt {attempt + 1}), retrying: {exc}")
+            await asyncio.sleep(RETRY_DELAY * (attempt + 1))
+
 
 class AccountingClient:
     def __init__(self) -> None:
@@ -19,24 +36,24 @@ class AccountingClient:
         self.client = httpx.AsyncClient(timeout=30.0)
 
     async def get_balance(self, user_address: str, token_id: str) -> Balance:
-        response = await self.client.get(
-            f"{self.base_url}/v1/accounting/balances/{user_address}/{token_id}"
+        response = await _request_with_retry(
+            self.client, "GET",
+            f"{self.base_url}/v1/accounting/balances/{user_address}/{token_id}",
         )
-        response.raise_for_status()
         return Balance(**response.json())
 
     async def get_token_info(self, token_id: str) -> TokenInfo:
-        response = await self.client.get(
-            f"{self.base_url}/v1/accounting/tokens/{token_id}"
+        response = await _request_with_retry(
+            self.client, "GET",
+            f"{self.base_url}/v1/accounting/tokens/{token_id}",
         )
-        response.raise_for_status()
         return TokenInfo(**response.json())
 
     async def get_transfer_nonce(self, user_address: str) -> int:
-        response = await self.client.get(
-            f"{self.base_url}/v1/accounting/funds/transfer/nonce/{user_address}"
+        response = await _request_with_retry(
+            self.client, "GET",
+            f"{self.base_url}/v1/accounting/funds/transfer/nonce/{user_address}",
         )
-        response.raise_for_status()
         return response.json()["nonce"]
 
     async def close(self) -> None:

@@ -59,6 +59,26 @@ async def _get_balance(c: httpx.AsyncClient, siwe: str, jwt: str, address: str, 
     return int(r.json().get("balance", "0"))
 
 
+@pytest.fixture(autouse=True)
+def _reset_singletons():
+    import src.clients.accounting as acct_mod
+    import src.clients.lifi as lifi_mod
+    import src.clients.sapphire as saph_mod
+    import src.services.quote_service as qs_mod
+    import src.services.swap_executor as se_mod
+    acct_mod._client_instance = None
+    lifi_mod._client_instance = None
+    saph_mod._client_instance = None
+    qs_mod._service_instance = None
+    se_mod._executor_instance = None
+    yield
+    acct_mod._client_instance = None
+    lifi_mod._client_instance = None
+    saph_mod._client_instance = None
+    qs_mod._service_instance = None
+    se_mod._executor_instance = None
+
+
 @pytest.fixture
 async def api_client():
     transport = httpx.ASGITransport(app=app)
@@ -67,18 +87,23 @@ async def api_client():
 
 
 @pytest.fixture
-async def accounting_auth():
-    async with httpx.AsyncClient(timeout=15) as c:
-        try:
-            user_siwe, user_jwt = await _siwe_login(c, TEST_USER_ADDRESS, TEST_USER_PK)
-            lp_siwe, lp_jwt = await _siwe_login(c, LP_ADDRESS, LP_PK)
-        except Exception:
-            pytest.skip("Accounting API unavailable")
-        yield {
-            "client": c,
-            "user_siwe": user_siwe, "user_jwt": user_jwt,
-            "lp_siwe": lp_siwe, "lp_jwt": lp_jwt,
-        }
+async def acct_client():
+    async with httpx.AsyncClient(timeout=30) as c:
+        yield c
+
+
+@pytest.fixture
+async def accounting_auth(acct_client):
+    try:
+        user_siwe, user_jwt = await _siwe_login(acct_client, TEST_USER_ADDRESS, TEST_USER_PK)
+        lp_siwe, lp_jwt = await _siwe_login(acct_client, LP_ADDRESS, LP_PK)
+    except Exception:
+        pytest.skip("Accounting API unavailable")
+    return {
+        "client": acct_client,
+        "user_siwe": user_siwe, "user_jwt": user_jwt,
+        "lp_siwe": lp_siwe, "lp_jwt": lp_jwt,
+    }
 
 
 class TestHealthCheck:

@@ -101,32 +101,32 @@ class TestAccountingClient:
         return resp
 
     async def test_get_token_info_returns_token_info(self, client, mock_http_client):
-        mock_http_client.get.return_value = self._mock_response(SAMPLE_TOKEN_ERC20)
+        mock_http_client.request.return_value = self._mock_response(SAMPLE_TOKEN_ERC20)
 
         result = await client.get_token_info("0xabc123")
         assert isinstance(result, TokenInfo)
         assert result.token_type == 1
         assert result.token_type_name == "ERC20"
-        mock_http_client.get.assert_called_once_with(
-            "http://test:8000/v1/accounting/tokens/0xabc123"
+        mock_http_client.request.assert_called_once_with(
+            "GET", "http://test:8000/v1/accounting/tokens/0xabc123"
         )
 
     async def test_get_transfer_nonce_returns_int(self, client, mock_http_client):
-        mock_http_client.get.return_value = self._mock_response({"nonce": 42})
+        mock_http_client.request.return_value = self._mock_response({"nonce": 42})
 
         result = await client.get_transfer_nonce("0xuser")
         assert result == 42
         assert isinstance(result, int)
-        mock_http_client.get.assert_called_once_with(
-            "http://test:8000/v1/accounting/funds/transfer/nonce/0xuser"
+        mock_http_client.request.assert_called_once_with(
+            "GET", "http://test:8000/v1/accounting/funds/transfer/nonce/0xuser"
         )
 
     async def test_get_balance_returns_balance(self, client, mock_http_client):
-        mock_http_client.get.return_value = self._mock_response(SAMPLE_BALANCE)
+        mock_http_client.request.return_value = self._mock_response(SAMPLE_BALANCE)
 
         result = await client.get_balance("0xuser", "0xtoken")
         assert isinstance(result, Balance)
         assert result.balance == "1000000000000000000"
-        mock_http_client.get.assert_called_once_with(
-            "http://test:8000/v1/accounting/balances/0xuser/0xtoken"
+        mock_http_client.request.assert_called_once_with(
+            "GET", "http://test:8000/v1/accounting/balances/0xuser/0xtoken"
         )

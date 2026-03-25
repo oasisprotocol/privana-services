@@ -2,9 +2,8 @@ name: CI Tests
 
 on:
   push:
-    branches: [master, feat/*]
-  pull_request:
     branches: [master]
+  pull_request:
 
 jobs:
   unit-tests:

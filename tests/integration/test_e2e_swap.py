@@ -214,6 +214,7 @@ class TestSwapEndpoint:
         assert result["status"] == "completed"
         assert result["tx_hash"] is not None
         assert result["tx_hash"].startswith("0x")
+        print(f"\n  USDC→WETH swap tx: {result['tx_hash']}")
 
         auth2 = {}
         auth2["user_siwe"], auth2["user_jwt"] = await _siwe_login(c, TEST_USER_ADDRESS, TEST_USER_PK)
@@ -273,6 +274,7 @@ class TestSwapEndpoint:
         result = r.json()
         assert result["status"] == "completed"
         assert result["tx_hash"] is not None
+        print(f"\n  WETH→USDC swap tx: {result['tx_hash']}")
 
     async def test_expired_quote_returns_400(self, api_client):
         r = await api_client.post("/v1/swap", json={
@@ -342,6 +344,7 @@ class TestSwapStatus:
         assert status["swap_tx_hash"] is not None
         assert status["from_token_id"] == USDC_TOKEN_ID.lower()
         assert status["to_token_id"] == WETH_TOKEN_ID.lower()
+        print(f"\n  Status check swap tx: {status['swap_tx_hash']}")
 
     async def test_nonexistent_swap_returns_404(self, api_client):
         r = await api_client.get("/v1/swap/nonexistent-id/status")

@@ -1,14 +1,15 @@
 import os
+from datetime import datetime, timedelta, timezone
 
 import httpx
 import pytest
 from dotenv import load_dotenv
 from eth_account import Account
 from eth_account.messages import encode_defunct
-from datetime import datetime, timezone, timedelta
 
 load_dotenv()
 
+from src.main import app
 from src.services.eip712 import sign_transfer
 
 ACCOUNTING_API = os.getenv("ACCOUNTING_API_BASE_URL", "https://flexvaults-staging.rofl.build")
@@ -22,8 +23,6 @@ TEST_USER_PK = "0x7b07a59f24f1900ec4e6ac3e521c1acd2cca3518f717abda1dc8bbcbbc344c
 
 USDC_TOKEN_ID = "0x330ba47d00c7ce3018deee017b319fd7cc6473a2ddc9e6eba6ebb4207be15279"
 WETH_TOKEN_ID = "0x335b5cccd1e63b2fe79863a0db73fce430e4e66902e2b78424f8662621e29fb7"
-
-API_BASE = "http://localhost:8001"
 
 pytestmark = pytest.mark.skipif(
     not LP_PK or not LP_ADDRESS,
@@ -62,10 +61,8 @@ async def _get_balance(c: httpx.AsyncClient, siwe: str, jwt: str, address: str, 
 
 @pytest.fixture
 async def api_client():
-    async with httpx.AsyncClient(timeout=120, base_url=API_BASE) as c:
-        r = await c.get("/health")
-        if r.status_code != 200:
-            pytest.skip("Swap API not running on localhost:8001")
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, timeout=120, base_url="http://test") as c:
         yield c
 
 

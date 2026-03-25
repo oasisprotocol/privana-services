@@ -1,6 +1,6 @@
-import json
 import sqlite3
 import time
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -22,7 +22,7 @@ def test_db():
     db_module._connection = None
 
 
-def _insert_quote(conn: sqlite3.Connection, quote_id: str, expires_at: int, **overrides) -> None:
+def _insert_quote(conn, quote_id, expires_at, **overrides):
     now = int(time.time())
     defaults = {
         "user_address": "0xuser",
@@ -31,10 +31,11 @@ def _insert_quote(conn: sqlite3.Connection, quote_id: str, expires_at: int, **ov
         "from_chain_id": 1,
         "to_chain_id": 1,
         "from_amount": "1000000",
+        "to_amount_gross": "1000000",
         "to_amount_estimate": "990000",
         "to_amount_min": "980000",
-        "lifi_response": json.dumps({"estimate": {"toAmount": "1000000", "toAmountMin": "990000"}, "tool": "uniswap"}),
-        "approval_address": None,
+        "route_tool": "uniswap",
+        "liquidity_provider": "0xlp",
         "created_at": now,
     }
     defaults.update(overrides)
@@ -42,14 +43,16 @@ def _insert_quote(conn: sqlite3.Connection, quote_id: str, expires_at: int, **ov
         conn,
         """INSERT INTO quotes
            (id, user_address, from_token_id, to_token_id, from_chain_id, to_chain_id,
-            from_amount, to_amount_estimate, to_amount_min, lifi_response,
-            approval_address, expires_at, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            from_amount, to_amount_gross, to_amount_estimate, to_amount_min,
+            route_tool, liquidity_provider, expires_at, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
-            quote_id, defaults["user_address"], defaults["from_token_id"], defaults["to_token_id"],
-            defaults["from_chain_id"], defaults["to_chain_id"], defaults["from_amount"],
-            defaults["to_amount_estimate"], defaults["to_amount_min"], defaults["lifi_response"],
-            defaults["approval_address"], expires_at, defaults["created_at"],
+            quote_id, defaults["user_address"], defaults["from_token_id"],
+            defaults["to_token_id"], defaults["from_chain_id"], defaults["to_chain_id"],
+            defaults["from_amount"], defaults["to_amount_gross"],
+            defaults["to_amount_estimate"], defaults["to_amount_min"],
+            defaults["route_tool"], defaults["liquidity_provider"],
+            expires_at, defaults["created_at"],
         ),
     )
 
@@ -157,35 +160,37 @@ class TestQuoteDeduplication:
         service = QuoteService.__new__(QuoteService)
         service.settings = Settings()
         service._last_cleanup = 0
+        service.accounting = MagicMock()
+        service.accounting.get_transfer_nonce = AsyncMock(return_value=0)
         return service
 
-    def test_returns_existing_unexpired_quote(self, test_db):
+    async def test_returns_existing_unexpired_quote(self, test_db):
         future = int(time.time()) + 300
         _insert_quote(test_db, "q1", expires_at=future)
         service = self._make_service()
-        result = service._find_existing_quote("0xuser", "0xaaa", "0xbbb", "1000000")
+        result = await service._find_existing_quote("0xuser", "0xaaa", "0xbbb", "1000000")
         assert result is not None
         assert result.quote_id == "q1"
 
-    def test_returns_none_for_expired_quote(self, test_db):
+    async def test_returns_none_for_expired_quote(self, test_db):
         past = int(time.time()) - 10
         _insert_quote(test_db, "q2", expires_at=past)
         service = self._make_service()
-        result = service._find_existing_quote("0xuser", "0xaaa", "0xbbb", "1000000")
+        result = await service._find_existing_quote("0xuser", "0xaaa", "0xbbb", "1000000")
         assert result is None
 
-    def test_returns_none_for_different_user(self, test_db):
+    async def test_returns_none_for_different_user(self, test_db):
         future = int(time.time()) + 300
         _insert_quote(test_db, "q3", expires_at=future, user_address="0xother")
         service = self._make_service()
-        result = service._find_existing_quote("0xuser", "0xaaa", "0xbbb", "1000000")
+        result = await service._find_existing_quote("0xuser", "0xaaa", "0xbbb", "1000000")
         assert result is None
 
-    def test_returns_none_for_different_amount(self, test_db):
+    async def test_returns_none_for_different_amount(self, test_db):
         future = int(time.time()) + 300
         _insert_quote(test_db, "q4", expires_at=future)
         service = self._make_service()
-        result = service._find_existing_quote("0xuser", "0xaaa", "0xbbb", "9999999")
+        result = await service._find_existing_quote("0xuser", "0xaaa", "0xbbb", "9999999")
         assert result is None
 
 
@@ -228,3 +233,101 @@ class TestExpiredQuoteCleanup:
         assert deleted == 0
         row = test_db.execute("SELECT COUNT(*) as cnt FROM quotes").fetchone()
         assert row["cnt"] == 1
+
+
+class TestGetQuote:
+    def _make_service(self):
+        from src.services.quote_service import QuoteService
+        service = QuoteService.__new__(QuoteService)
+        service.settings = Settings(
+            fee_bps=10,
+            quote_ttl=30,
+            liquidity_provider_address="0x152E6a7125665764a4F1F1df80E8f5D49Bf0239c",
+        )
+        service._last_cleanup = 0
+
+        service.accounting = MagicMock()
+        service.accounting.get_transfer_nonce = AsyncMock(return_value=5)
+
+        from src.models.accounting import TokenInfo
+        from_token = TokenInfo(
+            token_id="0xaaa",
+            token_type=1,
+            token_type_name="ERC20",
+            data="0x00",
+            chain_id=84532,
+            chain_name="Base Sepolia",
+            token_address="0x8eEDCff0b07609Cfb5e2775dFf21EDbACc30D0df",
+        )
+        to_token = TokenInfo(
+            token_id="0xbbb",
+            token_type=1,
+            token_type_name="ERC20",
+            data="0x00",
+            chain_id=84532,
+            chain_name="Base Sepolia",
+            token_address="0xA9B8D8039cb3FF9d9Fff6decD18EA7bb792e51D3",
+        )
+        service.accounting.get_token_info = AsyncMock(side_effect=[from_token, to_token])
+
+        service.lifi = MagicMock()
+        service.lifi.get_routes = AsyncMock(return_value={
+            "routes": [
+                {
+                    "toAmount": "2000000000000000000",
+                    "toAmountMin": "1950000000000000000",
+                    "steps": [{"tool": "uniswap"}],
+                }
+            ]
+        })
+
+        return service
+
+    async def test_successful_quote_returns_all_fields(self, test_db):
+        service = self._make_service()
+        result = await service.get_quote(
+            from_token_id="0xaaa",
+            to_token_id="0xbbb",
+            from_amount="1000000",
+            user_address="0x" + "a" * 40,
+        )
+        assert result.quote_id is not None
+        assert result.from_token_id == "0xaaa"
+        assert result.to_token_id == "0xbbb"
+        assert result.from_chain_id == 84532
+        assert result.to_chain_id == 84532
+        assert result.from_amount == "1000000"
+        assert result.to_amount_gross == "2000000000000000000"
+        assert int(result.to_amount_estimate) > 0
+        assert int(result.to_amount_min) > 0
+        assert result.fee_bps == 10
+        assert int(result.fee_amount) > 0
+        assert result.tool_used == "uniswap"
+        assert result.liquidity_provider == "0x152E6a7125665764a4F1F1df80E8f5D49Bf0239c"
+        assert result.transfer_nonce == 5
+        assert result.expires_at > int(time.time())
+
+    async def test_no_routes_raises_value_error(self, test_db):
+        service = self._make_service()
+        service.lifi.get_routes = AsyncMock(return_value={"routes": []})
+        with pytest.raises(ValueError, match="No routes available"):
+            await service.get_quote(
+                from_token_id="0xaaa",
+                to_token_id="0xbbb",
+                from_amount="1000000",
+                user_address="0x" + "a" * 40,
+            )
+
+    async def test_passes_accounting_chain_and_token_to_lifi(self, test_db):
+        service = self._make_service()
+        await service.get_quote(
+            from_token_id="0xaaa",
+            to_token_id="0xbbb",
+            from_amount="1000000",
+            user_address="0x" + "a" * 40,
+        )
+        call_kwargs = service.lifi.get_routes.call_args
+        assert call_kwargs.kwargs["from_chain_id"] == 84532
+        assert call_kwargs.kwargs["to_chain_id"] == 84532
+        assert call_kwargs.kwargs["from_token_address"] == "0x8eEDCff0b07609Cfb5e2775dFf21EDbACc30D0df"
+        assert call_kwargs.kwargs["to_token_address"] == "0xA9B8D8039cb3FF9d9Fff6decD18EA7bb792e51D3"

@@ -1,9 +1,8 @@
-from src.models.accounting import (
-    Balance,
-    LockedFundsResponse,
-    SubmissionResponse,
-    TokenInfo,
-)
+import httpx
+import pytest
+from unittest.mock import AsyncMock, MagicMock, patch
+
+from src.models.accounting import Balance, TokenInfo
 
 
 SAMPLE_TOKEN_NATIVE = {
@@ -31,29 +30,6 @@ SAMPLE_BALANCE = {
     "balance": "1000000000000000000",
     "token_symbol": "ETH",
     "chain_id": "84532",
-}
-
-SAMPLE_LOCKED_FUNDS = {
-    "user_address": "0x1234567890abcdef1234567890abcdef12345678",
-    "service_address": "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd",
-    "locks": [
-        {
-            "lock_id": 1,
-            "user_address": "0x1234567890abcdef1234567890abcdef12345678",
-            "service_address": "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd",
-            "token_id": "0x0000000000000000000000000000000000000000000000000000000000014a34",
-            "amount": 500000000000000000,
-            "expiry": 1710100000,
-            "is_expired": False,
-        }
-    ],
-    "total_locked": 500000000000000000,
-}
-
-SAMPLE_SUBMISSION = {
-    "submission_id": "sub_abc123",
-    "status": "submitted",
-    "detail": None,
 }
 
 
@@ -103,39 +79,54 @@ class TestBalanceModel:
         assert bal.chain_id is None
 
 
-class TestLockedFundsModel:
-    def test_parse_locked_funds(self):
-        resp = LockedFundsResponse(**SAMPLE_LOCKED_FUNDS)
-        assert len(resp.locks) == 1
-        assert resp.locks[0].lock_id == 1
-        assert resp.locks[0].amount == 500000000000000000
-        assert resp.locks[0].is_expired is False
-        assert resp.total_locked == 500000000000000000
+class TestAccountingClient:
+    @pytest.fixture
+    def mock_http_client(self):
+        return AsyncMock(spec=httpx.AsyncClient)
 
-    def test_empty_locks(self):
-        data = {
-            "user_address": "0x1234",
-            "service_address": None,
-            "locks": [],
-            "total_locked": 0,
-        }
-        resp = LockedFundsResponse(**data)
-        assert len(resp.locks) == 0
-        assert resp.total_locked == 0
+    @pytest.fixture
+    def client(self, mock_http_client):
+        with patch("src.clients.accounting.load_settings") as mock_settings:
+            from src.models.types import Settings
+            mock_settings.return_value = Settings(accounting_api_base_url="http://test:8000")
+            from src.clients.accounting import AccountingClient
+            acct = AccountingClient()
+            acct.client = mock_http_client
+            return acct
 
+    def _mock_response(self, data):
+        resp = MagicMock()
+        resp.json.return_value = data
+        resp.raise_for_status.return_value = None
+        return resp
 
-class TestSubmissionModel:
-    def test_parse_submission(self):
-        sub = SubmissionResponse(**SAMPLE_SUBMISSION)
-        assert sub.submission_id == "sub_abc123"
-        assert sub.status == "submitted"
-        assert sub.detail is None
+    async def test_get_token_info_returns_token_info(self, client, mock_http_client):
+        mock_http_client.get.return_value = self._mock_response(SAMPLE_TOKEN_ERC20)
 
-    def test_with_detail(self):
-        data = {
-            "submission_id": "sub_xyz",
-            "status": "confirmed",
-            "detail": "0xdeadbeef",
-        }
-        sub = SubmissionResponse(**data)
-        assert sub.detail == "0xdeadbeef"
+        result = await client.get_token_info("0xabc123")
+        assert isinstance(result, TokenInfo)
+        assert result.token_type == 1
+        assert result.token_type_name == "ERC20"
+        mock_http_client.get.assert_called_once_with(
+            "http://test:8000/v1/accounting/tokens/0xabc123"
+        )
+
+    async def test_get_transfer_nonce_returns_int(self, client, mock_http_client):
+        mock_http_client.get.return_value = self._mock_response({"nonce": 42})
+
+        result = await client.get_transfer_nonce("0xuser")
+        assert result == 42
+        assert isinstance(result, int)
+        mock_http_client.get.assert_called_once_with(
+            "http://test:8000/v1/accounting/funds/transfer/nonce/0xuser"
+        )
+
+    async def test_get_balance_returns_balance(self, client, mock_http_client):
+        mock_http_client.get.return_value = self._mock_response(SAMPLE_BALANCE)
+
+        result = await client.get_balance("0xuser", "0xtoken")
+        assert isinstance(result, Balance)
+        assert result.balance == "1000000000000000000"
+        mock_http_client.get.assert_called_once_with(
+            "http://test:8000/v1/accounting/balances/0xuser/0xtoken"
+        )

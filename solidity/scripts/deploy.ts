@@ -15,12 +15,12 @@ async function main() {
   console.log('Accounting proxy:', ACCOUNTING_PROXY);
   console.log('Liquidity provider:', LIQUIDITY_PROVIDER);
 
-  const factory = await ethers.getContractFactory('LiqManager');
+  const factory = await ethers.getContractFactory('SwapManager');
   const contract = await factory.deploy(ACCOUNTING_PROXY, LIQUIDITY_PROVIDER);
   await contract.waitForDeployment();
 
   const address = await contract.getAddress();
-  console.log('LiqManager deployed to:', address);
+  console.log('SwapManager deployed to:', address);
 }
 
 main().catch((error) => {

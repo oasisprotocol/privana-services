@@ -39,7 +39,7 @@ class SapphireClient:
         self.w3 = Web3(Web3.HTTPProvider(self.rpc_url))
         self.account = Account.from_key(settings.liquidity_provider_private_key)
         self.private_key = settings.liquidity_provider_private_key.removeprefix("0x")
-        self.contract_address = Web3.to_checksum_address(settings.liq_manager_contract_address)
+        self.contract_address = Web3.to_checksum_address(settings.swap_manager_contract_address)
         self.contract = self.w3.eth.contract(
             address=self.contract_address,
             abi=SWAP_MANAGER_ABI,

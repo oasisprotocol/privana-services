@@ -53,8 +53,8 @@ def load_settings(refresh: bool = False) -> Settings:
             accounting_chain_id=_get_int(
                 "ACCOUNTING_CHAIN_ID", _defaults.accounting_chain_id
             ),
-            liq_manager_contract_address=os.getenv(
-                "LIQ_MANAGER_CONTRACT_ADDRESS", _defaults.liq_manager_contract_address
+            swap_manager_contract_address=os.getenv(
+                "SWAP_MANAGER_CONTRACT_ADDRESS", _defaults.swap_manager_contract_address
             ),
             sapphire_rpc_url=os.getenv("SAPPHIRE_RPC_URL", _defaults.sapphire_rpc_url),
             quote_ttl=_get_int("QUOTE_TTL", _defaults.quote_ttl),

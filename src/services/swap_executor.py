@@ -29,6 +29,7 @@ class SwapExecutor:
         input_signature: str,
     ) -> SwapRecord:
         quote = self._validate_quote(quote_id, user_address)
+        self._validate_signature_format(input_signature)
 
         swap_id = str(uuid.uuid4())
         now = int(time.time())
@@ -84,7 +85,8 @@ class SwapExecutor:
 
         except Exception as exc:
             logger.exception(f"Swap {swap_id} failed")
-            self._update_swap(swap_id, status=SwapStatus.FAILED.value, error=str(exc))
+            error_msg = self._sanitize_error(str(exc))
+            self._update_swap(swap_id, status=SwapStatus.FAILED.value, error=error_msg)
 
         return self._get_swap(swap_id)
 
@@ -103,6 +105,27 @@ class SwapExecutor:
             raise ValueError("Quote was not created for this user")
 
         return quote
+
+    def _validate_signature_format(self, signature: str) -> None:
+        if not signature.startswith("0x"):
+            raise ValueError("Signature must start with 0x")
+        try:
+            sig_bytes = bytes.fromhex(signature[2:])
+        except ValueError:
+            raise ValueError("Signature must be valid hex")
+        if len(sig_bytes) != 65:
+            raise ValueError("Signature must be 65 bytes")
+
+    def _sanitize_error(self, error: str) -> str:
+        if "reverted" in error.lower():
+            return "Swap transaction reverted on-chain"
+        if "insufficient funds" in error.lower():
+            return "Insufficient gas funds for transaction"
+        if "nonce" in error.lower():
+            return "Transaction nonce conflict"
+        if len(error) > 200:
+            return error[:200]
+        return error
 
     def _get_swap(self, swap_id: str) -> SwapRecord:
         db = get_db()

@@ -42,6 +42,13 @@ class SapphireClient:
         )
         self.chain_id = self.w3.eth.chain_id
 
+    def is_connected(self) -> bool:
+        try:
+            self.w3.eth.block_number
+            return True
+        except Exception:
+            return False
+
     def execute_swap(
         self,
         user: str,

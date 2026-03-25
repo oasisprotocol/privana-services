@@ -68,6 +68,7 @@ class SapphireClient:
             {
                 "chainId": self.chain_id,
                 "gas": SWAP_GAS_LIMIT,
+                "gasPrice": self.w3.eth.gas_price,
                 "nonce": self.w3.eth.get_transaction_count(self.account.address),
             }
         )

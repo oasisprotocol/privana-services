@@ -8,7 +8,7 @@ from src.config import load_settings
 
 logger = logging.getLogger(__name__)
 
-LIQ_MANAGER_ABI = [
+SWAP_MANAGER_ABI = [
     {
         "inputs": [
             {"name": "user", "type": "address"},
@@ -38,7 +38,7 @@ class SapphireClient:
         self.account = Account.from_key(settings.liquidity_provider_private_key)
         self.contract = self.w3.eth.contract(
             address=Web3.to_checksum_address(settings.liq_manager_contract_address),
-            abi=LIQ_MANAGER_ABI,
+            abi=SWAP_MANAGER_ABI,
         )
         self.chain_id = self.w3.eth.chain_id
 

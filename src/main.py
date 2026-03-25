@@ -84,7 +84,17 @@ app.include_router(router)
 
 @app.get("/health")
 async def health():
-    return {"status": "ok"}
+    from src.clients.sapphire import get_sapphire_client
+
+    checks = {"api": "ok"}
+    try:
+        sapphire = get_sapphire_client()
+        checks["sapphire"] = "ok" if sapphire.is_connected() else "unavailable"
+    except Exception:
+        checks["sapphire"] = "unavailable"
+
+    overall = "ok" if all(v == "ok" for v in checks.values()) else "degraded"
+    return {"status": overall, "checks": checks}
 
 
 def main():

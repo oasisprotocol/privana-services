@@ -2,7 +2,11 @@ import logging
 import os
 from typing import Optional
 
+from dotenv import load_dotenv
+
 from src.models.types import Settings
+
+load_dotenv()
 
 logging.basicConfig(
     level=logging.INFO,

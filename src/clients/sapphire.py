@@ -2,6 +2,7 @@ import logging
 from typing import Optional
 
 from eth_account import Account
+from sapphirepy.wrapper import send_encrypted_sapphire_tx
 from web3 import Web3
 
 from src.config import load_settings
@@ -34,10 +35,13 @@ SWAP_GAS_LIMIT = 500_000
 class SapphireClient:
     def __init__(self) -> None:
         settings = load_settings()
-        self.w3 = Web3(Web3.HTTPProvider(settings.sapphire_rpc_url))
+        self.rpc_url = settings.sapphire_rpc_url
+        self.w3 = Web3(Web3.HTTPProvider(self.rpc_url))
         self.account = Account.from_key(settings.liquidity_provider_private_key)
+        self.private_key = settings.liquidity_provider_private_key.removeprefix("0x")
+        self.contract_address = Web3.to_checksum_address(settings.liq_manager_contract_address)
         self.contract = self.w3.eth.contract(
-            address=Web3.to_checksum_address(settings.liq_manager_contract_address),
+            address=self.contract_address,
             abi=SWAP_MANAGER_ABI,
         )
         self.chain_id = self.w3.eth.chain_id
@@ -61,37 +65,49 @@ class SapphireClient:
         output_nonce: int,
         output_signature: bytes,
     ) -> str:
-        tx_data = self.contract.functions.swap(
-            Web3.to_checksum_address(user),
-            input_token_id,
-            input_amount,
-            input_nonce,
-            input_signature,
-            output_token_id,
-            output_amount,
-            output_nonce,
-            output_signature,
-        ).build_transaction(
-            {
-                "chainId": self.chain_id,
-                "gas": SWAP_GAS_LIMIT,
-                "gasPrice": self.w3.eth.gas_price,
-                "nonce": self.w3.eth.get_transaction_count(self.account.address),
-            }
+        calldata = self.contract.encode_abi(
+            "swap",
+            args=[
+                Web3.to_checksum_address(user),
+                input_token_id,
+                input_amount,
+                input_nonce,
+                input_signature,
+                output_token_id,
+                output_amount,
+                output_nonce,
+                output_signature,
+            ],
         )
 
-        signed_tx = self.account.sign_transaction(tx_data)
-        tx_hash = self.w3.eth.send_raw_transaction(signed_tx.raw_transaction)
+        gas_price_gwei = self.w3.eth.gas_price // 10**9
+        nonce = self.w3.eth.get_transaction_count(self.account.address)
 
-        logger.info(f"Swap tx sent: {tx_hash.hex()}")
+        result_code, result_str = send_encrypted_sapphire_tx(
+            pk=self.private_key,
+            sender=self.account.address,
+            recipient=self.contract_address,
+            rpc_url=self.rpc_url,
+            eth_amount=0,
+            gas_limit=SWAP_GAS_LIMIT,
+            data=calldata,
+            gas_cost_gwei=max(int(gas_price_gwei), 100),
+            nonce=nonce,
+        )
+
+        if result_code != 0:
+            raise RuntimeError(f"Sapphire encrypted tx failed: {result_str}")
+
+        tx_hash = result_str
+        logger.info(f"Swap tx sent (encrypted): {tx_hash}")
 
         receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash)
 
         if receipt["status"] != 1:
-            raise RuntimeError(f"Swap transaction reverted: 0x{tx_hash.hex()}")
+            raise RuntimeError(f"Swap transaction reverted: {tx_hash}")
 
-        logger.info(f"Swap tx confirmed: 0x{tx_hash.hex()}")
-        return f"0x{tx_hash.hex()}"
+        logger.info(f"Swap tx confirmed: {tx_hash}")
+        return tx_hash if tx_hash.startswith("0x") else f"0x{tx_hash}"
 
 
 _client_instance: Optional[SapphireClient] = None

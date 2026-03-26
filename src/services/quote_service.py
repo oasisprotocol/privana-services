@@ -104,8 +104,12 @@ class QuoteService:
         to_amount_after_fee, fee_amount = calculate_fee(int(to_amount_str), fee_bps)
         to_amount_min = int(to_amount_min_str) - fee_amount
 
-        transfer_nonce = await self.accounting.get_transfer_nonce(user_address)
         liquidity_provider = self.settings.liquidity_provider_address
+        lp_balance = await self.accounting.get_lp_balance(to_token_id)
+        if int(lp_balance.balance) < to_amount_after_fee:
+            raise ValueError("Insufficient liquidity for this swap")
+
+        transfer_nonce = await self.accounting.get_transfer_nonce(user_address)
 
         quote_id = str(uuid.uuid4())
         now = int(time.time())

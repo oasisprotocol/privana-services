@@ -88,7 +88,11 @@ class TestAccountingClient:
     def client(self, mock_http_client):
         with patch("src.clients.accounting.load_settings") as mock_settings:
             from src.models.types import Settings
-            mock_settings.return_value = Settings(accounting_api_base_url="http://test:8000")
+            mock_settings.return_value = Settings(
+                accounting_api_base_url="http://test:8000",
+                liquidity_provider_private_key="0x4c0883a69102937d6231471b5dbb6204fe512961708279f69e0f0fcbf24b5830",
+                liquidity_provider_address="0x2c7536E3605D9C16a7a3D7b1898e529396a65c23",
+            )
             from src.clients.accounting import AccountingClient
             acct = AccountingClient()
             acct.client = mock_http_client
@@ -121,12 +125,17 @@ class TestAccountingClient:
             "GET", "http://test:8000/v1/accounting/funds/transfer/nonce/0xuser"
         )
 
-    async def test_get_balance_returns_balance(self, client, mock_http_client):
+    async def test_get_lp_balance_returns_balance(self, client, mock_http_client):
+        import asyncio
+        client._siwe_token = "test-siwe"
+        client._jwt_token = "test-jwt"
+        client._auth_timestamp = asyncio.get_event_loop().time()
         mock_http_client.request.return_value = self._mock_response(SAMPLE_BALANCE)
 
-        result = await client.get_balance("0xuser", "0xtoken")
+        result = await client.get_lp_balance("0xtoken")
         assert isinstance(result, Balance)
         assert result.balance == "1000000000000000000"
         mock_http_client.request.assert_called_once_with(
-            "GET", "http://test:8000/v1/accounting/balances/0xuser/0xtoken"
+            "GET", "http://test:8000/v1/accounting/balances/0x2c7536E3605D9C16a7a3D7b1898e529396a65c23/0xtoken",
+            headers={"X-SIWE-Token": "test-siwe", "Authorization": "Bearer test-jwt"},
         )

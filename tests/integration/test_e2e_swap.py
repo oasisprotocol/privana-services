@@ -6,7 +6,6 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from src.main import app
 from src.services.eip712 import sign_transfer
 
 LP_ADDRESS = os.getenv("LIQUIDITY_PROVIDER_ADDRESS")
@@ -20,14 +19,17 @@ TEST_USER_PK = "0x7b07a59f24f1900ec4e6ac3e521c1acd2cca3518f717abda1dc8bbcbbc344c
 USDC_TOKEN_ID = "0x330ba47d00c7ce3018deee017b319fd7cc6473a2ddc9e6eba6ebb4207be15279"
 WETH_TOKEN_ID = "0x335b5cccd1e63b2fe79863a0db73fce430e4e66902e2b78424f8662621e29fb7"
 
-pytestmark = pytest.mark.skipif(
-    not LP_PK or not LP_ADDRESS,
-    reason="Integration tests require .env with LP credentials",
-)
+pytestmark = [
+    pytest.mark.skipif(
+        not LP_PK or not LP_ADDRESS,
+        reason="Integration tests require .env with LP credentials",
+    ),
+    pytest.mark.integration,
+]
 
 
-@pytest.fixture(autouse=True)
-def _reset_singletons():
+@pytest.fixture
+async def api_client():
     import src.clients.accounting as acct_mod
     import src.clients.lifi as lifi_mod
     import src.clients.sapphire as saph_mod
@@ -38,19 +40,17 @@ def _reset_singletons():
     saph_mod._client_instance = None
     qs_mod._service_instance = None
     se_mod._executor_instance = None
-    yield
+
+    from src.main import app
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, timeout=120, base_url="http://test") as c:
+        yield c
+
     acct_mod._client_instance = None
     lifi_mod._client_instance = None
     saph_mod._client_instance = None
     qs_mod._service_instance = None
     se_mod._executor_instance = None
-
-
-@pytest.fixture
-async def api_client():
-    transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, timeout=120, base_url="http://test") as c:
-        yield c
 
 
 class TestHealthCheck:

@@ -105,14 +105,9 @@ class QuoteService:
         to_amount_min = int(to_amount_min_str) - fee_amount
 
         liquidity_provider = self.settings.liquidity_provider_address
-        try:
-            lp_balance = await self.accounting.get_balance(liquidity_provider, to_token_id)
-            if int(lp_balance.balance) < to_amount_after_fee:
-                raise ValueError("Insufficient liquidity for this swap")
-        except ValueError:
-            raise
-        except Exception:
-            logger.warning("Could not verify LP liquidity, proceeding with quote")
+        lp_balance = await self.accounting.get_balance(liquidity_provider, to_token_id)
+        if int(lp_balance.balance) < to_amount_after_fee:
+            raise ValueError("Insufficient liquidity for this swap")
 
         transfer_nonce = await self.accounting.get_transfer_nonce(user_address)
 

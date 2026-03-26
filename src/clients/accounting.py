@@ -1,8 +1,11 @@
 import asyncio
 import logging
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import httpx
+from eth_account import Account
+from eth_account.messages import encode_defunct
 
 from src.config import load_settings
 from src.models.accounting import (
@@ -34,11 +37,55 @@ class AccountingClient:
         settings = load_settings()
         self.base_url = settings.accounting_api_base_url
         self.client = httpx.AsyncClient(timeout=30.0)
+        self._lp_address = settings.liquidity_provider_address
+        self._lp_private_key = settings.liquidity_provider_private_key
+        self._chain_id = settings.accounting_chain_id
+        self._siwe_token: Optional[str] = None
+        self._jwt_token: Optional[str] = None
+
+    async def _ensure_authenticated(self) -> None:
+        if self._siwe_token and self._jwt_token:
+            return
+
+        account = Account.from_key(self._lp_private_key)
+        r = await self.client.get(
+            f"{self.base_url}/v1/accounting/auth/nonce?address={self._lp_address}"
+        )
+        r.raise_for_status()
+        nonce = r.json()["nonce"]
+
+        now = datetime.now(timezone.utc)
+        domain = self.base_url.replace("https://", "").replace("http://", "").rstrip("/")
+        siwe = (
+            f"{domain} wants you to sign in with your Ethereum account:\n"
+            f"{self._lp_address}\n\nSign in to FlexVaults\n\n"
+            f"URI: {self.base_url}\n"
+            f"Version: 1\nChain ID: {self._chain_id}\nNonce: {nonce}\n"
+            f"Issued At: {now.strftime('%Y-%m-%dT%H:%M:%SZ')}\n"
+            f"Expiration Time: {(now + timedelta(hours=24)).strftime('%Y-%m-%dT%H:%M:%SZ')}"
+        )
+        signed = account.sign_message(encode_defunct(text=siwe))
+        r = await self.client.post(
+            f"{self.base_url}/v1/accounting/auth/login",
+            json={"siwe_message": siwe, "signature": f"0x{signed.signature.hex()}"},
+        )
+        r.raise_for_status()
+        data = r.json()
+        self._siwe_token = data["siwe_token"]
+        self._jwt_token = data["jwt_access_token"]
+
+    def _auth_headers(self) -> dict:
+        return {
+            "X-SIWE-Token": self._siwe_token,
+            "Authorization": f"Bearer {self._jwt_token}",
+        }
 
     async def get_balance(self, user_address: str, token_id: str) -> Balance:
+        await self._ensure_authenticated()
         response = await _request_with_retry(
             self.client, "GET",
             f"{self.base_url}/v1/accounting/balances/{user_address}/{token_id}",
+            headers=self._auth_headers(),
         )
         return Balance(**response.json())
 

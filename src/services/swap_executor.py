@@ -31,16 +31,11 @@ class SwapExecutor:
         quote = self._validate_quote(quote_id, user_address)
         self._validate_signature_format(input_signature)
 
-        try:
-            lp_balance = await self.accounting.get_balance(
-                self.settings.liquidity_provider_address, quote["to_token_id"]
-            )
-            if int(lp_balance.balance) < int(quote["to_amount_estimate"]):
-                raise ValueError("Insufficient liquidity for this swap")
-        except ValueError:
-            raise
-        except Exception:
-            logger.warning("Could not verify LP liquidity, proceeding with swap")
+        lp_balance = await self.accounting.get_balance(
+            self.settings.liquidity_provider_address, quote["to_token_id"]
+        )
+        if int(lp_balance.balance) < int(quote["to_amount_estimate"]):
+            raise ValueError("Insufficient liquidity for this swap")
 
         swap_id = str(uuid.uuid4())
         now = int(time.time())

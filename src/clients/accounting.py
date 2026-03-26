@@ -47,7 +47,7 @@ class AccountingClient:
     async def _ensure_authenticated(self) -> None:
         if self._siwe_token and self._jwt_token and self._auth_timestamp:
             elapsed = asyncio.get_event_loop().time() - self._auth_timestamp
-            if elapsed < 23 * 3600:
+            if elapsed < 3600:
                 return
 
         account = Account.from_key(self._lp_private_key)

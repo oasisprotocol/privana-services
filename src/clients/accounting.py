@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from typing import Optional
 
@@ -6,12 +7,26 @@ import httpx
 from src.config import load_settings
 from src.models.accounting import (
     Balance,
-    LockedFundsResponse,
-    SubmissionResponse,
     TokenInfo,
 )
 
 logger = logging.getLogger(__name__)
+
+MAX_RETRIES = 3
+RETRY_DELAY = 1.0
+
+
+async def _request_with_retry(client: httpx.AsyncClient, method: str, url: str, **kwargs) -> httpx.Response:
+    for attempt in range(MAX_RETRIES):
+        try:
+            response = await client.request(method, url, **kwargs)
+            response.raise_for_status()
+            return response
+        except (httpx.ConnectError, httpx.ReadError, httpx.RemoteProtocolError) as exc:
+            if attempt == MAX_RETRIES - 1:
+                raise
+            logger.warning(f"Accounting API request failed (attempt {attempt + 1}), retrying: {exc}")
+            await asyncio.sleep(RETRY_DELAY * (attempt + 1))
 
 
 class AccountingClient:
@@ -21,122 +36,25 @@ class AccountingClient:
         self.client = httpx.AsyncClient(timeout=30.0)
 
     async def get_balance(self, user_address: str, token_id: str) -> Balance:
-        response = await self.client.get(
-            f"{self.base_url}/v1/accounting/balances/{user_address}/{token_id}"
+        response = await _request_with_retry(
+            self.client, "GET",
+            f"{self.base_url}/v1/accounting/balances/{user_address}/{token_id}",
         )
-        response.raise_for_status()
         return Balance(**response.json())
 
     async def get_token_info(self, token_id: str) -> TokenInfo:
-        response = await self.client.get(
-            f"{self.base_url}/v1/accounting/tokens/{token_id}"
+        response = await _request_with_retry(
+            self.client, "GET",
+            f"{self.base_url}/v1/accounting/tokens/{token_id}",
         )
-        response.raise_for_status()
         return TokenInfo(**response.json())
 
-    async def lock_funds(
-        self,
-        user_address: str,
-        service_address: str,
-        token_id: str,
-        amount: int,
-        expiry: int,
-        signature: str,
-    ) -> SubmissionResponse:
-        payload = {
-            "user_address": user_address,
-            "service_address": service_address,
-            "token_id": token_id,
-            "amount": amount,
-            "expiry": expiry,
-            "signature": signature,
-        }
-        response = await self.client.post(
-            f"{self.base_url}/v1/accounting/funds/lock",
-            json=payload,
+    async def get_transfer_nonce(self, user_address: str) -> int:
+        response = await _request_with_retry(
+            self.client, "GET",
+            f"{self.base_url}/v1/accounting/funds/transfer/nonce/{user_address}",
         )
-        if response.status_code != 200:
-            logger.error(f"Lock funds failed: {response.status_code} - {response.text}")
-        response.raise_for_status()
-        return SubmissionResponse(**response.json())
-
-    async def unlock_funds(self, user_address: str, lock_id: int) -> SubmissionResponse:
-        payload = {"user_address": user_address, "lock_id": lock_id}
-        response = await self.client.post(
-            f"{self.base_url}/v1/accounting/funds/unlock",
-            json=payload,
-        )
-        response.raise_for_status()
-        return SubmissionResponse(**response.json())
-
-    async def get_locked_funds(
-        self, user_address: str, service_address: Optional[str] = None
-    ) -> LockedFundsResponse:
-        params = {}
-        if service_address:
-            params["service_address"] = service_address
-        response = await self.client.get(
-            f"{self.base_url}/v1/accounting/funds/locked/{user_address}",
-            params=params,
-        )
-        response.raise_for_status()
-        return LockedFundsResponse(**response.json())
-
-    async def relay_execute(
-        self,
-        chain_id: int,
-        to: str,
-        data: str,
-        value: int = 0,
-        gas_limit: int = 200_000,
-    ) -> SubmissionResponse:
-        payload = {
-            "chain_id": chain_id,
-            "to": to,
-            "data": data,
-            "value": value,
-            "gas_limit": gas_limit,
-        }
-        response = await self.client.post(
-            f"{self.base_url}/v1/accounting/relay/execute",
-            json=payload,
-        )
-        if response.status_code != 200:
-            logger.error(f"Relay execute failed: {response.status_code} - {response.text}")
-        response.raise_for_status()
-        return SubmissionResponse(**response.json())
-
-    async def relay_settle_swap(
-        self,
-        user_address: str,
-        lock_id: int,
-        output_token_id: str,
-        output_amount: int,
-        swap_tx_hash: Optional[str] = None,
-    ) -> SubmissionResponse:
-        payload = {
-            "user_address": user_address,
-            "lock_id": lock_id,
-            "output_token_id": output_token_id,
-            "output_amount": output_amount,
-        }
-        if swap_tx_hash:
-            payload["swap_tx_hash"] = swap_tx_hash
-        response = await self.client.post(
-            f"{self.base_url}/v1/accounting/relay/settle-swap",
-            json=payload,
-        )
-        if response.status_code != 200:
-            logger.error(f"Relay settle failed: {response.status_code} - {response.text}")
-        response.raise_for_status()
-        return SubmissionResponse(**response.json())
-
-    async def relay_status(self, tx_hash: str) -> SubmissionResponse:
-        response = await self.client.get(
-            f"{self.base_url}/v1/accounting/relay/status/{tx_hash}"
-        )
-        response.raise_for_status()
-        return SubmissionResponse(**response.json())
+        return response.json()["nonce"]
 
     async def close(self) -> None:
         await self.client.aclose()

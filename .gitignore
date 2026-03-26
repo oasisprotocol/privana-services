@@ -105,3 +105,4 @@ solidity/node_modules/
 solidity/artifacts/
 solidity/cache/
 solidity/typechain-types/
+solidity/.env

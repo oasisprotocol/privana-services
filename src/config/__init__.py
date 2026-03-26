@@ -2,7 +2,11 @@ import logging
 import os
 from typing import Optional
 
+from dotenv import load_dotenv
+
 from src.models.types import Settings
+
+load_dotenv()
 
 logging.basicConfig(
     level=logging.INFO,
@@ -37,13 +41,26 @@ def load_settings(refresh: bool = False) -> Settings:
             lifi_api_key=os.getenv("LIFI_API_KEY", _defaults.lifi_api_key),
             lifi_api_url=os.getenv("LIFI_API_URL", _defaults.lifi_api_url),
             lifi_integrator=os.getenv("LIFI_INTEGRATOR", _defaults.lifi_integrator),
-            vault_evm_address=os.getenv("VAULT_EVM_ADDRESS", _defaults.vault_evm_address),
-            service_address=os.getenv("SERVICE_ADDRESS", _defaults.service_address),
+            liquidity_provider_private_key=os.getenv(
+                "LIQUIDITY_PROVIDER_PRIVATE_KEY", _defaults.liquidity_provider_private_key
+            ),
+            liquidity_provider_address=os.getenv(
+                "LIQUIDITY_PROVIDER_ADDRESS", _defaults.liquidity_provider_address
+            ),
+            accounting_contract_address=os.getenv(
+                "ACCOUNTING_CONTRACT_ADDRESS", _defaults.accounting_contract_address
+            ),
+            accounting_chain_id=_get_int(
+                "ACCOUNTING_CHAIN_ID", _defaults.accounting_chain_id
+            ),
+            swap_manager_contract_address=os.getenv(
+                "SWAP_MANAGER_CONTRACT_ADDRESS", _defaults.swap_manager_contract_address
+            ),
+            sapphire_rpc_url=os.getenv("SAPPHIRE_RPC_URL", _defaults.sapphire_rpc_url),
             quote_ttl=_get_int("QUOTE_TTL", _defaults.quote_ttl),
             fee_bps=_get_int("FEE_BPS", _defaults.fee_bps),
-            swap_poll_interval=_get_int("SWAP_POLL_INTERVAL", _defaults.swap_poll_interval),
-            same_chain_timeout=_get_int("SAME_CHAIN_TIMEOUT", _defaults.same_chain_timeout),
-            cross_chain_timeout=_get_int("CROSS_CHAIN_TIMEOUT", _defaults.cross_chain_timeout),
+            max_swap_amount_usd=_get_int("MAX_SWAP_AMOUNT_USD", _defaults.max_swap_amount_usd),
+            lifi_token_map=os.getenv("LIFI_TOKEN_MAP", _defaults.lifi_token_map),
         )
     return _settings
 

@@ -1,4 +1,3 @@
-import asyncio
 import logging
 
 from fastapi import APIRouter, HTTPException, Query
@@ -49,25 +48,23 @@ async def get_quote(
 async def execute_swap(payload: SwapRequest) -> SwapResponse:
     try:
         executor = get_swap_executor()
-        swap = await executor.initiate_swap(
+        swap = await executor.execute_swap(
             quote_id=payload.quote_id,
             user_address=payload.user_address,
-            lock_signature=payload.lock_signature,
-            lock_expiry=payload.lock_expiry,
+            input_nonce=payload.input_nonce,
+            input_signature=payload.input_signature,
         )
-
-        asyncio.create_task(_advance_swap_background(swap.id))
-
         return SwapResponse(
             swap_id=swap.id,
             status=swap.status,
-            message="Swap initiated, lock submitted",
+            message="Swap completed" if swap.status == "completed" else "Swap failed",
+            tx_hash=swap.swap_tx_hash,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
-        logger.exception("Swap initiation failed")
-        raise HTTPException(status_code=500, detail="Failed to initiate swap") from exc
+        logger.exception("Swap execution failed")
+        raise HTTPException(status_code=500, detail="Failed to execute swap") from exc
 
 
 @router.get("/swap/{swap_id}/status", response_model=SwapStatusResponse)
@@ -80,12 +77,9 @@ async def get_swap_status(swap_id: str) -> SwapStatusResponse:
             status=swap.status,
             from_token_id=swap.from_token_id,
             to_token_id=swap.to_token_id,
-            from_chain_id=swap.from_chain_id,
-            to_chain_id=swap.to_chain_id,
             from_amount=swap.from_amount,
             to_amount_estimate=swap.to_amount_estimate,
             to_amount_actual=swap.to_amount_actual,
-            approval_tx_hash=swap.approval_tx_hash,
             swap_tx_hash=swap.swap_tx_hash,
             error=swap.error,
             created_at=swap.created_at,
@@ -131,14 +125,6 @@ async def list_tokens() -> TokenListResponse:
 async def list_chains() -> ChainListResponse:
     chains = _get_supported_chains()
     return ChainListResponse(chains=chains)
-
-
-async def _advance_swap_background(swap_id: str) -> None:
-    try:
-        executor = get_swap_executor()
-        await executor.advance_swap(swap_id)
-    except Exception:
-        logger.exception(f"Background swap advance failed for {swap_id}")
 
 
 def _get_supported_token_ids() -> list[str]:

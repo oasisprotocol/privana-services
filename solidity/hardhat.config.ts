@@ -30,6 +30,11 @@ const config: HardhatUserConfig = {
     sapphire: { ...sapphireMainnet, accounts },
     'sapphire-testnet': { ...sapphireTestnet, accounts },
     'sapphire-localnet': { ...sapphireLocalnet, accounts },
+    'base-sepolia': {
+      url: process.env.BASE_SEPOLIA_RPC_URL || 'https://sepolia.base.org',
+      chainId: 84532,
+      accounts,
+    },
     hardhat: {
       accounts: TEST_HDWALLET,
     },

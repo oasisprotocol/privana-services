@@ -4,26 +4,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from src.db import db_write
 from src.models.swap import SwapStatus
-
-
-def _insert_quote_for_swap(conn, quote_id, settings, user_address="0xd8991364507fafC256EafF950d28618735753476"):
-    now = int(time.time())
-    db_write(
-        conn,
-        """INSERT INTO quotes
-           (id, user_address, from_token_id, to_token_id, from_chain_id, to_chain_id,
-            from_amount, to_amount_gross, to_amount_estimate, to_amount_min,
-            route_tool, liquidity_provider, expires_at, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (
-            quote_id, user_address.lower(), "0xaaaa", "0xbbbb", 84532, 84532,
-            "1000000", "45000000000000000", "44000000000000000", "43000000000000000",
-            "okx", settings.liquidity_provider_address,
-            now + 300, now,
-        ),
-    )
 
 
 def _make_executor(settings):
@@ -60,21 +41,8 @@ class TestSwapStatus:
 
 
 class TestValidateQuote:
-    def test_expired_quote_raises(self, test_db, settings):
-        now = int(time.time())
-        db_write(
-            test_db,
-            """INSERT INTO quotes
-               (id, user_address, from_token_id, to_token_id, from_chain_id, to_chain_id,
-                from_amount, to_amount_gross, to_amount_estimate, to_amount_min,
-                route_tool, liquidity_provider, expires_at, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                "expired_q", "0xuser", "0xaaaa", "0xbbbb", 1, 1,
-                "1000000", "1000000", "990000", "980000",
-                "uniswap", settings.liquidity_provider_address, now - 10, now - 60,
-            ),
-        )
+    def test_expired_quote_raises(self, test_db, settings, insert_quote):
+        insert_quote("expired_q", expires_at=int(time.time()) - 10, user_address="0xuser")
         executor = _make_executor(settings)
         with pytest.raises(ValueError, match="Quote has expired"):
             executor._validate_quote("expired_q", "0xuser")
@@ -84,8 +52,18 @@ class TestValidateQuote:
         with pytest.raises(ValueError, match="Quote not found"):
             executor._validate_quote("nonexistent", "0xuser")
 
-    def test_wrong_user_raises(self, test_db, settings):
-        _insert_quote_for_swap(test_db, "q_wrong_user", settings)
+    def test_wrong_user_raises(self, test_db, settings, insert_quote):
+        insert_quote(
+            "q_wrong_user",
+            user_address="0xd8991364507fafc256eaff950d28618735753476",
+            from_token_id="0xaaaa",
+            to_token_id="0xbbbb",
+            from_amount="1000000",
+            to_amount_gross="45000000000000000",
+            to_amount_estimate="44000000000000000",
+            to_amount_min="43000000000000000",
+            route_tool="okx",
+        )
         executor = _make_executor(settings)
         with pytest.raises(ValueError, match="Quote was not created for this user"):
             executor._validate_quote(
@@ -93,9 +71,19 @@ class TestValidateQuote:
                 "0x0000000000000000000000000000000000000001",
             )
 
-    def test_valid_quote_returns_dict(self, test_db, settings):
+    def test_valid_quote_returns_dict(self, test_db, settings, insert_quote):
         user = "0xd8991364507fafC256EafF950d28618735753476"
-        _insert_quote_for_swap(test_db, "q_valid", settings, user_address=user)
+        insert_quote(
+            "q_valid",
+            user_address=user.lower(),
+            from_token_id="0xaaaa",
+            to_token_id="0xbbbb",
+            from_amount="1000000",
+            to_amount_gross="45000000000000000",
+            to_amount_estimate="44000000000000000",
+            to_amount_min="43000000000000000",
+            route_tool="okx",
+        )
         executor = _make_executor(settings)
         result = executor._validate_quote("q_valid", user)
         assert isinstance(result, dict)
@@ -111,15 +99,35 @@ class TestExecuteSwap:
     def input_signature(self):
         return "0x" + "aa" * 65
 
-    async def test_successful_swap(self, test_db, settings, user_address, input_signature):
-        _insert_quote_for_swap(test_db, "q_success", settings, user_address=user_address)
+    async def test_successful_swap(self, test_db, settings, insert_quote, user_address, input_signature):
+        insert_quote(
+            "q_success",
+            user_address=user_address.lower(),
+            from_token_id="0xaaaa",
+            to_token_id="0xbbbb",
+            from_amount="1000000",
+            to_amount_gross="45000000000000000",
+            to_amount_estimate="44000000000000000",
+            to_amount_min="43000000000000000",
+            route_tool="okx",
+        )
         executor = _make_executor(settings)
         result = await executor.execute_swap("q_success", user_address, 0, input_signature)
         assert result.status == SwapStatus.COMPLETED.value
         assert result.swap_tx_hash == "0x" + "ff" * 32
 
-    async def test_failed_swap(self, test_db, settings, user_address, input_signature):
-        _insert_quote_for_swap(test_db, "q_fail", settings, user_address=user_address)
+    async def test_failed_swap(self, test_db, settings, insert_quote, user_address, input_signature):
+        insert_quote(
+            "q_fail",
+            user_address=user_address.lower(),
+            from_token_id="0xaaaa",
+            to_token_id="0xbbbb",
+            from_amount="1000000",
+            to_amount_gross="45000000000000000",
+            to_amount_estimate="44000000000000000",
+            to_amount_min="43000000000000000",
+            route_tool="okx",
+        )
         executor = _make_executor(settings)
         executor.sapphire.execute_swap = MagicMock(
             side_effect=RuntimeError("tx reverted")
@@ -129,9 +137,19 @@ class TestExecuteSwap:
         assert "reverted" in result.error.lower()
 
     async def test_creates_swap_record_before_calling_sapphire(
-        self, test_db, settings, user_address, input_signature
+        self, test_db, settings, insert_quote, user_address, input_signature
     ):
-        _insert_quote_for_swap(test_db, "q_record", settings, user_address=user_address)
+        insert_quote(
+            "q_record",
+            user_address=user_address.lower(),
+            from_token_id="0xaaaa",
+            to_token_id="0xbbbb",
+            from_amount="1000000",
+            to_amount_gross="45000000000000000",
+            to_amount_estimate="44000000000000000",
+            to_amount_min="43000000000000000",
+            route_tool="okx",
+        )
         executor = _make_executor(settings)
 
         original_execute = executor.sapphire.execute_swap
@@ -147,9 +165,19 @@ class TestExecuteSwap:
         await executor.execute_swap("q_record", user_address, 0, input_signature)
 
     async def test_passes_correct_params_to_sapphire(
-        self, test_db, settings, user_address, input_signature
+        self, test_db, settings, insert_quote, user_address, input_signature
     ):
-        _insert_quote_for_swap(test_db, "q_params", settings, user_address=user_address)
+        insert_quote(
+            "q_params",
+            user_address=user_address.lower(),
+            from_token_id="0xaaaa",
+            to_token_id="0xbbbb",
+            from_amount="1000000",
+            to_amount_gross="45000000000000000",
+            to_amount_estimate="44000000000000000",
+            to_amount_min="43000000000000000",
+            route_tool="okx",
+        )
         executor = _make_executor(settings)
         await executor.execute_swap("q_params", user_address, 0, input_signature)
 
@@ -163,9 +191,19 @@ class TestExecuteSwap:
         assert call_kwargs.kwargs["output_nonce"] == 0
 
     async def test_signs_output_transfer_with_lp_key(
-        self, test_db, settings, user_address, input_signature
+        self, test_db, settings, insert_quote, user_address, input_signature
     ):
-        _insert_quote_for_swap(test_db, "q_sign", settings, user_address=user_address)
+        insert_quote(
+            "q_sign",
+            user_address=user_address.lower(),
+            from_token_id="0xaaaa",
+            to_token_id="0xbbbb",
+            from_amount="1000000",
+            to_amount_gross="45000000000000000",
+            to_amount_estimate="44000000000000000",
+            to_amount_min="43000000000000000",
+            route_tool="okx",
+        )
 
         with patch("src.services.swap_executor.get_accounting_client") as mock_acct, \
              patch("src.services.swap_executor.get_sapphire_client") as mock_saph, \
@@ -199,10 +237,30 @@ class TestExecuteSwap:
             )
 
     async def test_swap_lock_prevents_concurrent_nonce_reads(
-        self, test_db, settings, user_address, input_signature
+        self, test_db, settings, insert_quote, user_address, input_signature
     ):
-        _insert_quote_for_swap(test_db, "q_lock1", settings, user_address=user_address)
-        _insert_quote_for_swap(test_db, "q_lock2", settings, user_address=user_address)
+        insert_quote(
+            "q_lock1",
+            user_address=user_address.lower(),
+            from_token_id="0xaaaa",
+            to_token_id="0xbbbb",
+            from_amount="1000000",
+            to_amount_gross="45000000000000000",
+            to_amount_estimate="44000000000000000",
+            to_amount_min="43000000000000000",
+            route_tool="okx",
+        )
+        insert_quote(
+            "q_lock2",
+            user_address=user_address.lower(),
+            from_token_id="0xaaaa",
+            to_token_id="0xbbbb",
+            from_amount="1000000",
+            to_amount_gross="45000000000000000",
+            to_amount_estimate="44000000000000000",
+            to_amount_min="43000000000000000",
+            route_tool="okx",
+        )
 
         executor = _make_executor(settings)
 

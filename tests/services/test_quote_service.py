@@ -3,7 +3,12 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from src.models.accounting import Balance
 from src.models.types import Settings
+
+SUFFICIENT_BALANCE = Balance(
+    user_address="0xlp", token_id="0xbbb", balance="999999999999999999999"
+)
 
 
 class TestQuoteDeduplication:
@@ -101,6 +106,7 @@ class TestGetQuote:
 
         service.accounting = MagicMock()
         service.accounting.get_transfer_nonce = AsyncMock(return_value=5)
+        service.accounting.get_balance = AsyncMock(return_value=SUFFICIENT_BALANCE)
 
         from src.models.accounting import TokenInfo
         from_token = TokenInfo(
@@ -164,6 +170,18 @@ class TestGetQuote:
         service = self._make_service()
         service.lifi.get_routes = AsyncMock(return_value={"routes": []})
         with pytest.raises(ValueError, match="No routes available"):
+            await service.get_quote(
+                from_token_id="0xaaa",
+                to_token_id="0xbbb",
+                from_amount="1000000",
+                user_address="0x" + "a" * 40,
+            )
+
+    async def test_insufficient_liquidity_raises_value_error(self, test_db):
+        service = self._make_service()
+        low_balance = Balance(user_address="0xlp", token_id="0xbbb", balance="1")
+        service.accounting.get_balance = AsyncMock(return_value=low_balance)
+        with pytest.raises(ValueError, match="Insufficient liquidity"):
             await service.get_quote(
                 from_token_id="0xaaa",
                 to_token_id="0xbbb",

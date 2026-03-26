@@ -4,7 +4,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from src.models.accounting import Balance
 from src.models.swap import SwapStatus
+
+SUFFICIENT_BALANCE = Balance(
+    user_address="0xlp", token_id="0xbbbb", balance="999999999999999999999"
+)
 
 
 def _make_executor(settings):
@@ -15,6 +20,7 @@ def _make_executor(settings):
 
         acct = AsyncMock()
         acct.get_transfer_nonce = AsyncMock(return_value=0)
+        acct.get_balance = AsyncMock(return_value=SUFFICIENT_BALANCE)
         mock_acct.return_value = acct
 
         saph = MagicMock()
@@ -136,6 +142,26 @@ class TestExecuteSwap:
         assert result.status == SwapStatus.FAILED.value
         assert "reverted" in result.error.lower()
 
+    async def test_insufficient_liquidity_raises_value_error(
+        self, test_db, settings, insert_quote, user_address, input_signature
+    ):
+        insert_quote(
+            "q_no_liq",
+            user_address=user_address.lower(),
+            from_token_id="0xaaaa",
+            to_token_id="0xbbbb",
+            from_amount="1000000",
+            to_amount_gross="45000000000000000",
+            to_amount_estimate="44000000000000000",
+            to_amount_min="43000000000000000",
+            route_tool="okx",
+        )
+        executor = _make_executor(settings)
+        low_balance = Balance(user_address="0xlp", token_id="0xbbbb", balance="1")
+        executor.accounting.get_balance = AsyncMock(return_value=low_balance)
+        with pytest.raises(ValueError, match="Insufficient liquidity"):
+            await executor.execute_swap("q_no_liq", user_address, 0, input_signature)
+
     async def test_creates_swap_record_before_calling_sapphire(
         self, test_db, settings, insert_quote, user_address, input_signature
     ):
@@ -213,6 +239,7 @@ class TestExecuteSwap:
 
             acct = AsyncMock()
             acct.get_transfer_nonce = AsyncMock(return_value=7)
+            acct.get_balance = AsyncMock(return_value=SUFFICIENT_BALANCE)
             mock_acct.return_value = acct
 
             saph = MagicMock()

@@ -20,7 +20,7 @@ def _make_executor(settings):
 
         acct = AsyncMock()
         acct.get_transfer_nonce = AsyncMock(return_value=0)
-        acct.get_balance = AsyncMock(return_value=SUFFICIENT_BALANCE)
+        acct.get_lp_balance = AsyncMock(return_value=SUFFICIENT_BALANCE)
         mock_acct.return_value = acct
 
         saph = MagicMock()
@@ -158,7 +158,7 @@ class TestExecuteSwap:
         )
         executor = _make_executor(settings)
         low_balance = Balance(user_address="0xlp", token_id="0xbbbb", balance="1")
-        executor.accounting.get_balance = AsyncMock(return_value=low_balance)
+        executor.accounting.get_lp_balance = AsyncMock(return_value=low_balance)
         with pytest.raises(ValueError, match="Insufficient liquidity"):
             await executor.execute_swap("q_no_liq", user_address, 0, input_signature)
 
@@ -239,7 +239,7 @@ class TestExecuteSwap:
 
             acct = AsyncMock()
             acct.get_transfer_nonce = AsyncMock(return_value=7)
-            acct.get_balance = AsyncMock(return_value=SUFFICIENT_BALANCE)
+            acct.get_lp_balance = AsyncMock(return_value=SUFFICIENT_BALANCE)
             mock_acct.return_value = acct
 
             saph = MagicMock()

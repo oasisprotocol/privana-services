@@ -106,7 +106,7 @@ class TestGetQuote:
 
         service.accounting = MagicMock()
         service.accounting.get_transfer_nonce = AsyncMock(return_value=5)
-        service.accounting.get_balance = AsyncMock(return_value=SUFFICIENT_BALANCE)
+        service.accounting.get_lp_balance = AsyncMock(return_value=SUFFICIENT_BALANCE)
 
         from src.models.accounting import TokenInfo
         from_token = TokenInfo(
@@ -180,7 +180,7 @@ class TestGetQuote:
     async def test_insufficient_liquidity_raises_value_error(self, test_db):
         service = self._make_service()
         low_balance = Balance(user_address="0xlp", token_id="0xbbb", balance="1")
-        service.accounting.get_balance = AsyncMock(return_value=low_balance)
+        service.accounting.get_lp_balance = AsyncMock(return_value=low_balance)
         with pytest.raises(ValueError, match="Insufficient liquidity"):
             await service.get_quote(
                 from_token_id="0xaaa",

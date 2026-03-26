@@ -99,10 +99,10 @@ class AccountingClient:
         response.raise_for_status()
         return response
 
-    async def get_balance(self, user_address: str, token_id: str) -> Balance:
+    async def get_lp_balance(self, token_id: str) -> Balance:
         response = await self._authenticated_request(
             "GET",
-            f"{self.base_url}/v1/accounting/balances/{user_address}/{token_id}",
+            f"{self.base_url}/v1/accounting/balances/{self._lp_address}/{token_id}",
         )
         return Balance(**response.json())
 

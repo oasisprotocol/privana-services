@@ -4,11 +4,11 @@ from dataclasses import dataclass
 @dataclass
 class Settings:
     api_host: str = "0.0.0.0"
-    api_port: int = 8001
+    api_port: int = 8000
     log_level: str = "INFO"
     environment: str = "development"
 
-    accounting_api_base_url: str = "http://localhost:8000"
+    accounting_api_base_url: str = "https://flexvaults-staging.rofl.build"
 
     lifi_api_key: str = ""
     lifi_api_url: str = "https://li.quest/v1"

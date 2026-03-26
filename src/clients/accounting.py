@@ -42,10 +42,13 @@ class AccountingClient:
         self._chain_id = settings.accounting_chain_id
         self._siwe_token: Optional[str] = None
         self._jwt_token: Optional[str] = None
+        self._auth_timestamp: Optional[float] = None
 
     async def _ensure_authenticated(self) -> None:
-        if self._siwe_token and self._jwt_token:
-            return
+        if self._siwe_token and self._jwt_token and self._auth_timestamp:
+            elapsed = asyncio.get_event_loop().time() - self._auth_timestamp
+            if elapsed < 23 * 3600:
+                return
 
         account = Account.from_key(self._lp_private_key)
         r = await self.client.get(
@@ -73,6 +76,7 @@ class AccountingClient:
         data = r.json()
         self._siwe_token = data["siwe_token"]
         self._jwt_token = data["jwt_access_token"]
+        self._auth_timestamp = asyncio.get_event_loop().time()
 
     def _auth_headers(self) -> dict:
         return {
@@ -80,12 +84,25 @@ class AccountingClient:
             "Authorization": f"Bearer {self._jwt_token}",
         }
 
-    async def get_balance(self, user_address: str, token_id: str) -> Balance:
+    async def _authenticated_request(self, method: str, url: str) -> httpx.Response:
         await self._ensure_authenticated()
-        response = await _request_with_retry(
-            self.client, "GET",
+        response = await self.client.request(method, url, headers=self._auth_headers())
+        is_auth_error = response.status_code == 401 or (
+            response.status_code == 400 and "SIWE" in response.text
+        )
+        if is_auth_error:
+            self._siwe_token = None
+            self._jwt_token = None
+            self._auth_timestamp = None
+            await self._ensure_authenticated()
+            response = await self.client.request(method, url, headers=self._auth_headers())
+        response.raise_for_status()
+        return response
+
+    async def get_balance(self, user_address: str, token_id: str) -> Balance:
+        response = await self._authenticated_request(
+            "GET",
             f"{self.base_url}/v1/accounting/balances/{user_address}/{token_id}",
-            headers=self._auth_headers(),
         )
         return Balance(**response.json())
 

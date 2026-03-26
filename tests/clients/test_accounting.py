@@ -126,8 +126,10 @@ class TestAccountingClient:
         )
 
     async def test_get_balance_returns_balance(self, client, mock_http_client):
+        import asyncio
         client._siwe_token = "test-siwe"
         client._jwt_token = "test-jwt"
+        client._auth_timestamp = asyncio.get_event_loop().time()
         mock_http_client.request.return_value = self._mock_response(SAMPLE_BALANCE)
 
         result = await client.get_balance("0xuser", "0xtoken")

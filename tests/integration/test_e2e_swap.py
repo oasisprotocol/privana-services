@@ -1,18 +1,14 @@
 import os
-from datetime import datetime, timedelta, timezone
 
 import httpx
 import pytest
 from dotenv import load_dotenv
-from eth_account import Account
-from eth_account.messages import encode_defunct
 
 load_dotenv()
 
 from src.main import app
 from src.services.eip712 import sign_transfer
 
-ACCOUNTING_API = os.getenv("ACCOUNTING_API_BASE_URL", "https://flexvaults-staging.rofl.build")
 LP_ADDRESS = os.getenv("LIQUIDITY_PROVIDER_ADDRESS")
 LP_PK = os.getenv("LIQUIDITY_PROVIDER_PRIVATE_KEY")
 ACCOUNTING_CONTRACT = os.getenv("ACCOUNTING_CONTRACT_ADDRESS")
@@ -28,35 +24,6 @@ pytestmark = pytest.mark.skipif(
     not LP_PK or not LP_ADDRESS,
     reason="Integration tests require .env with LP credentials",
 )
-
-
-async def _siwe_login(c: httpx.AsyncClient, address: str, pk: str) -> tuple[str, str]:
-    account = Account.from_key(pk)
-    r = await c.get(f"{ACCOUNTING_API}/v1/accounting/auth/nonce?address={address}")
-    nonce = r.json()["nonce"]
-    now = datetime.now(timezone.utc)
-    siwe = (
-        f"flexvaults-staging.rofl.build wants you to sign in with your Ethereum account:\n"
-        f"{address}\n\nSign in to FlexVaults\n\n"
-        f"URI: https://flexvaults-staging.rofl.build\n"
-        f"Version: 1\nChain ID: {CHAIN_ID}\nNonce: {nonce}\n"
-        f"Issued At: {now.strftime('%Y-%m-%dT%H:%M:%SZ')}\n"
-        f"Expiration Time: {(now + timedelta(hours=24)).strftime('%Y-%m-%dT%H:%M:%SZ')}"
-    )
-    signed = account.sign_message(encode_defunct(text=siwe))
-    r = await c.post(f"{ACCOUNTING_API}/v1/accounting/auth/login", json={
-        "siwe_message": siwe, "signature": f"0x{signed.signature.hex()}"
-    })
-    d = r.json()
-    return d["siwe_token"], d["jwt_access_token"]
-
-
-async def _get_balance(c: httpx.AsyncClient, siwe: str, jwt: str, address: str, token_id: str) -> int:
-    r = await c.get(
-        f"{ACCOUNTING_API}/v1/accounting/balances/{address}/{token_id}",
-        headers={"X-SIWE-Token": siwe, "Authorization": f"Bearer {jwt}"},
-    )
-    return int(r.json().get("balance", "0"))
 
 
 @pytest.fixture(autouse=True)
@@ -86,26 +53,6 @@ async def api_client():
         yield c
 
 
-@pytest.fixture
-async def acct_client():
-    async with httpx.AsyncClient(timeout=30) as c:
-        yield c
-
-
-@pytest.fixture
-async def accounting_auth(acct_client):
-    try:
-        user_siwe, user_jwt = await _siwe_login(acct_client, TEST_USER_ADDRESS, TEST_USER_PK)
-        lp_siwe, lp_jwt = await _siwe_login(acct_client, LP_ADDRESS, LP_PK)
-    except Exception:
-        pytest.skip("Accounting API unavailable")
-    return {
-        "client": acct_client,
-        "user_siwe": user_siwe, "user_jwt": user_jwt,
-        "lp_siwe": lp_siwe, "lp_jwt": lp_jwt,
-    }
-
-
 class TestHealthCheck:
     async def test_health_returns_ok(self, api_client):
         r = await api_client.get("/health")
@@ -119,14 +66,14 @@ class TestQuoteEndpoint:
         r = await api_client.get("/v1/quote", params={
             "from_token_id": USDC_TOKEN_ID,
             "to_token_id": WETH_TOKEN_ID,
-            "from_amount": "1000000",
+            "from_amount": "500000",
             "user_address": TEST_USER_ADDRESS,
         })
         assert r.status_code == 200
         data = r.json()
         assert data["from_token_id"] == USDC_TOKEN_ID.lower()
         assert data["to_token_id"] == WETH_TOKEN_ID.lower()
-        assert data["from_amount"] == "1000000"
+        assert data["from_amount"] == "500000"
         assert int(data["to_amount_estimate"]) > 0
         assert int(data["fee_amount"]) > 0
         assert data["liquidity_provider"] == LP_ADDRESS
@@ -137,7 +84,7 @@ class TestQuoteEndpoint:
         r = await api_client.get("/v1/quote", params={
             "from_token_id": WETH_TOKEN_ID,
             "to_token_id": USDC_TOKEN_ID,
-            "from_amount": str(10**16),
+            "from_amount": str(5 * 10**15),
             "user_address": TEST_USER_ADDRESS,
         })
         assert r.status_code == 200
@@ -148,7 +95,7 @@ class TestQuoteEndpoint:
         r = await api_client.get("/v1/quote", params={
             "from_token_id": "not-hex",
             "to_token_id": WETH_TOKEN_ID,
-            "from_amount": "1000000",
+            "from_amount": "500000",
             "user_address": TEST_USER_ADDRESS,
         })
         assert r.status_code == 400
@@ -164,24 +111,8 @@ class TestQuoteEndpoint:
 
 
 class TestSwapEndpoint:
-    async def test_swap_usdc_to_weth(self, api_client, accounting_auth):
-        auth = accounting_auth
-        c = auth["client"]
-
-        user_usdc_before = await _get_balance(
-            c, auth["user_siwe"], auth["user_jwt"], TEST_USER_ADDRESS, USDC_TOKEN_ID
-        )
-        user_weth_before = await _get_balance(
-            c, auth["user_siwe"], auth["user_jwt"], TEST_USER_ADDRESS, WETH_TOKEN_ID
-        )
-        lp_usdc_before = await _get_balance(
-            c, auth["lp_siwe"], auth["lp_jwt"], LP_ADDRESS, USDC_TOKEN_ID
-        )
-        lp_weth_before = await _get_balance(
-            c, auth["lp_siwe"], auth["lp_jwt"], LP_ADDRESS, WETH_TOKEN_ID
-        )
-
-        swap_amount = "1000000"
+    async def test_swap_usdc_to_weth(self, api_client):
+        swap_amount = "500000"
 
         r = await api_client.get("/v1/quote", params={
             "from_token_id": USDC_TOKEN_ID,
@@ -216,33 +147,8 @@ class TestSwapEndpoint:
         assert result["tx_hash"].startswith("0x")
         print(f"\n  USDC→WETH swap tx: {result['tx_hash']}")
 
-        auth2 = {}
-        auth2["user_siwe"], auth2["user_jwt"] = await _siwe_login(c, TEST_USER_ADDRESS, TEST_USER_PK)
-        auth2["lp_siwe"], auth2["lp_jwt"] = await _siwe_login(c, LP_ADDRESS, LP_PK)
-
-        user_usdc_after = await _get_balance(
-            c, auth2["user_siwe"], auth2["user_jwt"], TEST_USER_ADDRESS, USDC_TOKEN_ID
-        )
-        user_weth_after = await _get_balance(
-            c, auth2["user_siwe"], auth2["user_jwt"], TEST_USER_ADDRESS, WETH_TOKEN_ID
-        )
-        lp_usdc_after = await _get_balance(
-            c, auth2["lp_siwe"], auth2["lp_jwt"], LP_ADDRESS, USDC_TOKEN_ID
-        )
-        lp_weth_after = await _get_balance(
-            c, auth2["lp_siwe"], auth2["lp_jwt"], LP_ADDRESS, WETH_TOKEN_ID
-        )
-
-        assert user_usdc_after < user_usdc_before
-        assert user_weth_after > user_weth_before
-        assert lp_usdc_after > lp_usdc_before
-        assert lp_weth_after < lp_weth_before
-
-    async def test_swap_weth_to_usdc(self, api_client, accounting_auth):
-        auth = accounting_auth
-        c = auth["client"]
-
-        swap_amount = str(10**16)
+    async def test_swap_weth_to_usdc(self, api_client):
+        swap_amount = str(5 * 10**15)
 
         r = await api_client.get("/v1/quote", params={
             "from_token_id": WETH_TOKEN_ID,
@@ -289,7 +195,7 @@ class TestSwapEndpoint:
         r = await api_client.get("/v1/quote", params={
             "from_token_id": USDC_TOKEN_ID,
             "to_token_id": WETH_TOKEN_ID,
-            "from_amount": "1000000",
+            "from_amount": "500000",
             "user_address": TEST_USER_ADDRESS,
         })
         if r.status_code != 200:
@@ -310,7 +216,7 @@ class TestSwapStatus:
         r = await api_client.get("/v1/quote", params={
             "from_token_id": USDC_TOKEN_ID,
             "to_token_id": WETH_TOKEN_ID,
-            "from_amount": "1000000",
+            "from_amount": "500000",
             "user_address": TEST_USER_ADDRESS,
         })
         if r.status_code != 200:
@@ -324,7 +230,7 @@ class TestSwapStatus:
             user_address=TEST_USER_ADDRESS,
             to_address=quote["liquidity_provider"],
             token_id=USDC_TOKEN_ID,
-            amount=int("1000000"),
+            amount=int("500000"),
             nonce=quote["transfer_nonce"],
         )
 

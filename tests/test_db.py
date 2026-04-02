@@ -1,7 +1,7 @@
 import sqlite3
 
-import src.db as db_module
-from src.db import db_write, close_db
+import src.core.db as db_module
+from src.core.db import db_write, close_db
 
 
 class TestMigrations:

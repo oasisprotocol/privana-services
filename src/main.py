@@ -5,8 +5,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from src.api.routes import router
-from src.config import load_settings
-from src.db import close_db, get_db
+from src.core.config import load_settings
+from src.core.db import close_db, get_db
 
 logger = logging.getLogger(__name__)
 

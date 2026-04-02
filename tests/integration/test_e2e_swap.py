@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from src.services.eip712 import sign_transfer
+from src.core.eip712 import sign_transfer
 
 LP_ADDRESS = os.getenv("LIQUIDITY_PROVIDER_ADDRESS")
 LP_PK = os.getenv("LIQUIDITY_PROVIDER_PRIVATE_KEY")

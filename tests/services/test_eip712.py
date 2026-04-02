@@ -1,7 +1,7 @@
 import pytest
 from eth_account import Account
 
-from src.services.eip712 import _to_bytes32, sign_transfer
+from src.core.eip712 import _to_bytes32, sign_transfer
 
 
 PRIVATE_KEY_1 = "0x4c0883a69102937d6231471b5dbb6204fe512961708279f69e0f0fcbf24b5830"

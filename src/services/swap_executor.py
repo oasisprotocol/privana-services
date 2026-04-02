@@ -6,10 +6,10 @@ from typing import Optional
 
 from src.clients.accounting import get_accounting_client
 from src.clients.sapphire import get_sapphire_client
-from src.config import load_settings
-from src.db import db_write, get_db
+from src.core.config import load_settings
+from src.core.db import db_write, get_db
 from src.models.swap import SwapRecord, SwapStatus
-from src.services.eip712 import sign_transfer
+from src.core.eip712 import sign_transfer
 
 logger = logging.getLogger(__name__)
 

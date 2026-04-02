@@ -7,9 +7,9 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-import src.db as db_module
-from src.config import load_settings
-from src.db import db_write
+import src.core.db as db_module
+from src.core.config import load_settings
+from src.core.db import db_write
 
 _settings = load_settings(refresh=True)
 

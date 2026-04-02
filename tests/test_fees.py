@@ -1,4 +1,4 @@
-from src.fees import calculate_fee
+from src.core.fees import calculate_fee
 
 
 class TestCalculateFee:

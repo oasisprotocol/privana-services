@@ -128,10 +128,10 @@ async def list_chains() -> ChainListResponse:
 
 
 def _get_supported_token_ids() -> list[str]:
-    from src.config.tokens import get_supported_token_ids
+    from src.core.tokens import get_supported_token_ids
     return get_supported_token_ids()
 
 
 def _get_supported_chains() -> list[ChainInfo]:
-    from src.config.tokens import get_supported_chains
+    from src.core.tokens import get_supported_chains
     return [ChainInfo(**c) for c in get_supported_chains()]

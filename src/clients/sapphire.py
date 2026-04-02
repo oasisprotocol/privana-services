@@ -4,7 +4,7 @@ from typing import Optional
 from eth_account import Account
 from web3 import Web3
 
-from src.config import load_settings
+from src.core.config import load_settings
 
 logger = logging.getLogger(__name__)
 

@@ -1,6 +1,6 @@
 import pytest
 
-from src.validation import validate_address, validate_amount, validate_token_id
+from src.core.validation import validate_address, validate_amount, validate_token_id
 
 
 class TestValidateTokenId:

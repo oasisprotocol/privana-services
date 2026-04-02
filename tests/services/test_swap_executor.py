@@ -13,9 +13,9 @@ SUFFICIENT_BALANCE = Balance(
 
 
 def _make_executor(settings):
-    with patch("src.services.swap_executor.get_accounting_client") as mock_acct, \
-         patch("src.services.swap_executor.get_sapphire_client") as mock_saph, \
-         patch("src.services.swap_executor.load_settings") as mock_settings:
+    with patch("src.services.swap.executor.get_accounting_client") as mock_acct, \
+         patch("src.services.swap.executor.get_sapphire_client") as mock_saph, \
+         patch("src.services.swap.executor.load_settings") as mock_settings:
         mock_settings.return_value = settings
 
         acct = AsyncMock()
@@ -27,7 +27,7 @@ def _make_executor(settings):
         saph.execute_swap = MagicMock(return_value="0x" + "ff" * 32)
         mock_saph.return_value = saph
 
-        from src.services.swap_executor import SwapExecutor
+        from src.services.swap.executor import SwapExecutor
         executor = SwapExecutor()
         return executor
 
@@ -231,10 +231,10 @@ class TestExecuteSwap:
             route_tool="okx",
         )
 
-        with patch("src.services.swap_executor.get_accounting_client") as mock_acct, \
-             patch("src.services.swap_executor.get_sapphire_client") as mock_saph, \
-             patch("src.services.swap_executor.load_settings") as mock_settings, \
-             patch("src.services.swap_executor.sign_transfer") as mock_sign:
+        with patch("src.services.swap.executor.get_accounting_client") as mock_acct, \
+             patch("src.services.swap.executor.get_sapphire_client") as mock_saph, \
+             patch("src.services.swap.executor.load_settings") as mock_settings, \
+             patch("src.services.swap.executor.sign_transfer") as mock_sign:
             mock_settings.return_value = settings
 
             acct = AsyncMock()
@@ -248,7 +248,7 @@ class TestExecuteSwap:
 
             mock_sign.return_value = "0x" + "cc" * 65
 
-            from src.services.swap_executor import SwapExecutor
+            from src.services.swap.executor import SwapExecutor
             executor = SwapExecutor()
             await executor.execute_swap("q_sign", user_address, 0, input_signature)
 

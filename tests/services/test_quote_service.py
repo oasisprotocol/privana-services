@@ -13,7 +13,7 @@ SUFFICIENT_BALANCE = Balance(
 
 class TestQuoteDeduplication:
     def _make_service(self):
-        from src.services.quote_service import QuoteService
+        from src.services.swap.quote_service import QuoteService
         service = QuoteService.__new__(QuoteService)
         service.settings = Settings()
         service._last_cleanup = 0
@@ -53,7 +53,7 @@ class TestQuoteDeduplication:
 
 class TestExpiredQuoteCleanup:
     def _make_service(self):
-        from src.services.quote_service import QuoteService
+        from src.services.swap.quote_service import QuoteService
         service = QuoteService.__new__(QuoteService)
         service.settings = Settings()
         service._last_cleanup = 0
@@ -94,7 +94,7 @@ class TestExpiredQuoteCleanup:
 
 class TestGetQuote:
     def _make_service(self):
-        from src.services.quote_service import QuoteService
+        from src.services.swap.quote_service import QuoteService
         service = QuoteService.__new__(QuoteService)
         service.settings = Settings(
             fee_bps=10,

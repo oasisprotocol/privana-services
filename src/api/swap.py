@@ -8,8 +8,8 @@ from src.models.api import (
     SwapResponse,
     SwapStatusResponse,
 )
-from src.services.quote_service import get_quote_service
-from src.services.swap_executor import get_swap_executor
+from src.services.swap.quote_service import get_quote_service
+from src.services.swap.executor import get_swap_executor
 
 logger = logging.getLogger(__name__)
 

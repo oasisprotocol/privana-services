@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from web3 import Web3
 
-from src.models.accounting import Balance
+from src.models.common import Balance
 from src.models.swap import SwapStatus
 
 SUFFICIENT_BALANCE = Balance(

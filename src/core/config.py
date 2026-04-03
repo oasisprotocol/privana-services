@@ -4,7 +4,7 @@ from typing import Optional
 
 from dotenv import load_dotenv
 
-from src.models.types import Settings
+from src.models.settings import Settings
 
 load_dotenv()
 

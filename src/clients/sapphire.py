@@ -11,26 +11,22 @@ logger = logging.getLogger(__name__)
 DEFAULT_GAS_LIMIT = 500_000
 
 
-def _try_encrypted_tx(pk, sender, recipient, rpc_url, gas_limit, calldata, gas_gwei, nonce):
-    try:
-        from sapphirepy.wrapper import send_encrypted_sapphire_tx
-        result_code, result_str = send_encrypted_sapphire_tx(
-            pk=pk,
-            sender=sender,
-            recipient=recipient,
-            rpc_url=rpc_url,
-            eth_amount=0,
-            gas_limit=gas_limit,
-            data=calldata,
-            gas_cost_gwei=gas_gwei,
-            nonce=nonce,
-        )
-        if result_code == 0 and result_str:
-            return result_str
-        logger.warning(f"sapphirepy returned code={result_code}, falling back to legacy tx")
-    except Exception as exc:
-        logger.warning(f"sapphirepy unavailable ({exc}), falling back to legacy tx")
-    return None
+def _send_encrypted_tx(pk, sender, recipient, rpc_url, gas_limit, calldata, gas_gwei, nonce):
+    from sapphirepy.wrapper import send_encrypted_sapphire_tx
+    result_code, result_str = send_encrypted_sapphire_tx(
+        pk=pk,
+        sender=sender,
+        recipient=recipient,
+        rpc_url=rpc_url,
+        eth_amount=0,
+        gas_limit=gas_limit,
+        data=calldata,
+        gas_cost_gwei=gas_gwei,
+        nonce=nonce,
+    )
+    if result_code != 0 or not result_str:
+        raise RuntimeError(f"Encrypted tx failed: sapphirepy returned code={result_code}")
+    return result_str
 
 
 class SapphireClient:
@@ -65,24 +61,12 @@ class SapphireClient:
         gas_gwei = max(int(gas_price // 10**9), 100)
         nonce = self.w3.eth.get_transaction_count(self.account.address)
 
-        tx_hash_hex = _try_encrypted_tx(
+        tx_hash_hex = _send_encrypted_tx(
             self.private_key, self.account.address, address,
             self.rpc_url, gas_limit, calldata, gas_gwei, nonce,
         )
 
-        if tx_hash_hex:
-            logger.info(f"Tx sent (encrypted): {tx_hash_hex}")
-        else:
-            tx_data = contract.functions[function_name](*args).build_transaction({
-                "chainId": self.chain_id,
-                "gas": gas_limit,
-                "gasPrice": gas_price,
-                "nonce": nonce,
-            })
-            signed_tx = self.account.sign_transaction(tx_data)
-            raw_hash = self.w3.eth.send_raw_transaction(signed_tx.raw_transaction)
-            tx_hash_hex = f"0x{raw_hash.hex()}"
-            logger.info(f"Tx sent (legacy): {tx_hash_hex}")
+        logger.info(f"Tx sent (encrypted): {tx_hash_hex}")
 
         receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash_hex)
 

@@ -1,5 +1,7 @@
 import sqlite3
 
+import pytest
+
 import src.core.db as db_module
 from src.core.db import db_write, close_db
 
@@ -34,6 +36,51 @@ class TestMigrations:
             "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_quotes_expires'"
         ).fetchall()
         assert len(rows) == 1
+
+    def test_creates_earn_pools_table(self, test_db):
+        rows = test_db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='earn_pools'"
+        ).fetchall()
+        assert len(rows) == 1
+
+    def test_creates_earn_deposits_table(self, test_db):
+        rows = test_db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='earn_deposits'"
+        ).fetchall()
+        assert len(rows) == 1
+
+    def test_creates_earn_transactions_table(self, test_db):
+        rows = test_db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='earn_transactions'"
+        ).fetchall()
+        assert len(rows) == 1
+
+    def test_creates_earn_deposits_user_index(self, test_db):
+        rows = test_db.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_earn_deposits_user'"
+        ).fetchall()
+        assert len(rows) == 1
+
+    def test_creates_earn_deposits_pool_index(self, test_db):
+        rows = test_db.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_earn_deposits_pool'"
+        ).fetchall()
+        assert len(rows) == 1
+
+    def test_earn_deposits_unique_constraint(self, test_db):
+        db_write(
+            test_db,
+            "INSERT INTO earn_deposits (id, pool_id, user_address, shares, total_deposited, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("d1", "pool1", "0xuser", "100", "100", 1000, 1000),
+        )
+        with pytest.raises(sqlite3.IntegrityError):
+            db_write(
+                test_db,
+                "INSERT INTO earn_deposits (id, pool_id, user_address, shares, total_deposited, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                ("d2", "pool1", "0xuser", "200", "200", 1000, 1000),
+            )
 
     def test_migrations_are_idempotent(self, test_db):
         db_module._run_migrations(test_db)

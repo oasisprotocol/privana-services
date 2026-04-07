@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from src.services.eip712 import sign_transfer
+from src.core.eip712 import sign_transfer
 
 LP_ADDRESS = os.getenv("LIQUIDITY_PROVIDER_ADDRESS")
 LP_PK = os.getenv("LIQUIDITY_PROVIDER_PRIVATE_KEY")
@@ -33,8 +33,8 @@ async def api_client():
     import src.clients.accounting as acct_mod
     import src.clients.lifi as lifi_mod
     import src.clients.sapphire as saph_mod
-    import src.services.quote_service as qs_mod
-    import src.services.swap_executor as se_mod
+    import src.services.swap.quote_service as qs_mod
+    import src.services.swap.executor as se_mod
     acct_mod._client_instance = None
     lifi_mod._client_instance = None
     saph_mod._client_instance = None

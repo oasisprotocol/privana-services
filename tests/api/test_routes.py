@@ -31,7 +31,7 @@ MOCK_QUOTE = QuoteResponse(
 
 class TestQuoteRoute:
     async def test_returns_200_with_valid_params(self, api_client):
-        with patch("src.api.routes.get_quote_service") as mock_svc:
+        with patch("src.api.swap.get_quote_service") as mock_svc:
             svc = MagicMock()
             svc.get_quote = AsyncMock(return_value=MOCK_QUOTE)
             mock_svc.return_value = svc
@@ -50,7 +50,7 @@ class TestQuoteRoute:
             assert data["fee_bps"] == 10
 
     async def test_returns_400_on_value_error(self, api_client):
-        with patch("src.api.routes.get_quote_service") as mock_svc:
+        with patch("src.api.swap.get_quote_service") as mock_svc:
             svc = MagicMock()
             svc.get_quote = AsyncMock(side_effect=ValueError("Invalid token"))
             mock_svc.return_value = svc
@@ -66,7 +66,7 @@ class TestQuoteRoute:
             assert "Invalid token" in r.json()["detail"]
 
     async def test_returns_500_on_unexpected_error(self, api_client):
-        with patch("src.api.routes.get_quote_service") as mock_svc:
+        with patch("src.api.swap.get_quote_service") as mock_svc:
             svc = MagicMock()
             svc.get_quote = AsyncMock(side_effect=RuntimeError("LiFi down"))
             mock_svc.return_value = svc
@@ -87,7 +87,7 @@ class TestQuoteRoute:
         assert r.status_code == 422
 
     async def test_default_slippage(self, api_client):
-        with patch("src.api.routes.get_quote_service") as mock_svc:
+        with patch("src.api.swap.get_quote_service") as mock_svc:
             svc = MagicMock()
             svc.get_quote = AsyncMock(return_value=MOCK_QUOTE)
             mock_svc.return_value = svc
@@ -121,7 +121,7 @@ class TestSwapRoute:
         )
 
     async def test_returns_200_on_success(self, api_client):
-        with patch("src.api.routes.get_swap_executor") as mock_exec:
+        with patch("src.api.swap.get_swap_executor") as mock_exec:
             executor = MagicMock()
             executor.execute_swap = AsyncMock(return_value=self._mock_swap())
             mock_exec.return_value = executor
@@ -140,7 +140,7 @@ class TestSwapRoute:
             assert data["tx_hash"].startswith("0x")
 
     async def test_returns_400_on_expired_quote(self, api_client):
-        with patch("src.api.routes.get_swap_executor") as mock_exec:
+        with patch("src.api.swap.get_swap_executor") as mock_exec:
             executor = MagicMock()
             executor.execute_swap = AsyncMock(side_effect=ValueError("Quote has expired"))
             mock_exec.return_value = executor
@@ -155,7 +155,7 @@ class TestSwapRoute:
             assert r.status_code == 400
 
     async def test_returns_500_on_unexpected_error(self, api_client):
-        with patch("src.api.routes.get_swap_executor") as mock_exec:
+        with patch("src.api.swap.get_swap_executor") as mock_exec:
             executor = MagicMock()
             executor.execute_swap = AsyncMock(side_effect=RuntimeError("Sapphire unreachable"))
             mock_exec.return_value = executor
@@ -170,7 +170,7 @@ class TestSwapRoute:
             assert r.status_code == 500
 
     async def test_message_reflects_status(self, api_client):
-        with patch("src.api.routes.get_swap_executor") as mock_exec:
+        with patch("src.api.swap.get_swap_executor") as mock_exec:
             executor = MagicMock()
             executor.execute_swap = AsyncMock(
                 return_value=self._mock_swap(status="failed", tx_hash=None, error="reverted")
@@ -203,7 +203,7 @@ class TestSwapStatusRoute:
             created_at=1000,
             updated_at=1000,
         )
-        with patch("src.api.routes.get_swap_executor") as mock_exec:
+        with patch("src.api.swap.get_swap_executor") as mock_exec:
             executor = MagicMock()
             executor._get_swap.return_value = swap
             mock_exec.return_value = executor
@@ -216,7 +216,7 @@ class TestSwapStatusRoute:
             assert data["status"] == "completed"
 
     async def test_returns_404_for_missing_swap(self, api_client):
-        with patch("src.api.routes.get_swap_executor") as mock_exec:
+        with patch("src.api.swap.get_swap_executor") as mock_exec:
             executor = MagicMock()
             executor._get_swap.side_effect = ValueError("Swap not found")
             mock_exec.return_value = executor

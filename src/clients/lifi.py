@@ -3,7 +3,7 @@ from typing import Any, Optional
 
 import httpx
 
-from src.config import load_settings
+from src.core.config import load_settings
 
 logger = logging.getLogger(__name__)
 

@@ -7,8 +7,8 @@ import httpx
 from eth_account import Account
 from eth_account.messages import encode_defunct
 
-from src.config import load_settings
-from src.models.accounting import (
+from src.core.config import load_settings
+from src.models.common import (
     Balance,
     TokenInfo,
 )

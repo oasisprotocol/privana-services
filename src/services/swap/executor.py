@@ -4,14 +4,36 @@ import time
 import uuid
 from typing import Optional
 
+from web3 import Web3
+
 from src.clients.accounting import get_accounting_client
 from src.clients.sapphire import get_sapphire_client
-from src.config import load_settings
-from src.db import db_write, get_db
+from src.core.config import load_settings
+from src.core.db import db_write, get_db
+from src.core.eip712 import sign_transfer
 from src.models.swap import SwapRecord, SwapStatus
-from src.services.eip712 import sign_transfer
 
 logger = logging.getLogger(__name__)
+
+SWAP_MANAGER_ABI = [
+    {
+        "inputs": [
+            {"name": "user", "type": "address"},
+            {"name": "inputTokenId", "type": "bytes32"},
+            {"name": "inputAmount", "type": "uint256"},
+            {"name": "inputNonce", "type": "uint256"},
+            {"name": "inputSignature", "type": "bytes"},
+            {"name": "outputTokenId", "type": "bytes32"},
+            {"name": "outputAmount", "type": "uint256"},
+            {"name": "outputNonce", "type": "uint256"},
+            {"name": "outputSignature", "type": "bytes"},
+        ],
+        "name": "swap",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    }
+]
 
 
 class SwapExecutor:
@@ -73,16 +95,21 @@ class SwapExecutor:
                 output_sig_bytes = bytes.fromhex(output_signature[2:] if output_signature.startswith("0x") else output_signature)
 
                 tx_hash = await asyncio.to_thread(
-                    self.sapphire.execute_swap,
-                    user=user_address,
-                    input_token_id=bytes.fromhex(quote["from_token_id"][2:]),
-                    input_amount=int(quote["from_amount"]),
-                    input_nonce=input_nonce,
-                    input_signature=input_sig_bytes,
-                    output_token_id=bytes.fromhex(quote["to_token_id"][2:]),
-                    output_amount=int(quote["to_amount_estimate"]),
-                    output_nonce=lp_nonce,
-                    output_signature=output_sig_bytes,
+                    self.sapphire.execute_contract_call,
+                    contract_address=self.settings.swap_manager_contract_address,
+                    abi=SWAP_MANAGER_ABI,
+                    function_name="swap",
+                    args=[
+                        Web3.to_checksum_address(user_address),
+                        bytes.fromhex(quote["from_token_id"][2:]),
+                        int(quote["from_amount"]),
+                        input_nonce,
+                        input_sig_bytes,
+                        bytes.fromhex(quote["to_token_id"][2:]),
+                        int(quote["to_amount_estimate"]),
+                        lp_nonce,
+                        output_sig_bytes,
+                    ],
                 )
 
             self._update_swap(swap_id, status=SwapStatus.COMPLETED.value, swap_tx_hash=tx_hash)

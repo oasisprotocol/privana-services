@@ -4,9 +4,10 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from src.api.routes import router
-from src.config import load_settings
-from src.db import close_db, get_db
+from src.api.common import router as common_router
+from src.api.swap import router as swap_router
+from src.core.config import load_settings
+from src.core.db import close_db, get_db
 
 logger = logging.getLogger(__name__)
 
@@ -79,7 +80,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(router)
+app.include_router(common_router)
+app.include_router(swap_router)
 
 
 @app.get("/health")

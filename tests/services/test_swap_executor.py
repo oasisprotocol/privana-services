@@ -3,8 +3,9 @@ import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from web3 import Web3
 
-from src.models.accounting import Balance
+from src.models.common import Balance
 from src.models.swap import SwapStatus
 
 SUFFICIENT_BALANCE = Balance(
@@ -13,9 +14,9 @@ SUFFICIENT_BALANCE = Balance(
 
 
 def _make_executor(settings):
-    with patch("src.services.swap_executor.get_accounting_client") as mock_acct, \
-         patch("src.services.swap_executor.get_sapphire_client") as mock_saph, \
-         patch("src.services.swap_executor.load_settings") as mock_settings:
+    with patch("src.services.swap.executor.get_accounting_client") as mock_acct, \
+         patch("src.services.swap.executor.get_sapphire_client") as mock_saph, \
+         patch("src.services.swap.executor.load_settings") as mock_settings:
         mock_settings.return_value = settings
 
         acct = AsyncMock()
@@ -24,10 +25,10 @@ def _make_executor(settings):
         mock_acct.return_value = acct
 
         saph = MagicMock()
-        saph.execute_swap = MagicMock(return_value="0x" + "ff" * 32)
+        saph.execute_contract_call = MagicMock(return_value="0x" + "ff" * 32)
         mock_saph.return_value = saph
 
-        from src.services.swap_executor import SwapExecutor
+        from src.services.swap.executor import SwapExecutor
         executor = SwapExecutor()
         return executor
 
@@ -135,7 +136,7 @@ class TestExecuteSwap:
             route_tool="okx",
         )
         executor = _make_executor(settings)
-        executor.sapphire.execute_swap = MagicMock(
+        executor.sapphire.execute_contract_call = MagicMock(
             side_effect=RuntimeError("tx reverted")
         )
         result = await executor.execute_swap("q_fail", user_address, 0, input_signature)
@@ -178,7 +179,7 @@ class TestExecuteSwap:
         )
         executor = _make_executor(settings)
 
-        original_execute = executor.sapphire.execute_swap
+        original_execute = executor.sapphire.execute_contract_call
 
         def check_record_exists(*args, **kwargs):
             row = test_db.execute(
@@ -187,7 +188,7 @@ class TestExecuteSwap:
             assert row["cnt"] == 1
             return original_execute(*args, **kwargs)
 
-        executor.sapphire.execute_swap = MagicMock(side_effect=check_record_exists)
+        executor.sapphire.execute_contract_call = MagicMock(side_effect=check_record_exists)
         await executor.execute_swap("q_record", user_address, 0, input_signature)
 
     async def test_passes_correct_params_to_sapphire(
@@ -207,14 +208,16 @@ class TestExecuteSwap:
         executor = _make_executor(settings)
         await executor.execute_swap("q_params", user_address, 0, input_signature)
 
-        call_kwargs = executor.sapphire.execute_swap.call_args
-        assert call_kwargs.kwargs["user"] == user_address
-        assert call_kwargs.kwargs["input_token_id"] == bytes.fromhex("aaaa")
-        assert call_kwargs.kwargs["input_amount"] == 1000000
-        assert call_kwargs.kwargs["input_nonce"] == 0
-        assert call_kwargs.kwargs["output_token_id"] == bytes.fromhex("bbbb")
-        assert call_kwargs.kwargs["output_amount"] == 44000000000000000
-        assert call_kwargs.kwargs["output_nonce"] == 0
+        call_kwargs = executor.sapphire.execute_contract_call.call_args
+        assert call_kwargs.kwargs["function_name"] == "swap"
+        swap_args = call_kwargs.kwargs["args"]
+        assert swap_args[0] == Web3.to_checksum_address(user_address)
+        assert swap_args[1] == bytes.fromhex("aaaa")
+        assert swap_args[2] == 1000000
+        assert swap_args[3] == 0
+        assert swap_args[5] == bytes.fromhex("bbbb")
+        assert swap_args[6] == 44000000000000000
+        assert swap_args[7] == 0
 
     async def test_signs_output_transfer_with_lp_key(
         self, test_db, settings, insert_quote, user_address, input_signature
@@ -231,10 +234,10 @@ class TestExecuteSwap:
             route_tool="okx",
         )
 
-        with patch("src.services.swap_executor.get_accounting_client") as mock_acct, \
-             patch("src.services.swap_executor.get_sapphire_client") as mock_saph, \
-             patch("src.services.swap_executor.load_settings") as mock_settings, \
-             patch("src.services.swap_executor.sign_transfer") as mock_sign:
+        with patch("src.services.swap.executor.get_accounting_client") as mock_acct, \
+             patch("src.services.swap.executor.get_sapphire_client") as mock_saph, \
+             patch("src.services.swap.executor.load_settings") as mock_settings, \
+             patch("src.services.swap.executor.sign_transfer") as mock_sign:
             mock_settings.return_value = settings
 
             acct = AsyncMock()
@@ -243,12 +246,12 @@ class TestExecuteSwap:
             mock_acct.return_value = acct
 
             saph = MagicMock()
-            saph.execute_swap = MagicMock(return_value="0x" + "ff" * 32)
+            saph.execute_contract_call = MagicMock(return_value="0x" + "ff" * 32)
             mock_saph.return_value = saph
 
             mock_sign.return_value = "0x" + "cc" * 65
 
-            from src.services.swap_executor import SwapExecutor
+            from src.services.swap.executor import SwapExecutor
             executor = SwapExecutor()
             await executor.execute_swap("q_sign", user_address, 0, input_signature)
 

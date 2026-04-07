@@ -3,7 +3,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 
-from src.models.types import Settings
+from src.models.settings import Settings
 
 
 SAMPLE_ROUTES_RESPONSE = {

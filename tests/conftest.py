@@ -7,9 +7,9 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-import src.db as db_module
-from src.config import load_settings
-from src.db import db_write
+import src.core.db as db_module
+from src.core.config import load_settings
+from src.core.db import db_write
 
 _settings = load_settings(refresh=True)
 
@@ -75,8 +75,8 @@ async def api_client():
     import src.clients.accounting as acct_mod
     import src.clients.lifi as lifi_mod
     import src.clients.sapphire as saph_mod
-    import src.services.quote_service as qs_mod
-    import src.services.swap_executor as se_mod
+    import src.services.swap.quote_service as qs_mod
+    import src.services.swap.executor as se_mod
     acct_mod._client_instance = None
     lifi_mod._client_instance = None
     saph_mod._client_instance = None

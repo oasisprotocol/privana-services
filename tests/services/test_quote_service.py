@@ -3,8 +3,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from src.models.accounting import Balance
-from src.models.types import Settings
+from src.models.common import Balance
+from src.models.settings import Settings
 
 SUFFICIENT_BALANCE = Balance(
     user_address="0xlp", token_id="0xbbb", balance="999999999999999999999"
@@ -13,7 +13,7 @@ SUFFICIENT_BALANCE = Balance(
 
 class TestQuoteDeduplication:
     def _make_service(self):
-        from src.services.quote_service import QuoteService
+        from src.services.swap.quote_service import QuoteService
         service = QuoteService.__new__(QuoteService)
         service.settings = Settings()
         service._last_cleanup = 0
@@ -53,7 +53,7 @@ class TestQuoteDeduplication:
 
 class TestExpiredQuoteCleanup:
     def _make_service(self):
-        from src.services.quote_service import QuoteService
+        from src.services.swap.quote_service import QuoteService
         service = QuoteService.__new__(QuoteService)
         service.settings = Settings()
         service._last_cleanup = 0
@@ -94,7 +94,7 @@ class TestExpiredQuoteCleanup:
 
 class TestGetQuote:
     def _make_service(self):
-        from src.services.quote_service import QuoteService
+        from src.services.swap.quote_service import QuoteService
         service = QuoteService.__new__(QuoteService)
         service.settings = Settings(
             fee_bps=10,
@@ -108,7 +108,7 @@ class TestGetQuote:
         service.accounting.get_transfer_nonce = AsyncMock(return_value=5)
         service.accounting.get_lp_balance = AsyncMock(return_value=SUFFICIENT_BALANCE)
 
-        from src.models.accounting import TokenInfo
+        from src.models.common import TokenInfo
         from_token = TokenInfo(
             token_id="0xaaa",
             token_type=1,

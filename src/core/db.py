@@ -49,53 +49,6 @@ MIGRATIONS = [
     "CREATE INDEX IF NOT EXISTS idx_swaps_status ON swaps(status);",
     "CREATE INDEX IF NOT EXISTS idx_swaps_user ON swaps(user_address);",
     "CREATE INDEX IF NOT EXISTS idx_quotes_expires ON quotes(expires_at);",
-    """
-    CREATE TABLE IF NOT EXISTS earn_pools (
-        id TEXT PRIMARY KEY,
-        token_id TEXT NOT NULL,
-        strategy TEXT NOT NULL,
-        total_shares TEXT NOT NULL DEFAULT '0',
-        total_assets TEXT NOT NULL DEFAULT '0',
-        pool_address TEXT NOT NULL,
-        apy_bps INTEGER NOT NULL DEFAULT 0,
-        status TEXT NOT NULL DEFAULT 'active',
-        last_harvest_at INTEGER,
-        created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL
-    );
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS earn_deposits (
-        id TEXT PRIMARY KEY,
-        pool_id TEXT NOT NULL,
-        user_address TEXT NOT NULL,
-        shares TEXT NOT NULL,
-        total_deposited TEXT NOT NULL,
-        total_withdrawn TEXT NOT NULL DEFAULT '0',
-        created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL,
-        UNIQUE(pool_id, user_address)
-    );
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS earn_transactions (
-        id TEXT PRIMARY KEY,
-        pool_id TEXT NOT NULL,
-        user_address TEXT NOT NULL,
-        type TEXT NOT NULL,
-        amount TEXT NOT NULL,
-        shares TEXT NOT NULL,
-        exchange_rate TEXT NOT NULL,
-        tx_hash TEXT,
-        status TEXT NOT NULL DEFAULT 'pending',
-        created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL
-    );
-    """,
-    "CREATE INDEX IF NOT EXISTS idx_earn_deposits_user ON earn_deposits(user_address);",
-    "CREATE INDEX IF NOT EXISTS idx_earn_deposits_pool ON earn_deposits(pool_id);",
-    "CREATE INDEX IF NOT EXISTS idx_earn_tx_pool ON earn_transactions(pool_id);",
-    "CREATE INDEX IF NOT EXISTS idx_earn_tx_user ON earn_transactions(user_address);",
 ]
 
 

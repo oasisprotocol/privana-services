@@ -3,8 +3,11 @@ import { ethers } from 'hardhat';
 import { loadFixture } from '@nomicfoundation/hardhat-network-helpers';
 
 describe('EarnManager', function () {
+  const USDC_ADDRESS = '0x036cbd53842c5426634e7929541ec2318f3dcf7e';
+  const CHAIN_ID = 84532;
+  const TOKEN_DATA = ethers.solidityPacked(['uint256', 'address'], [CHAIN_ID, USDC_ADDRESS]);
+  const TOKEN_ID = ethers.keccak256(ethers.AbiCoder.defaultAbiCoder().encode(['uint8', 'bytes'], [1, TOKEN_DATA]));
   const POOL_ID = ethers.keccak256(ethers.toUtf8Bytes('usdc-aave-v3'));
-  const TOKEN_ID = ethers.keccak256(ethers.toUtf8Bytes('USDC'));
   const DUMMY_SIG = '0x' + '00'.repeat(65);
 
   async function deployFixture() {

@@ -110,8 +110,25 @@ contract EarnManager is Ownable {
         return pools[poolId];
     }
 
-    function getUserShares(bytes32 poolId, address user) external view returns (uint256) {
+    function getUserShares(address user, bytes32 poolId, bytes calldata token) external view returns (uint256) {
+        accounting.balanceOf(user, bytes32(0), token);
         return userShares[poolId][user];
+    }
+
+    /// @dev convertToShares(assets) = assets * totalShares / totalAssets (round DOWN)
+    /// Returns 1:1 if pool is empty. Mimics EIP-4626 convertToShares.
+    function convertToShares(bytes32 poolId, uint256 assets) external view returns (uint256) {
+        Pool memory pool = pools[poolId];
+        if (pool.totalShares == 0) return assets;
+        return (assets * pool.totalShares) / pool.totalAssets;
+    }
+
+    /// @dev convertToAssets(shares) = shares * totalAssets / totalShares (round DOWN)
+    /// Returns 1:1 if pool is empty. Mimics EIP-4626 convertToAssets.
+    function convertToAssets(bytes32 poolId, uint256 shares) external view returns (uint256) {
+        Pool memory pool = pools[poolId];
+        if (pool.totalShares == 0) return shares;
+        return (shares * pool.totalAssets) / pool.totalShares;
     }
 
     function getPoolCount() external view returns (uint256) {

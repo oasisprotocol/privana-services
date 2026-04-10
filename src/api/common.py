@@ -33,6 +33,9 @@ async def list_tokens() -> TokenListResponse:
                     chain_id=info.chain_id,
                     chain_name=info.chain_name,
                     token_address=info.token_address,
+                    token_symbol=info.symbol,
+                    token_name=info.name,
+                    token_decimals=info.decimals,
                 ))
             except Exception:
                 logger.warning(f"Failed to fetch token info for {token_id}")

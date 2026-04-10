@@ -5,6 +5,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from src.api.common import router as common_router
+from src.api.earn import router as earn_router
 from src.api.swap import router as swap_router
 from src.core.config import load_settings
 from src.core.db import close_db, get_db
@@ -82,6 +83,7 @@ app.add_middleware(
 
 app.include_router(common_router)
 app.include_router(swap_router)
+app.include_router(earn_router)
 
 
 @app.get("/health")

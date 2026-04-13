@@ -66,7 +66,9 @@ class TokenInfo(BaseModel):
     chain_id: Optional[int] = None
     chain_name: Optional[str] = None
     token_address: Optional[str] = None
-    symbol: Optional[str] = None
+    token_symbol: Optional[str] = None
+    token_name: Optional[str] = None
+    token_decimals: Optional[int] = None
 
 
 class TokenListResponse(BaseModel):

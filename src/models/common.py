@@ -13,6 +13,9 @@ class TokenInfo(BaseModel):
     chain_id: Optional[int] = None
     chain_name: Optional[str] = None
     token_address: Optional[str] = None
+    symbol: Optional[str] = None
+    name: Optional[str] = None
+    decimals: Optional[int] = None
 
 
 class Balance(BaseModel):

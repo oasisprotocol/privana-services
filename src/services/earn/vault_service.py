@@ -1,10 +1,13 @@
+import asyncio
 import logging
 from typing import Optional
 
 from web3 import Web3
 
+from src.clients.accounting import get_accounting_client
 from src.clients.sapphire import get_sapphire_client
 from src.core.config import load_settings
+from src.core.validation import validate_address, validate_amount, validate_token_id
 
 logger = logging.getLogger(__name__)
 
@@ -116,6 +119,7 @@ class VaultService:
     def __init__(self) -> None:
         self.settings = load_settings()
         self.sapphire = get_sapphire_client()
+        self.accounting = get_accounting_client()
         self.contract_address = Web3.to_checksum_address(
             self.settings.earn_manager_contract_address
         )
@@ -168,6 +172,91 @@ class VaultService:
             "shares": str(shares),
             "underlying_amount": str(underlying),
             "exchange_rate": exchange_rate,
+        }
+
+
+    async def get_deposit_quote(
+        self,
+        pool_id_hex: str,
+        amount: str,
+        user_address: str,
+    ) -> dict:
+        validate_address(user_address, "user_address")
+        validate_amount(amount, "amount")
+
+        pool_id = bytes.fromhex(pool_id_hex.removeprefix("0x"))
+        pool = self.get_pool(pool_id)
+        if pool["pool_address"] == "0x0000000000000000000000000000000000000000":
+            raise ValueError("Pool not found")
+        if not pool["active"]:
+            raise ValueError("Pool is not active")
+
+        shares_estimate = self.convert_to_shares(pool_id, int(amount))
+        total_shares = pool["total_shares"]
+        total_assets = pool["total_assets"]
+        exchange_rate = str(total_assets / total_shares) if total_shares > 0 else "1.0"
+
+        transfer_nonce = await self.accounting.get_transfer_nonce(user_address)
+
+        return {
+            "pool_id": pool_id_hex,
+            "token_id": pool["token_id"],
+            "amount": amount,
+            "shares_estimate": str(shares_estimate),
+            "exchange_rate": exchange_rate,
+            "pool_address": pool["pool_address"],
+            "transfer_nonce": transfer_nonce,
+        }
+
+    async def deposit(
+        self,
+        pool_id_hex: str,
+        user_address: str,
+        amount: str,
+        nonce: int,
+        signature: str,
+    ) -> dict:
+        validate_address(user_address, "user_address")
+        validate_amount(amount, "amount")
+
+        pool_id = bytes.fromhex(pool_id_hex.removeprefix("0x"))
+        pool = self.get_pool(pool_id)
+        if pool["pool_address"] == "0x0000000000000000000000000000000000000000":
+            raise ValueError("Pool not found")
+        if not pool["active"]:
+            raise ValueError("Pool is not active")
+
+        sig_bytes = bytes.fromhex(signature.removeprefix("0x"))
+
+        shares_before = self.get_user_shares(user_address, pool_id)
+
+        tx_hash = await asyncio.to_thread(
+            self.sapphire.execute_contract_call,
+            contract_address=self.contract_address,
+            abi=EARN_MANAGER_ABI,
+            function_name="deposit",
+            args=[
+                pool_id,
+                Web3.to_checksum_address(user_address),
+                int(amount),
+                nonce,
+                sig_bytes,
+            ],
+        )
+
+        shares_after = self.get_user_shares(user_address, pool_id)
+        shares_minted = shares_after - shares_before
+
+        pool_after = self.get_pool(pool_id)
+        exchange_rate = str(pool_after["total_assets"] / pool_after["total_shares"]) if pool_after["total_shares"] > 0 else "1.0"
+
+        return {
+            "pool_id": pool_id_hex,
+            "amount": amount,
+            "shares_minted": str(shares_minted),
+            "exchange_rate": exchange_rate,
+            "tx_hash": tx_hash,
+            "status": "completed",
         }
 
 

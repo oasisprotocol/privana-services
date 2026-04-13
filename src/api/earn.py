@@ -3,6 +3,9 @@ import logging
 from fastapi import APIRouter, HTTPException, Query
 
 from src.models.earn import (
+    DepositQuoteResponse,
+    DepositRequest,
+    DepositResponse,
     PoolDetailResponse,
     PoolListResponse,
     PoolResponse,
@@ -62,3 +65,42 @@ async def get_pool(pool_id: str) -> PoolDetailResponse:
     except Exception as exc:
         logger.exception("Failed to get earn pool")
         raise HTTPException(status_code=500, detail="Failed to get pool") from exc
+
+
+@router.get("/quote", response_model=DepositQuoteResponse)
+async def get_deposit_quote(
+    pool_id: str = Query(..., description="Earn pool ID (hex)"),
+    amount: str = Query(..., description="Amount in base units"),
+    user_address: str = Query(..., description="User wallet address"),
+) -> DepositQuoteResponse:
+    try:
+        service = get_vault_service()
+        quote = await service.get_deposit_quote(pool_id, amount, user_address)
+        return DepositQuoteResponse(**quote)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Deposit quote failed")
+        raise HTTPException(status_code=500, detail="Failed to get deposit quote") from exc
+
+
+@router.post("/deposit", response_model=DepositResponse)
+async def deposit(payload: DepositRequest) -> DepositResponse:
+    try:
+        service = get_vault_service()
+        result = await service.deposit(
+            pool_id_hex=payload.pool_id,
+            user_address=payload.user_address,
+            amount=payload.amount,
+            nonce=payload.nonce,
+            signature=payload.signature,
+        )
+        return DepositResponse(
+            deposit_id=result["tx_hash"],
+            **result,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Deposit failed")
+        raise HTTPException(status_code=500, detail="Failed to deposit") from exc

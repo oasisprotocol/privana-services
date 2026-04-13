@@ -3,12 +3,16 @@ import logging
 from fastapi import APIRouter, HTTPException, Query
 
 from src.models.earn import (
+    BalanceListResponse,
+    BalanceResponse,
     DepositQuoteResponse,
     DepositRequest,
     DepositResponse,
     PoolDetailResponse,
     PoolListResponse,
     PoolResponse,
+    WithdrawRequest,
+    WithdrawResponse,
 )
 from src.services.earn.vault_service import get_vault_service
 
@@ -104,3 +108,40 @@ async def deposit(payload: DepositRequest) -> DepositResponse:
     except Exception as exc:
         logger.exception("Deposit failed")
         raise HTTPException(status_code=500, detail="Failed to deposit") from exc
+
+
+@router.post("/withdraw", response_model=WithdrawResponse)
+async def withdraw(payload: WithdrawRequest) -> WithdrawResponse:
+    try:
+        service = get_vault_service()
+        result = await service.withdraw(
+            pool_id_hex=payload.pool_id,
+            user_address=payload.user_address,
+            amount=payload.amount,
+        )
+        return WithdrawResponse(
+            withdraw_id=result["tx_hash"],
+            **result,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Withdraw failed")
+        raise HTTPException(status_code=500, detail="Failed to withdraw") from exc
+
+
+@router.get("/balance", response_model=BalanceListResponse)
+async def get_balances(
+    user_address: str = Query(..., description="User wallet address"),
+) -> BalanceListResponse:
+    try:
+        service = get_vault_service()
+        balances = service.get_all_balances(user_address)
+        return BalanceListResponse(
+            positions=[BalanceResponse(**b) for b in balances]
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Failed to get balances")
+        raise HTTPException(status_code=500, detail="Failed to get balances") from exc

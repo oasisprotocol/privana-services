@@ -7,6 +7,7 @@ from web3 import Web3
 from src.clients.accounting import get_accounting_client
 from src.clients.sapphire import get_sapphire_client
 from src.core.config import load_settings
+from src.core.eip712 import sign_transfer
 from src.core.validation import validate_address, validate_amount, validate_token_id
 
 logger = logging.getLogger(__name__)
@@ -258,6 +259,93 @@ class VaultService:
             "tx_hash": tx_hash,
             "status": "completed",
         }
+
+
+    async def withdraw(
+        self,
+        pool_id_hex: str,
+        user_address: str,
+        amount: str,
+    ) -> dict:
+        validate_address(user_address, "user_address")
+        validate_amount(amount, "amount")
+
+        pool_id = bytes.fromhex(pool_id_hex.removeprefix("0x"))
+        pool = self.get_pool(pool_id)
+        if pool["pool_address"] == "0x0000000000000000000000000000000000000000":
+            raise ValueError("Pool not found")
+
+        shares = self.get_user_shares(user_address, pool_id)
+        max_withdraw = self.convert_to_assets(pool_id, shares) if shares > 0 else 0
+        if int(amount) > max_withdraw:
+            raise ValueError("Insufficient shares for this withdrawal")
+
+        pool_nonce = await self.accounting.get_transfer_nonce(pool["pool_address"])
+
+        pool_signature = sign_transfer(
+            private_key=self.settings.liquidity_provider_private_key,
+            chain_id=self.settings.accounting_chain_id,
+            verifying_contract=self.settings.accounting_contract_address,
+            user_address=pool["pool_address"],
+            to_address=user_address,
+            token_id=pool["token_id"],
+            amount=int(amount),
+            nonce=pool_nonce,
+        )
+
+        sig_bytes = bytes.fromhex(pool_signature.removeprefix("0x"))
+
+        shares_before = self.get_user_shares(user_address, pool_id)
+
+        tx_hash = await asyncio.to_thread(
+            self.sapphire.execute_contract_call,
+            contract_address=self.contract_address,
+            abi=EARN_MANAGER_ABI,
+            function_name="withdraw",
+            args=[
+                pool_id,
+                Web3.to_checksum_address(user_address),
+                int(amount),
+                pool_nonce,
+                sig_bytes,
+            ],
+        )
+
+        shares_after = self.get_user_shares(user_address, pool_id)
+        shares_burned = shares_before - shares_after
+
+        pool_after = self.get_pool(pool_id)
+        exchange_rate = str(pool_after["total_assets"] / pool_after["total_shares"]) if pool_after["total_shares"] > 0 else "1.0"
+
+        return {
+            "pool_id": pool_id_hex,
+            "amount": amount,
+            "shares_burned": str(shares_burned),
+            "exchange_rate": exchange_rate,
+            "tx_hash": tx_hash,
+            "status": "completed",
+        }
+
+    def get_all_balances(self, user_address: str) -> list[dict]:
+        validate_address(user_address, "user_address")
+        pools = self.list_pools()
+        balances = []
+        for pool in pools:
+            pool_id = bytes.fromhex(pool["pool_id"].removeprefix("0x"))
+            shares = self.get_user_shares(user_address, pool_id)
+            if shares > 0:
+                underlying = self.convert_to_assets(pool_id, shares)
+                total_shares = pool["total_shares"]
+                total_assets = pool["total_assets"]
+                exchange_rate = str(total_assets / total_shares) if total_shares > 0 else "1.0"
+                balances.append({
+                    "pool_id": pool["pool_id"],
+                    "token_id": pool["token_id"],
+                    "shares": str(shares),
+                    "underlying_amount": str(underlying),
+                    "exchange_rate": exchange_rate,
+                })
+        return balances
 
 
 _service_instance: Optional[VaultService] = None

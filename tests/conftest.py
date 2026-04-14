@@ -75,13 +75,15 @@ async def api_client():
     import src.clients.accounting as acct_mod
     import src.clients.lifi as lifi_mod
     import src.clients.sapphire as saph_mod
-    import src.services.swap.quote_service as qs_mod
+    import src.services.earn.vault_service as vs_mod
     import src.services.swap.executor as se_mod
+    import src.services.swap.quote_service as qs_mod
     acct_mod._client_instance = None
     lifi_mod._client_instance = None
     saph_mod._client_instance = None
     qs_mod._service_instance = None
     se_mod._executor_instance = None
+    vs_mod._service_instance = None
 
     from src.main import app
     transport = httpx.ASGITransport(app=app)
@@ -93,3 +95,4 @@ async def api_client():
     saph_mod._client_instance = None
     qs_mod._service_instance = None
     se_mod._executor_instance = None
+    vs_mod._service_instance = None

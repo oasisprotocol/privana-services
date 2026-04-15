@@ -117,6 +117,15 @@ class VaultService:
         nonce: int,
         signature: str,
     ) -> dict:
+        """Deposit user funds into an earn pool and mint shares.
+
+        Signature flow: the user signs an EIP-712 ``Transfer(user -> pool, tokenId,
+        amount, nonce)`` off-chain against the Accounting domain. This service
+        forwards that signature to ``EarnManager.deposit``, which atomically
+        transfers the funds on the accounting ledger and mints pool shares to the
+        user. The service itself never signs — authority to debit the user lives
+        with the user alone.
+        """
         validate_address(user_address, "user_address")
         validate_amount(amount, "amount")
 
@@ -167,6 +176,14 @@ class VaultService:
         user_address: str,
         amount: str,
     ) -> dict:
+        """Burn user shares and return the underlying assets.
+
+        Signature flow: the pool (LP) signs an EIP-712 ``Transfer(pool -> user,
+        tokenId, amount, nonce)`` using the liquidity-provider private key held
+        by this service. No user signature is needed — the user's on-chain share
+        balance is itself the authorization, and ``EarnManager.withdraw`` gates
+        the call by burning shares before executing the pool's transfer.
+        """
         validate_address(user_address, "user_address")
         validate_amount(amount, "amount")
 

@@ -6,114 +6,14 @@ from web3 import Web3
 
 from src.clients.accounting import get_accounting_client
 from src.clients.sapphire import get_sapphire_client
+from src.core.abi import load_abi
 from src.core.config import load_settings
 from src.core.eip712 import sign_transfer
 from src.core.validation import validate_address, validate_amount, validate_token_id
 
 logger = logging.getLogger(__name__)
 
-EARN_MANAGER_ABI = [
-    {
-        "inputs": [{"name": "poolId", "type": "bytes32"}],
-        "name": "getPool",
-        "outputs": [
-            {
-                "components": [
-                    {"name": "tokenId", "type": "bytes32"},
-                    {"name": "poolAddress", "type": "address"},
-                    {"name": "totalShares", "type": "uint256"},
-                    {"name": "totalAssets", "type": "uint256"},
-                    {"name": "active", "type": "bool"},
-                ],
-                "name": "",
-                "type": "tuple",
-            }
-        ],
-        "stateMutability": "view",
-        "type": "function",
-    },
-    {
-        "inputs": [
-            {"name": "user", "type": "address"},
-            {"name": "poolId", "type": "bytes32"},
-            {"name": "token", "type": "bytes"},
-        ],
-        "name": "getUserShares",
-        "outputs": [{"name": "", "type": "uint256"}],
-        "stateMutability": "view",
-        "type": "function",
-    },
-    {
-        "inputs": [],
-        "name": "getPoolCount",
-        "outputs": [{"name": "", "type": "uint256"}],
-        "stateMutability": "view",
-        "type": "function",
-    },
-    {
-        "inputs": [{"name": "", "type": "uint256"}],
-        "name": "poolIds",
-        "outputs": [{"name": "", "type": "bytes32"}],
-        "stateMutability": "view",
-        "type": "function",
-    },
-    {
-        "inputs": [
-            {"name": "poolId", "type": "bytes32"},
-            {"name": "assets", "type": "uint256"},
-        ],
-        "name": "convertToShares",
-        "outputs": [{"name": "", "type": "uint256"}],
-        "stateMutability": "view",
-        "type": "function",
-    },
-    {
-        "inputs": [
-            {"name": "poolId", "type": "bytes32"},
-            {"name": "shares", "type": "uint256"},
-        ],
-        "name": "convertToAssets",
-        "outputs": [{"name": "", "type": "uint256"}],
-        "stateMutability": "view",
-        "type": "function",
-    },
-    {
-        "inputs": [
-            {"name": "poolId", "type": "bytes32"},
-            {"name": "user", "type": "address"},
-            {"name": "amount", "type": "uint256"},
-            {"name": "nonce", "type": "uint256"},
-            {"name": "signature", "type": "bytes"},
-        ],
-        "name": "deposit",
-        "outputs": [],
-        "stateMutability": "nonpayable",
-        "type": "function",
-    },
-    {
-        "inputs": [
-            {"name": "poolId", "type": "bytes32"},
-            {"name": "user", "type": "address"},
-            {"name": "amount", "type": "uint256"},
-            {"name": "nonce", "type": "uint256"},
-            {"name": "signature", "type": "bytes"},
-        ],
-        "name": "withdraw",
-        "outputs": [],
-        "stateMutability": "nonpayable",
-        "type": "function",
-    },
-    {
-        "inputs": [
-            {"name": "poolId", "type": "bytes32"},
-            {"name": "yieldAmount", "type": "uint256"},
-        ],
-        "name": "harvest",
-        "outputs": [],
-        "stateMutability": "nonpayable",
-        "type": "function",
-    },
-]
+EARN_MANAGER_ABI = load_abi("EarnManager")
 
 
 class VaultService:

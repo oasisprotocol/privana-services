@@ -8,6 +8,7 @@ from web3 import Web3
 
 from src.clients.accounting import get_accounting_client
 from src.clients.sapphire import get_sapphire_client
+from src.core.abi import load_abi
 from src.core.config import load_settings
 from src.core.db import db_write, get_db
 from src.core.eip712 import sign_transfer
@@ -15,25 +16,7 @@ from src.models.swap import SwapRecord, SwapStatus
 
 logger = logging.getLogger(__name__)
 
-SWAP_MANAGER_ABI = [
-    {
-        "inputs": [
-            {"name": "user", "type": "address"},
-            {"name": "inputTokenId", "type": "bytes32"},
-            {"name": "inputAmount", "type": "uint256"},
-            {"name": "inputNonce", "type": "uint256"},
-            {"name": "inputSignature", "type": "bytes"},
-            {"name": "outputTokenId", "type": "bytes32"},
-            {"name": "outputAmount", "type": "uint256"},
-            {"name": "outputNonce", "type": "uint256"},
-            {"name": "outputSignature", "type": "bytes"},
-        ],
-        "name": "swap",
-        "outputs": [],
-        "stateMutability": "nonpayable",
-        "type": "function",
-    }
-]
+SWAP_MANAGER_ABI = load_abi("SwapManager")
 
 
 class SwapExecutor:

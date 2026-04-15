@@ -173,7 +173,8 @@ class TestWithdraw:
 
 
 class TestGetAllBalances:
-    def test_returns_balances_for_user(self):
+    @pytest.mark.asyncio
+    async def test_returns_balances_for_user(self):
         service, contract, _, _ = _make_service()
         pool_id_bytes = bytes.fromhex(POOL_ID_HEX[2:])
         contract.functions.getPoolCount.return_value.call.return_value = 1
@@ -186,12 +187,13 @@ class TestGetAllBalances:
         contract.functions.getUserShares.return_value.call.return_value = 500
         contract.functions.convertToAssets.return_value.call.return_value = 525
 
-        balances = service.get_all_balances(USER_ADDRESS)
+        balances = await service.get_all_balances(USER_ADDRESS)
         assert len(balances) == 1
         assert balances[0]["shares"] == "500"
         assert balances[0]["underlying_amount"] == "525"
 
-    def test_skips_zero_shares(self):
+    @pytest.mark.asyncio
+    async def test_skips_zero_shares(self):
         service, contract, _, _ = _make_service()
         pool_id_bytes = bytes.fromhex(POOL_ID_HEX[2:])
         contract.functions.getPoolCount.return_value.call.return_value = 1
@@ -203,5 +205,5 @@ class TestGetAllBalances:
         )
         contract.functions.getUserShares.return_value.call.return_value = 0
 
-        balances = service.get_all_balances(USER_ADDRESS)
+        balances = await service.get_all_balances(USER_ADDRESS)
         assert balances == []

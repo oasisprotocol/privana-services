@@ -136,7 +136,7 @@ async def get_balances(
 ) -> BalanceListResponse:
     try:
         service = get_vault_service()
-        balances = service.get_all_balances(user_address)
+        balances = await service.get_all_balances(user_address)
         return BalanceListResponse(
             positions=[BalanceResponse(**b) for b in balances]
         )

@@ -226,26 +226,29 @@ class VaultService:
             "status": "completed",
         }
 
-    def get_all_balances(self, user_address: str) -> list[dict]:
+    async def get_all_balances(self, user_address: str) -> list[dict]:
         validate_address(user_address, "user_address")
-        pools = self.list_pools()
-        balances = []
-        for pool in pools:
+        pools = await asyncio.to_thread(self.list_pools)
+
+        async def fetch_balance(pool: dict) -> Optional[dict]:
             pool_id = bytes.fromhex(pool["pool_id"].removeprefix("0x"))
-            shares = self.get_user_shares(user_address, pool_id)
-            if shares > 0:
-                underlying = self.convert_to_assets(pool_id, shares)
-                total_shares = pool["total_shares"]
-                total_assets = pool["total_assets"]
-                exchange_rate = str(total_assets / total_shares) if total_shares > 0 else "1.0"
-                balances.append({
-                    "pool_id": pool["pool_id"],
-                    "token_id": pool["token_id"],
-                    "shares": str(shares),
-                    "underlying_amount": str(underlying),
-                    "exchange_rate": exchange_rate,
-                })
-        return balances
+            shares = await asyncio.to_thread(self.get_user_shares, user_address, pool_id)
+            if shares == 0:
+                return None
+            underlying = await asyncio.to_thread(self.convert_to_assets, pool_id, shares)
+            total_shares = pool["total_shares"]
+            total_assets = pool["total_assets"]
+            exchange_rate = str(total_assets / total_shares) if total_shares > 0 else "1.0"
+            return {
+                "pool_id": pool["pool_id"],
+                "token_id": pool["token_id"],
+                "shares": str(shares),
+                "underlying_amount": str(underlying),
+                "exchange_rate": exchange_rate,
+            }
+
+        results = await asyncio.gather(*[fetch_balance(p) for p in pools])
+        return [b for b in results if b is not None]
 
 
 _service_instance: Optional[VaultService] = None

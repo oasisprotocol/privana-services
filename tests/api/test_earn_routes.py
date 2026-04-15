@@ -207,13 +207,13 @@ class TestBalanceRoute:
     async def test_returns_200_with_positions(self, api_client):
         with patch("src.api.earn.get_vault_service") as mock_svc:
             svc = MagicMock()
-            svc.get_all_balances.return_value = [{
+            svc.get_all_balances = AsyncMock(return_value=[{
                 "pool_id": POOL_ID,
                 "token_id": USDC_TOKEN_ID,
                 "shares": "500",
                 "underlying_amount": "525",
                 "exchange_rate": "1.05",
-            }]
+            }])
             mock_svc.return_value = svc
 
             r = await api_client.get("/v1/earn/balance", params={"user_address": USER_ADDRESS})
@@ -225,7 +225,7 @@ class TestBalanceRoute:
     async def test_returns_empty_list(self, api_client):
         with patch("src.api.earn.get_vault_service") as mock_svc:
             svc = MagicMock()
-            svc.get_all_balances.return_value = []
+            svc.get_all_balances = AsyncMock(return_value=[])
             mock_svc.return_value = svc
 
             r = await api_client.get("/v1/earn/balance", params={"user_address": USER_ADDRESS})

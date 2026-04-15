@@ -140,7 +140,7 @@ class TestDepositQuote:
 
 
 class TestDeposit:
-    async def test_successful_deposit(self):
+    async def test_successful_deposit(self, test_db):
         service, contract, saph, _ = _make_service()
         contract.functions.getPool.return_value.call.return_value = (
             bytes.fromhex(USDC_TOKEN_ID[2:]),
@@ -155,6 +155,33 @@ class TestDeposit:
         assert result["shares_minted"] == "952"
         assert result["tx_hash"] == "0x" + "ff" * 32
         assert result["status"] == "completed"
+
+        row = test_db.execute("SELECT * FROM earn_transactions").fetchone()
+        assert row["operation"] == "deposit"
+        assert row["signer_address"] == USER_ADDRESS.lower()
+        assert row["nonce"] == 5
+        assert row["signature"] == "0x" + "aa" * 65
+        assert row["status"] == "completed"
+        assert row["tx_hash"] == "0x" + "ff" * 32
+
+    async def test_failed_deposit_marks_row(self, test_db):
+        service, contract, saph, _ = _make_service()
+        contract.functions.getPool.return_value.call.return_value = (
+            bytes.fromhex(USDC_TOKEN_ID[2:]),
+            POOL_ADDRESS,
+            1000, 1050, True,
+        )
+        contract.functions.getUserShares.return_value.call.return_value = 0
+        saph.execute_contract_call.side_effect = RuntimeError("onchain revert")
+
+        with pytest.raises(RuntimeError, match="onchain revert"):
+            await service.deposit(
+                POOL_ID_HEX, USER_ADDRESS, "1000", 5, "0x" + "aa" * 65
+            )
+
+        row = test_db.execute("SELECT * FROM earn_transactions").fetchone()
+        assert row["status"] == "failed"
+        assert "onchain revert" in row["error"]
 
 
 class TestWithdraw:

@@ -1,5 +1,7 @@
 import asyncio
 import logging
+import time
+import uuid
 from typing import Optional
 
 from web3 import Web3
@@ -8,12 +10,19 @@ from src.clients.accounting import get_accounting_client
 from src.clients.sapphire import get_sapphire_client
 from src.core.abi import load_abi
 from src.core.config import load_settings
+from src.core.db import db_write, get_db
 from src.core.eip712 import sign_transfer
 from src.core.validation import validate_address, validate_amount, validate_token_id
 
 logger = logging.getLogger(__name__)
 
 EARN_MANAGER_ABI = load_abi("EarnManager")
+
+EARN_OP_DEPOSIT = "deposit"
+EARN_OP_WITHDRAW = "withdraw"
+EARN_STATUS_PENDING = "pending"
+EARN_STATUS_COMPLETED = "completed"
+EARN_STATUS_FAILED = "failed"
 
 
 class VaultService:
@@ -138,21 +147,39 @@ class VaultService:
 
         sig_bytes = bytes.fromhex(signature.removeprefix("0x"))
 
+        tx_id = self._record_transaction(
+            operation=EARN_OP_DEPOSIT,
+            pool_id_hex=pool_id_hex,
+            user_address=user_address,
+            token_id=pool["token_id"],
+            amount=amount,
+            signer_address=user_address,
+            nonce=nonce,
+            signature=signature,
+        )
+
         shares_before = self.get_user_shares(user_address, pool_id)
 
-        tx_hash = await asyncio.to_thread(
-            self.sapphire.execute_contract_call,
-            contract_address=self.contract_address,
-            abi=EARN_MANAGER_ABI,
-            function_name="deposit",
-            args=[
-                pool_id,
-                Web3.to_checksum_address(user_address),
-                int(amount),
-                nonce,
-                sig_bytes,
-            ],
-        )
+        try:
+            tx_hash = await asyncio.to_thread(
+                self.sapphire.execute_contract_call,
+                contract_address=self.contract_address,
+                abi=EARN_MANAGER_ABI,
+                function_name="deposit",
+                args=[
+                    pool_id,
+                    Web3.to_checksum_address(user_address),
+                    int(amount),
+                    nonce,
+                    sig_bytes,
+                ],
+            )
+        except Exception as exc:
+            logger.exception(f"Earn deposit {tx_id} failed")
+            self._update_transaction(tx_id, status=EARN_STATUS_FAILED, error=str(exc)[:500])
+            raise
+
+        self._update_transaction(tx_id, status=EARN_STATUS_COMPLETED, tx_hash=tx_hash)
 
         shares_after = self.get_user_shares(user_address, pool_id)
         shares_minted = shares_after - shares_before
@@ -212,21 +239,39 @@ class VaultService:
 
         sig_bytes = bytes.fromhex(pool_signature.removeprefix("0x"))
 
+        tx_id = self._record_transaction(
+            operation=EARN_OP_WITHDRAW,
+            pool_id_hex=pool_id_hex,
+            user_address=user_address,
+            token_id=pool["token_id"],
+            amount=amount,
+            signer_address=pool["pool_address"],
+            nonce=pool_nonce,
+            signature=pool_signature,
+        )
+
         shares_before = self.get_user_shares(user_address, pool_id)
 
-        tx_hash = await asyncio.to_thread(
-            self.sapphire.execute_contract_call,
-            contract_address=self.contract_address,
-            abi=EARN_MANAGER_ABI,
-            function_name="withdraw",
-            args=[
-                pool_id,
-                Web3.to_checksum_address(user_address),
-                int(amount),
-                pool_nonce,
-                sig_bytes,
-            ],
-        )
+        try:
+            tx_hash = await asyncio.to_thread(
+                self.sapphire.execute_contract_call,
+                contract_address=self.contract_address,
+                abi=EARN_MANAGER_ABI,
+                function_name="withdraw",
+                args=[
+                    pool_id,
+                    Web3.to_checksum_address(user_address),
+                    int(amount),
+                    pool_nonce,
+                    sig_bytes,
+                ],
+            )
+        except Exception as exc:
+            logger.exception(f"Earn withdraw {tx_id} failed")
+            self._update_transaction(tx_id, status=EARN_STATUS_FAILED, error=str(exc)[:500])
+            raise
+
+        self._update_transaction(tx_id, status=EARN_STATUS_COMPLETED, tx_hash=tx_hash)
 
         shares_after = self.get_user_shares(user_address, pool_id)
         shares_burned = shares_before - shares_after
@@ -242,6 +287,46 @@ class VaultService:
             "tx_hash": tx_hash,
             "status": "completed",
         }
+
+    def _record_transaction(
+        self,
+        *,
+        operation: str,
+        pool_id_hex: str,
+        user_address: str,
+        token_id: str,
+        amount: str,
+        signer_address: str,
+        nonce: int,
+        signature: str,
+    ) -> str:
+        tx_id = str(uuid.uuid4())
+        now = int(time.time())
+        db = get_db()
+        db_write(
+            db,
+            """INSERT INTO earn_transactions
+               (id, operation, pool_id, user_address, token_id, amount,
+                signer_address, nonce, signature, status, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                tx_id, operation, pool_id_hex, user_address.lower(), token_id, amount,
+                signer_address.lower(), nonce, signature,
+                EARN_STATUS_PENDING, now, now,
+            ),
+        )
+        logger.info(
+            "earn %s %s signed: signer=%s to=%s token=%s amount=%s nonce=%s",
+            operation, tx_id, signer_address, user_address, token_id, amount, nonce,
+        )
+        return tx_id
+
+    def _update_transaction(self, tx_id: str, **fields) -> None:
+        db = get_db()
+        fields["updated_at"] = int(time.time())
+        set_clause = ", ".join(f"{k} = ?" for k in fields)
+        values = list(fields.values()) + [tx_id]
+        db_write(db, f"UPDATE earn_transactions SET {set_clause} WHERE id = ?", tuple(values))
 
     async def get_all_balances(self, user_address: str) -> list[dict]:
         validate_address(user_address, "user_address")

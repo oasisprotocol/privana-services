@@ -77,6 +77,21 @@ class SwapExecutor:
                 input_sig_bytes = bytes.fromhex(input_signature[2:] if input_signature.startswith("0x") else input_signature)
                 output_sig_bytes = bytes.fromhex(output_signature[2:] if output_signature.startswith("0x") else output_signature)
 
+                self._update_swap(
+                    swap_id,
+                    output_nonce=lp_nonce,
+                    output_signature=output_signature,
+                )
+                logger.info(
+                    "swap %s signed output: lp=%s to=%s token=%s amount=%s nonce=%s",
+                    swap_id,
+                    self.settings.liquidity_provider_address,
+                    user_address,
+                    quote["to_token_id"],
+                    quote["to_amount_estimate"],
+                    lp_nonce,
+                )
+
                 tx_hash = await asyncio.to_thread(
                     self.sapphire.execute_contract_call,
                     contract_address=self.settings.swap_manager_contract_address,

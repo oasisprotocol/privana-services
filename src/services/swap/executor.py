@@ -12,6 +12,7 @@ from src.core.abi import load_abi
 from src.core.config import load_settings
 from src.core.db import db_write, get_db
 from src.core.eip712 import sign_transfer
+from src.core.validation import validate_signature
 from src.models.swap import SwapRecord, SwapStatus
 
 logger = logging.getLogger(__name__)
@@ -34,7 +35,7 @@ class SwapExecutor:
         input_signature: str,
     ) -> SwapRecord:
         quote = self._validate_quote(quote_id, user_address)
-        self._validate_signature_format(input_signature)
+        validate_signature(input_signature, "input_signature")
 
         lp_balance = await self.accounting.get_lp_balance(quote["to_token_id"])
         if int(lp_balance.balance) < int(quote["to_amount_estimate"]):
@@ -134,16 +135,6 @@ class SwapExecutor:
             raise ValueError("Quote was not created for this user")
 
         return quote
-
-    def _validate_signature_format(self, signature: str) -> None:
-        if not signature.startswith("0x"):
-            raise ValueError("Signature must start with 0x")
-        try:
-            sig_bytes = bytes.fromhex(signature[2:])
-        except ValueError:
-            raise ValueError("Signature must be valid hex")
-        if len(sig_bytes) != 65:
-            raise ValueError("Signature must be 65 bytes")
 
     def _sanitize_error(self, error: str) -> str:
         if "reverted" in error.lower():

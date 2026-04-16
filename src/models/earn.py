@@ -105,8 +105,8 @@ class DepositResponse(BaseModel):
     deposit_id: str
     pool_id: str
     amount: str
-    shares_minted: str
-    exchange_rate: str
+    shares_minted: Optional[str] = None
+    exchange_rate: Optional[str] = None
     tx_hash: Optional[str] = None
     status: str
 
@@ -121,8 +121,8 @@ class WithdrawResponse(BaseModel):
     withdraw_id: str
     pool_id: str
     amount: str
-    shares_burned: str
-    exchange_rate: str
+    shares_burned: Optional[str] = None
+    exchange_rate: Optional[str] = None
     tx_hash: Optional[str] = None
     status: str
 

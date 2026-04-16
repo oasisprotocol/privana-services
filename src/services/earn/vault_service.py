@@ -13,7 +13,7 @@ from src.core.abi import load_abi
 from src.core.config import load_settings
 from src.core.db import db_write, get_db
 from src.core.eip712 import sign_transfer
-from src.core.validation import validate_address, validate_amount, validate_token_id
+from src.core.validation import validate_address, validate_amount, validate_signature
 
 logger = logging.getLogger(__name__)
 
@@ -144,6 +144,7 @@ class VaultService:
         """
         validate_address(user_address, "user_address")
         validate_amount(amount, "amount")
+        validate_signature(signature, "signature")
 
         pool_id = bytes.fromhex(pool_id_hex.removeprefix("0x"))
         pool = self.get_pool(pool_id)
@@ -188,19 +189,28 @@ class VaultService:
 
         self._update_transaction(tx_id, status=EARN_STATUS_COMPLETED, tx_hash=tx_hash)
 
-        shares_after = self.get_user_shares(user_address, pool_id)
-        shares_minted = shares_after - shares_before
-
-        pool_after = self.get_pool(pool_id)
-
-        return {
-            "pool_id": pool_id_hex,
-            "amount": amount,
-            "shares_minted": str(shares_minted),
-            "exchange_rate": _exchange_rate(pool_after["total_assets"], pool_after["total_shares"]),
-            "tx_hash": tx_hash,
-            "status": "completed",
-        }
+        try:
+            shares_after = self.get_user_shares(user_address, pool_id)
+            shares_minted = shares_after - shares_before
+            pool_after = self.get_pool(pool_id)
+            return {
+                "pool_id": pool_id_hex,
+                "amount": amount,
+                "shares_minted": str(shares_minted),
+                "exchange_rate": _exchange_rate(pool_after["total_assets"], pool_after["total_shares"]),
+                "tx_hash": tx_hash,
+                "status": "completed",
+            }
+        except Exception:
+            logger.warning("Post-tx read failed for deposit %s, returning degraded response", tx_id)
+            return {
+                "pool_id": pool_id_hex,
+                "amount": amount,
+                "shares_minted": None,
+                "exchange_rate": None,
+                "tx_hash": tx_hash,
+                "status": "completed",
+            }
 
     async def withdraw(
         self,
@@ -279,19 +289,28 @@ class VaultService:
 
         self._update_transaction(tx_id, status=EARN_STATUS_COMPLETED, tx_hash=tx_hash)
 
-        shares_after = self.get_user_shares(user_address, pool_id)
-        shares_burned = shares_before - shares_after
-
-        pool_after = self.get_pool(pool_id)
-
-        return {
-            "pool_id": pool_id_hex,
-            "amount": amount,
-            "shares_burned": str(shares_burned),
-            "exchange_rate": _exchange_rate(pool_after["total_assets"], pool_after["total_shares"]),
-            "tx_hash": tx_hash,
-            "status": "completed",
-        }
+        try:
+            shares_after = self.get_user_shares(user_address, pool_id)
+            shares_burned = shares_before - shares_after
+            pool_after = self.get_pool(pool_id)
+            return {
+                "pool_id": pool_id_hex,
+                "amount": amount,
+                "shares_burned": str(shares_burned),
+                "exchange_rate": _exchange_rate(pool_after["total_assets"], pool_after["total_shares"]),
+                "tx_hash": tx_hash,
+                "status": "completed",
+            }
+        except Exception:
+            logger.warning("Post-tx read failed for withdraw %s, returning degraded response", tx_id)
+            return {
+                "pool_id": pool_id_hex,
+                "amount": amount,
+                "shares_burned": None,
+                "exchange_rate": None,
+                "tx_hash": tx_hash,
+                "status": "completed",
+            }
 
     def _record_transaction(
         self,

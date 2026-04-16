@@ -2,6 +2,7 @@ import asyncio
 import logging
 import time
 import uuid
+from decimal import Decimal
 from typing import Optional
 
 from web3 import Web3
@@ -25,11 +26,18 @@ EARN_STATUS_COMPLETED = "completed"
 EARN_STATUS_FAILED = "failed"
 
 
+def _exchange_rate(total_assets: int, total_shares: int) -> str:
+    if total_shares == 0:
+        return "1.0"
+    return str(Decimal(total_assets) / Decimal(total_shares))
+
+
 class VaultService:
     def __init__(self) -> None:
         self.settings = load_settings()
         self.sapphire = get_sapphire_client()
         self.accounting = get_accounting_client()
+        self._withdraw_lock = asyncio.Lock()
         self.contract_address = Web3.to_checksum_address(
             self.settings.earn_manager_contract_address
         )
@@ -75,13 +83,12 @@ class VaultService:
         shares = self.get_user_shares(user_address, pool_id)
         underlying = self.convert_to_assets(pool_id, shares) if shares > 0 else 0
         pool = self.get_pool(pool_id)
-        exchange_rate = str(pool["total_assets"] / pool["total_shares"]) if pool["total_shares"] > 0 else "1.0"
         return {
             "pool_id": "0x" + pool_id.hex(),
             "token_id": pool["token_id"],
             "shares": str(shares),
             "underlying_amount": str(underlying),
-            "exchange_rate": exchange_rate,
+            "exchange_rate": _exchange_rate(pool["total_assets"], pool["total_shares"]),
         }
 
 
@@ -104,7 +111,7 @@ class VaultService:
         shares_estimate = self.convert_to_shares(pool_id, int(amount))
         total_shares = pool["total_shares"]
         total_assets = pool["total_assets"]
-        exchange_rate = str(total_assets / total_shares) if total_shares > 0 else "1.0"
+        exchange_rate = _exchange_rate(total_assets, total_shares)
 
         transfer_nonce = await self.accounting.get_transfer_nonce(user_address)
 
@@ -185,17 +192,15 @@ class VaultService:
         shares_minted = shares_after - shares_before
 
         pool_after = self.get_pool(pool_id)
-        exchange_rate = str(pool_after["total_assets"] / pool_after["total_shares"]) if pool_after["total_shares"] > 0 else "1.0"
 
         return {
             "pool_id": pool_id_hex,
             "amount": amount,
             "shares_minted": str(shares_minted),
-            "exchange_rate": exchange_rate,
+            "exchange_rate": _exchange_rate(pool_after["total_assets"], pool_after["total_shares"]),
             "tx_hash": tx_hash,
             "status": "completed",
         }
-
 
     async def withdraw(
         self,
@@ -224,52 +229,53 @@ class VaultService:
         if int(amount) > max_withdraw:
             raise ValueError("Insufficient shares for this withdrawal")
 
-        pool_nonce = await self.accounting.get_transfer_nonce(pool["pool_address"])
+        async with self._withdraw_lock:
+            pool_nonce = await self.accounting.get_transfer_nonce(pool["pool_address"])
 
-        pool_signature = sign_transfer(
-            private_key=self.settings.liquidity_provider_private_key,
-            chain_id=self.settings.accounting_chain_id,
-            verifying_contract=self.settings.accounting_contract_address,
-            user_address=pool["pool_address"],
-            to_address=user_address,
-            token_id=pool["token_id"],
-            amount=int(amount),
-            nonce=pool_nonce,
-        )
-
-        sig_bytes = bytes.fromhex(pool_signature.removeprefix("0x"))
-
-        tx_id = self._record_transaction(
-            operation=EARN_OP_WITHDRAW,
-            pool_id_hex=pool_id_hex,
-            user_address=user_address,
-            token_id=pool["token_id"],
-            amount=amount,
-            signer_address=pool["pool_address"],
-            nonce=pool_nonce,
-            signature=pool_signature,
-        )
-
-        shares_before = self.get_user_shares(user_address, pool_id)
-
-        try:
-            tx_hash = await asyncio.to_thread(
-                self.sapphire.execute_contract_call,
-                contract_address=self.contract_address,
-                abi=EARN_MANAGER_ABI,
-                function_name="withdraw",
-                args=[
-                    pool_id,
-                    Web3.to_checksum_address(user_address),
-                    int(amount),
-                    pool_nonce,
-                    sig_bytes,
-                ],
+            pool_signature = sign_transfer(
+                private_key=self.settings.liquidity_provider_private_key,
+                chain_id=self.settings.accounting_chain_id,
+                verifying_contract=self.settings.accounting_contract_address,
+                user_address=pool["pool_address"],
+                to_address=user_address,
+                token_id=pool["token_id"],
+                amount=int(amount),
+                nonce=pool_nonce,
             )
-        except Exception as exc:
-            logger.exception(f"Earn withdraw {tx_id} failed")
-            self._update_transaction(tx_id, status=EARN_STATUS_FAILED, error=str(exc)[:500])
-            raise
+
+            sig_bytes = bytes.fromhex(pool_signature.removeprefix("0x"))
+
+            tx_id = self._record_transaction(
+                operation=EARN_OP_WITHDRAW,
+                pool_id_hex=pool_id_hex,
+                user_address=user_address,
+                token_id=pool["token_id"],
+                amount=amount,
+                signer_address=pool["pool_address"],
+                nonce=pool_nonce,
+                signature=pool_signature,
+            )
+
+            shares_before = self.get_user_shares(user_address, pool_id)
+
+            try:
+                tx_hash = await asyncio.to_thread(
+                    self.sapphire.execute_contract_call,
+                    contract_address=self.contract_address,
+                    abi=EARN_MANAGER_ABI,
+                    function_name="withdraw",
+                    args=[
+                        pool_id,
+                        Web3.to_checksum_address(user_address),
+                        int(amount),
+                        pool_nonce,
+                        sig_bytes,
+                    ],
+                )
+            except Exception as exc:
+                logger.exception(f"Earn withdraw {tx_id} failed")
+                self._update_transaction(tx_id, status=EARN_STATUS_FAILED, error=str(exc)[:500])
+                raise
 
         self._update_transaction(tx_id, status=EARN_STATUS_COMPLETED, tx_hash=tx_hash)
 
@@ -277,13 +283,12 @@ class VaultService:
         shares_burned = shares_before - shares_after
 
         pool_after = self.get_pool(pool_id)
-        exchange_rate = str(pool_after["total_assets"] / pool_after["total_shares"]) if pool_after["total_shares"] > 0 else "1.0"
 
         return {
             "pool_id": pool_id_hex,
             "amount": amount,
             "shares_burned": str(shares_burned),
-            "exchange_rate": exchange_rate,
+            "exchange_rate": _exchange_rate(pool_after["total_assets"], pool_after["total_shares"]),
             "tx_hash": tx_hash,
             "status": "completed",
         }
@@ -338,15 +343,12 @@ class VaultService:
             if shares == 0:
                 return None
             underlying = await asyncio.to_thread(self.convert_to_assets, pool_id, shares)
-            total_shares = pool["total_shares"]
-            total_assets = pool["total_assets"]
-            exchange_rate = str(total_assets / total_shares) if total_shares > 0 else "1.0"
             return {
                 "pool_id": pool["pool_id"],
                 "token_id": pool["token_id"],
                 "shares": str(shares),
                 "underlying_amount": str(underlying),
-                "exchange_rate": exchange_rate,
+                "exchange_rate": _exchange_rate(pool["total_assets"], pool["total_shares"]),
             }
 
         results = await asyncio.gather(*[fetch_balance(p) for p in pools])

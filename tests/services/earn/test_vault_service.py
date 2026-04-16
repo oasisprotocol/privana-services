@@ -199,6 +199,80 @@ class TestWithdraw:
         with pytest.raises(ValueError, match="Insufficient shares"):
             await service.withdraw(POOL_ID_HEX, USER_ADDRESS, "1000")
 
+    async def test_successful_withdraw(self, test_db):
+        service, contract, saph, acct = _make_service()
+        contract.functions.getPool.return_value.call.return_value = (
+            bytes.fromhex(USDC_TOKEN_ID[2:]),
+            POOL_ADDRESS,
+            1000, 1050, True,
+        )
+        contract.functions.getUserShares.return_value.call.side_effect = [500, 500, 25]
+        contract.functions.convertToAssets.return_value.call.return_value = 525
+
+        with patch("src.services.earn.vault_service.sign_transfer", return_value="0x" + "bb" * 65):
+            result = await service.withdraw(POOL_ID_HEX, USER_ADDRESS, "500")
+
+        assert result["status"] == "completed"
+        assert result["tx_hash"] == "0x" + "ff" * 32
+        assert result["shares_burned"] == "475"
+
+        row = test_db.execute("SELECT * FROM earn_transactions").fetchone()
+        assert row["operation"] == "withdraw"
+        assert row["signer_address"] == POOL_ADDRESS.lower()
+        assert row["nonce"] == 7
+        assert row["status"] == "completed"
+
+    async def test_failed_withdraw_returns_failed_status(self, test_db):
+        service, contract, saph, acct = _make_service()
+        contract.functions.getPool.return_value.call.return_value = (
+            bytes.fromhex(USDC_TOKEN_ID[2:]),
+            POOL_ADDRESS,
+            1000, 1050, True,
+        )
+        contract.functions.getUserShares.return_value.call.side_effect = [500, 500]
+        contract.functions.convertToAssets.return_value.call.return_value = 525
+        saph.execute_contract_call.side_effect = RuntimeError("insufficient funds for gas")
+
+        with patch("src.services.earn.vault_service.sign_transfer", return_value="0x" + "bb" * 65):
+            result = await service.withdraw(POOL_ID_HEX, USER_ADDRESS, "500")
+
+        assert result["status"] == "failed"
+        assert result["tx_hash"] is None
+
+        row = test_db.execute("SELECT * FROM earn_transactions").fetchone()
+        assert row["status"] == "failed"
+        assert row["error"] == "Insufficient gas funds for transaction"
+
+
+class TestExchangeRateZeroShares:
+    async def test_deposit_quote_with_zero_shares_pool(self):
+        service, contract, _, acct = _make_service()
+        contract.functions.getPool.return_value.call.return_value = (
+            bytes.fromhex(USDC_TOKEN_ID[2:]),
+            POOL_ADDRESS,
+            0, 0, True,
+        )
+        contract.functions.convertToShares.return_value.call.return_value = 1000
+
+        quote = await service.get_deposit_quote(POOL_ID_HEX, "1000", USER_ADDRESS)
+        assert quote["exchange_rate"] == "1.0"
+
+    @pytest.mark.asyncio
+    async def test_balance_with_zero_shares_pool(self):
+        service, contract, _, _ = _make_service()
+        pool_id_bytes = bytes.fromhex(POOL_ID_HEX[2:])
+        contract.functions.getPoolCount.return_value.call.return_value = 1
+        contract.functions.poolIds.return_value.call.return_value = pool_id_bytes
+        contract.functions.getPool.return_value.call.return_value = (
+            bytes.fromhex(USDC_TOKEN_ID[2:]),
+            POOL_ADDRESS,
+            0, 0, True,
+        )
+        contract.functions.getUserShares.return_value.call.return_value = 0
+
+        balances = await service.get_all_balances(USER_ADDRESS)
+        assert balances == []
+
 
 class TestGetAllBalances:
     @pytest.mark.asyncio

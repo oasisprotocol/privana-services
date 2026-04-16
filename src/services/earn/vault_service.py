@@ -67,6 +67,8 @@ class VaultService:
         return pools
 
     def get_user_shares(self, user_address: str, pool_id: bytes) -> int:
+        # token param is empty — getUserShares uses it for the auth gate
+        # (accounting.balanceOf), but we call from the service, not end-users.
         return self.contract.functions.getUserShares(
             Web3.to_checksum_address(user_address),
             pool_id,

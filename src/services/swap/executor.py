@@ -12,7 +12,7 @@ from src.core.abi import load_abi
 from src.core.config import load_settings
 from src.core.db import db_write, get_db
 from src.core.eip712 import sign_transfer
-from src.core.validation import validate_signature
+from src.core.validation import sanitize_error, validate_signature
 from src.models.swap import SwapRecord, SwapStatus
 
 logger = logging.getLogger(__name__)
@@ -115,7 +115,7 @@ class SwapExecutor:
 
         except Exception as exc:
             logger.exception(f"Swap {swap_id} failed")
-            error_msg = self._sanitize_error(str(exc))
+            error_msg = sanitize_error(str(exc))
             self._update_swap(swap_id, status=SwapStatus.FAILED.value, error=error_msg)
 
         return self._get_swap(swap_id)
@@ -135,17 +135,6 @@ class SwapExecutor:
             raise ValueError("Quote was not created for this user")
 
         return quote
-
-    def _sanitize_error(self, error: str) -> str:
-        if "reverted" in error.lower():
-            return "Swap transaction reverted on-chain"
-        if "insufficient funds" in error.lower():
-            return "Insufficient gas funds for transaction"
-        if "nonce" in error.lower():
-            return "Transaction nonce conflict"
-        if len(error) > 200:
-            return error[:200]
-        return error
 
     def _get_swap(self, swap_id: str) -> SwapRecord:
         db = get_db()

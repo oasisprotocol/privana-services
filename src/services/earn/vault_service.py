@@ -13,7 +13,7 @@ from src.core.abi import load_abi
 from src.core.config import load_settings
 from src.core.db import db_write, get_db
 from src.core.eip712 import sign_transfer
-from src.core.validation import validate_address, validate_amount, validate_signature
+from src.core.validation import sanitize_error, validate_address, validate_amount, validate_signature
 
 logger = logging.getLogger(__name__)
 
@@ -184,7 +184,7 @@ class VaultService:
             )
         except Exception as exc:
             logger.exception("Earn deposit %s failed", tx_id)
-            self._update_transaction(tx_id, status=EARN_STATUS_FAILED, error=str(exc)[:500])
+            self._update_transaction(tx_id, status=EARN_STATUS_FAILED, error=sanitize_error(str(exc)))
             return {
                 "pool_id": pool_id_hex,
                 "amount": amount,
@@ -292,7 +292,7 @@ class VaultService:
                 )
             except Exception as exc:
                 logger.exception("Earn withdraw %s failed", tx_id)
-                self._update_transaction(tx_id, status=EARN_STATUS_FAILED, error=str(exc)[:500])
+                self._update_transaction(tx_id, status=EARN_STATUS_FAILED, error=sanitize_error(str(exc)))
                 return {
                     "pool_id": pool_id_hex,
                     "amount": amount,

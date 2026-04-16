@@ -1,3 +1,4 @@
+import asyncio
 import logging
 
 from fastapi import APIRouter, HTTPException, Query
@@ -25,7 +26,7 @@ router = APIRouter(prefix="/v1/earn", tags=["Earn"])
 async def list_pools() -> PoolListResponse:
     try:
         service = get_vault_service()
-        pools = service.list_pools()
+        pools = await asyncio.to_thread(service.list_pools)
         return PoolListResponse(
             pools=[
                 PoolResponse(
@@ -49,7 +50,7 @@ async def get_pool(pool_id: str) -> PoolDetailResponse:
     try:
         service = get_vault_service()
         pool_id_bytes = bytes.fromhex(pool_id.removeprefix("0x"))
-        p = service.get_pool(pool_id_bytes)
+        p = await asyncio.to_thread(service.get_pool, pool_id_bytes)
         if p["pool_address"] == "0x0000000000000000000000000000000000000000":
             raise ValueError("Pool not found")
         return PoolDetailResponse(

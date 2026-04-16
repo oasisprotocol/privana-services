@@ -100,14 +100,11 @@ async def deposit(payload: DepositRequest) -> DepositResponse:
             signature=payload.signature,
         )
         return DepositResponse(
-            deposit_id=result["tx_hash"],
+            deposit_id=result.get("tx_hash", ""),
             **result,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except Exception as exc:
-        logger.exception("Deposit failed")
-        raise HTTPException(status_code=500, detail="Failed to deposit") from exc
 
 
 @router.post("/withdraw", response_model=WithdrawResponse)
@@ -120,14 +117,11 @@ async def withdraw(payload: WithdrawRequest) -> WithdrawResponse:
             amount=payload.amount,
         )
         return WithdrawResponse(
-            withdraw_id=result["tx_hash"],
+            withdraw_id=result.get("tx_hash", ""),
             **result,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except Exception as exc:
-        logger.exception("Withdraw failed")
-        raise HTTPException(status_code=500, detail="Failed to withdraw") from exc
 
 
 @router.get("/balance", response_model=BalanceListResponse)

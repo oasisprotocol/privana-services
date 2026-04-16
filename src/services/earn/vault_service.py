@@ -183,9 +183,16 @@ class VaultService:
                 ],
             )
         except Exception as exc:
-            logger.exception(f"Earn deposit {tx_id} failed")
+            logger.exception("Earn deposit %s failed", tx_id)
             self._update_transaction(tx_id, status=EARN_STATUS_FAILED, error=str(exc)[:500])
-            raise
+            return {
+                "pool_id": pool_id_hex,
+                "amount": amount,
+                "shares_minted": None,
+                "exchange_rate": None,
+                "tx_hash": None,
+                "status": "failed",
+            }
 
         self._update_transaction(tx_id, status=EARN_STATUS_COMPLETED, tx_hash=tx_hash)
 
@@ -233,6 +240,7 @@ class VaultService:
         pool = self.get_pool(pool_id)
         if pool["pool_address"] == "0x0000000000000000000000000000000000000000":
             raise ValueError("Pool not found")
+        # No active check — users must always be able to exit paused pools.
 
         shares = self.get_user_shares(user_address, pool_id)
         max_withdraw = self.convert_to_assets(pool_id, shares) if shares > 0 else 0
@@ -283,9 +291,16 @@ class VaultService:
                     ],
                 )
             except Exception as exc:
-                logger.exception(f"Earn withdraw {tx_id} failed")
+                logger.exception("Earn withdraw %s failed", tx_id)
                 self._update_transaction(tx_id, status=EARN_STATUS_FAILED, error=str(exc)[:500])
-                raise
+                return {
+                    "pool_id": pool_id_hex,
+                    "amount": amount,
+                    "shares_burned": None,
+                    "exchange_rate": None,
+                    "tx_hash": None,
+                    "status": "failed",
+                }
 
         self._update_transaction(tx_id, status=EARN_STATUS_COMPLETED, tx_hash=tx_hash)
 

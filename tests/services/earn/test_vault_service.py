@@ -164,7 +164,7 @@ class TestDeposit:
         assert row["status"] == "completed"
         assert row["tx_hash"] == "0x" + "ff" * 32
 
-    async def test_failed_deposit_marks_row(self, test_db):
+    async def test_failed_deposit_returns_failed_status(self, test_db):
         service, contract, saph, _ = _make_service()
         contract.functions.getPool.return_value.call.return_value = (
             bytes.fromhex(USDC_TOKEN_ID[2:]),
@@ -174,10 +174,11 @@ class TestDeposit:
         contract.functions.getUserShares.return_value.call.return_value = 0
         saph.execute_contract_call.side_effect = RuntimeError("onchain revert")
 
-        with pytest.raises(RuntimeError, match="onchain revert"):
-            await service.deposit(
-                POOL_ID_HEX, USER_ADDRESS, "1000", 5, "0x" + "aa" * 65
-            )
+        result = await service.deposit(
+            POOL_ID_HEX, USER_ADDRESS, "1000", 5, "0x" + "aa" * 65
+        )
+        assert result["status"] == "failed"
+        assert result["tx_hash"] is None
 
         row = test_db.execute("SELECT * FROM earn_transactions").fetchone()
         assert row["status"] == "failed"

@@ -19,6 +19,7 @@ class Settings:
     accounting_contract_address: str = "0x0000000000000000000000000000000000000000"
     accounting_chain_id: int = 23295
     swap_manager_contract_address: str = "0x0000000000000000000000000000000000000000"
+    earn_manager_contract_address: str = "0x0000000000000000000000000000000000000000"
     sapphire_rpc_url: str = "https://testnet.sapphire.oasis.io"
 
     quote_ttl: int = 60

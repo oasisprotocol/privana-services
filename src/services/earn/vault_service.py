@@ -1,8 +1,394 @@
+import asyncio
+import logging
+import time
+import uuid
+from decimal import Decimal
 from typing import Optional
+
+from web3 import Web3
+
+from src.clients.accounting import get_accounting_client
+from src.clients.sapphire import get_sapphire_client
+from src.core.abi import load_abi
+from src.core.config import load_settings
+from src.core.db import db_write, get_db
+from src.core.eip712 import sign_transfer
+from src.core.validation import sanitize_error, validate_address, validate_amount, validate_signature
+
+logger = logging.getLogger(__name__)
+
+EARN_MANAGER_ABI = load_abi("EarnManager")
+
+EARN_OP_DEPOSIT = "deposit"
+EARN_OP_WITHDRAW = "withdraw"
+EARN_STATUS_PENDING = "pending"
+EARN_STATUS_COMPLETED = "completed"
+EARN_STATUS_FAILED = "failed"
+
+
+def _exchange_rate(total_assets: int, total_shares: int) -> str:
+    if total_shares == 0:
+        return "1.0"
+    return str(Decimal(total_assets) / Decimal(total_shares))
 
 
 class VaultService:
-    pass
+    def __init__(self) -> None:
+        self.settings = load_settings()
+        self.sapphire = get_sapphire_client()
+        self.accounting = get_accounting_client()
+        self._withdraw_lock = asyncio.Lock()
+        self.contract_address = Web3.to_checksum_address(
+            self.settings.earn_manager_contract_address
+        )
+        self.contract = self.sapphire.w3.eth.contract(
+            address=self.contract_address,
+            abi=EARN_MANAGER_ABI,
+        )
+
+    def get_pool(self, pool_id: bytes) -> dict:
+        pool = self.contract.functions.getPool(pool_id).call()
+        return {
+            "token_id": "0x" + pool[0].hex(),
+            "pool_address": pool[1],
+            "total_shares": pool[2],
+            "total_assets": pool[3],
+            "active": pool[4],
+        }
+
+    def list_pools(self) -> list[dict]:
+        count = self.contract.functions.getPoolCount().call()
+        pools = []
+        for i in range(count):
+            pool_id = self.contract.functions.poolIds(i).call()
+            pool = self.get_pool(pool_id)
+            pool["pool_id"] = "0x" + pool_id.hex()
+            pools.append(pool)
+        return pools
+
+    def get_user_shares(self, user_address: str, pool_id: bytes) -> int:
+        # token param is empty — getUserShares uses it for the auth gate
+        # (accounting.balanceOf), but we call from the service, not end-users.
+        return self.contract.functions.getUserShares(
+            Web3.to_checksum_address(user_address),
+            pool_id,
+            b"",
+        ).call()
+
+    def convert_to_shares(self, pool_id: bytes, assets: int) -> int:
+        return self.contract.functions.convertToShares(pool_id, assets).call()
+
+    def convert_to_assets(self, pool_id: bytes, shares: int) -> int:
+        return self.contract.functions.convertToAssets(pool_id, shares).call()
+
+    def get_user_balance(self, user_address: str, pool_id: bytes) -> dict:
+        shares = self.get_user_shares(user_address, pool_id)
+        underlying = self.convert_to_assets(pool_id, shares) if shares > 0 else 0
+        pool = self.get_pool(pool_id)
+        return {
+            "pool_id": "0x" + pool_id.hex(),
+            "token_id": pool["token_id"],
+            "shares": str(shares),
+            "underlying_amount": str(underlying),
+            "exchange_rate": _exchange_rate(pool["total_assets"], pool["total_shares"]),
+        }
+
+
+    async def get_deposit_quote(
+        self,
+        pool_id_hex: str,
+        amount: str,
+        user_address: str,
+    ) -> dict:
+        validate_address(user_address, "user_address")
+        validate_amount(amount, "amount")
+
+        pool_id = bytes.fromhex(pool_id_hex.removeprefix("0x"))
+        pool = self.get_pool(pool_id)
+        if pool["pool_address"] == "0x0000000000000000000000000000000000000000":
+            raise ValueError("Pool not found")
+        if not pool["active"]:
+            raise ValueError("Pool is not active")
+
+        shares_estimate = self.convert_to_shares(pool_id, int(amount))
+        total_shares = pool["total_shares"]
+        total_assets = pool["total_assets"]
+        exchange_rate = _exchange_rate(total_assets, total_shares)
+
+        transfer_nonce = await self.accounting.get_transfer_nonce(user_address)
+
+        return {
+            "pool_id": pool_id_hex,
+            "token_id": pool["token_id"],
+            "amount": amount,
+            "shares_estimate": str(shares_estimate),
+            "exchange_rate": exchange_rate,
+            "pool_address": pool["pool_address"],
+            "transfer_nonce": transfer_nonce,
+        }
+
+    async def deposit(
+        self,
+        pool_id_hex: str,
+        user_address: str,
+        amount: str,
+        nonce: int,
+        signature: str,
+    ) -> dict:
+        """Deposit user funds into an earn pool and mint shares.
+
+        Signature flow: the user signs an EIP-712 ``Transfer(user -> pool, tokenId,
+        amount, nonce)`` off-chain against the Accounting domain. This service
+        forwards that signature to ``EarnManager.deposit``, which atomically
+        transfers the funds on the accounting ledger and mints pool shares to the
+        user. The service itself never signs — authority to debit the user lives
+        with the user alone.
+        """
+        validate_address(user_address, "user_address")
+        validate_amount(amount, "amount")
+        validate_signature(signature, "signature")
+
+        pool_id = bytes.fromhex(pool_id_hex.removeprefix("0x"))
+        pool = self.get_pool(pool_id)
+        if pool["pool_address"] == "0x0000000000000000000000000000000000000000":
+            raise ValueError("Pool not found")
+        if not pool["active"]:
+            raise ValueError("Pool is not active")
+
+        sig_bytes = bytes.fromhex(signature.removeprefix("0x"))
+
+        tx_id = self._record_transaction(
+            operation=EARN_OP_DEPOSIT,
+            pool_id_hex=pool_id_hex,
+            user_address=user_address,
+            token_id=pool["token_id"],
+            amount=amount,
+            signer_address=user_address,
+            nonce=nonce,
+            signature=signature,
+        )
+
+        shares_before = self.get_user_shares(user_address, pool_id)
+
+        try:
+            tx_hash = await asyncio.to_thread(
+                self.sapphire.execute_contract_call,
+                contract_address=self.contract_address,
+                abi=EARN_MANAGER_ABI,
+                function_name="deposit",
+                args=[
+                    pool_id,
+                    Web3.to_checksum_address(user_address),
+                    int(amount),
+                    nonce,
+                    sig_bytes,
+                ],
+            )
+        except Exception as exc:
+            logger.exception("Earn deposit %s failed", tx_id)
+            self._update_transaction(tx_id, status=EARN_STATUS_FAILED, error=sanitize_error(str(exc)))
+            return {
+                "pool_id": pool_id_hex,
+                "amount": amount,
+                "shares_minted": None,
+                "exchange_rate": None,
+                "tx_hash": None,
+                "status": "failed",
+            }
+
+        self._update_transaction(tx_id, status=EARN_STATUS_COMPLETED, tx_hash=tx_hash)
+
+        try:
+            shares_after = self.get_user_shares(user_address, pool_id)
+            shares_minted = shares_after - shares_before
+            pool_after = self.get_pool(pool_id)
+            return {
+                "pool_id": pool_id_hex,
+                "amount": amount,
+                "shares_minted": str(shares_minted),
+                "exchange_rate": _exchange_rate(pool_after["total_assets"], pool_after["total_shares"]),
+                "tx_hash": tx_hash,
+                "status": "completed",
+            }
+        except Exception:
+            logger.warning("Post-tx read failed for deposit %s, returning degraded response", tx_id)
+            return {
+                "pool_id": pool_id_hex,
+                "amount": amount,
+                "shares_minted": None,
+                "exchange_rate": None,
+                "tx_hash": tx_hash,
+                "status": "completed",
+            }
+
+    async def withdraw(
+        self,
+        pool_id_hex: str,
+        user_address: str,
+        amount: str,
+    ) -> dict:
+        """Burn user shares and return the underlying assets.
+
+        Signature flow: the pool (LP) signs an EIP-712 ``Transfer(pool -> user,
+        tokenId, amount, nonce)`` using the liquidity-provider private key held
+        by this service. No user signature is needed — the user's on-chain share
+        balance is itself the authorization, and ``EarnManager.withdraw`` gates
+        the call by burning shares before executing the pool's transfer.
+        """
+        validate_address(user_address, "user_address")
+        validate_amount(amount, "amount")
+
+        pool_id = bytes.fromhex(pool_id_hex.removeprefix("0x"))
+        pool = self.get_pool(pool_id)
+        if pool["pool_address"] == "0x0000000000000000000000000000000000000000":
+            raise ValueError("Pool not found")
+        # No active check — users must always be able to exit paused pools.
+
+        shares = self.get_user_shares(user_address, pool_id)
+        max_withdraw = self.convert_to_assets(pool_id, shares) if shares > 0 else 0
+        if int(amount) > max_withdraw:
+            raise ValueError("Insufficient shares for this withdrawal")
+
+        async with self._withdraw_lock:
+            pool_nonce = await self.accounting.get_transfer_nonce(pool["pool_address"])
+
+            pool_signature = sign_transfer(
+                private_key=self.settings.liquidity_provider_private_key,
+                chain_id=self.settings.accounting_chain_id,
+                verifying_contract=self.settings.accounting_contract_address,
+                user_address=pool["pool_address"],
+                to_address=user_address,
+                token_id=pool["token_id"],
+                amount=int(amount),
+                nonce=pool_nonce,
+            )
+
+            sig_bytes = bytes.fromhex(pool_signature.removeprefix("0x"))
+
+            tx_id = self._record_transaction(
+                operation=EARN_OP_WITHDRAW,
+                pool_id_hex=pool_id_hex,
+                user_address=user_address,
+                token_id=pool["token_id"],
+                amount=amount,
+                signer_address=pool["pool_address"],
+                nonce=pool_nonce,
+                signature=pool_signature,
+            )
+
+            shares_before = self.get_user_shares(user_address, pool_id)
+
+            try:
+                tx_hash = await asyncio.to_thread(
+                    self.sapphire.execute_contract_call,
+                    contract_address=self.contract_address,
+                    abi=EARN_MANAGER_ABI,
+                    function_name="withdraw",
+                    args=[
+                        pool_id,
+                        Web3.to_checksum_address(user_address),
+                        int(amount),
+                        pool_nonce,
+                        sig_bytes,
+                    ],
+                )
+            except Exception as exc:
+                logger.exception("Earn withdraw %s failed", tx_id)
+                self._update_transaction(tx_id, status=EARN_STATUS_FAILED, error=sanitize_error(str(exc)))
+                return {
+                    "pool_id": pool_id_hex,
+                    "amount": amount,
+                    "shares_burned": None,
+                    "exchange_rate": None,
+                    "tx_hash": None,
+                    "status": "failed",
+                }
+
+        self._update_transaction(tx_id, status=EARN_STATUS_COMPLETED, tx_hash=tx_hash)
+
+        try:
+            shares_after = self.get_user_shares(user_address, pool_id)
+            shares_burned = shares_before - shares_after
+            pool_after = self.get_pool(pool_id)
+            return {
+                "pool_id": pool_id_hex,
+                "amount": amount,
+                "shares_burned": str(shares_burned),
+                "exchange_rate": _exchange_rate(pool_after["total_assets"], pool_after["total_shares"]),
+                "tx_hash": tx_hash,
+                "status": "completed",
+            }
+        except Exception:
+            logger.warning("Post-tx read failed for withdraw %s, returning degraded response", tx_id)
+            return {
+                "pool_id": pool_id_hex,
+                "amount": amount,
+                "shares_burned": None,
+                "exchange_rate": None,
+                "tx_hash": tx_hash,
+                "status": "completed",
+            }
+
+    def _record_transaction(
+        self,
+        *,
+        operation: str,
+        pool_id_hex: str,
+        user_address: str,
+        token_id: str,
+        amount: str,
+        signer_address: str,
+        nonce: int,
+        signature: str,
+    ) -> str:
+        tx_id = str(uuid.uuid4())
+        now = int(time.time())
+        db = get_db()
+        db_write(
+            db,
+            """INSERT INTO earn_transactions
+               (id, operation, pool_id, user_address, token_id, amount,
+                signer_address, nonce, signature, status, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                tx_id, operation, pool_id_hex, user_address.lower(), token_id, amount,
+                signer_address.lower(), nonce, signature,
+                EARN_STATUS_PENDING, now, now,
+            ),
+        )
+        logger.info(
+            "earn %s %s signed: signer=%s to=%s token=%s amount=%s nonce=%s",
+            operation, tx_id, signer_address, user_address, token_id, amount, nonce,
+        )
+        return tx_id
+
+    def _update_transaction(self, tx_id: str, **fields) -> None:
+        db = get_db()
+        fields["updated_at"] = int(time.time())
+        set_clause = ", ".join(f"{k} = ?" for k in fields)
+        values = list(fields.values()) + [tx_id]
+        db_write(db, f"UPDATE earn_transactions SET {set_clause} WHERE id = ?", tuple(values))
+
+    async def get_all_balances(self, user_address: str) -> list[dict]:
+        validate_address(user_address, "user_address")
+        pools = await asyncio.to_thread(self.list_pools)
+
+        async def fetch_balance(pool: dict) -> Optional[dict]:
+            pool_id = bytes.fromhex(pool["pool_id"].removeprefix("0x"))
+            shares = await asyncio.to_thread(self.get_user_shares, user_address, pool_id)
+            if shares == 0:
+                return None
+            underlying = await asyncio.to_thread(self.convert_to_assets, pool_id, shares)
+            return {
+                "pool_id": pool["pool_id"],
+                "token_id": pool["token_id"],
+                "shares": str(shares),
+                "underlying_amount": str(underlying),
+                "exchange_rate": _exchange_rate(pool["total_assets"], pool["total_shares"]),
+            }
+
+        results = await asyncio.gather(*[fetch_balance(p) for p in pools])
+        return [b for b in results if b is not None]
 
 
 _service_instance: Optional[VaultService] = None

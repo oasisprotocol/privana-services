@@ -8,32 +8,16 @@ from web3 import Web3
 
 from src.clients.accounting import get_accounting_client
 from src.clients.sapphire import get_sapphire_client
+from src.core.abi import load_abi
 from src.core.config import load_settings
 from src.core.db import db_write, get_db
 from src.core.eip712 import sign_transfer
+from src.core.validation import sanitize_error, validate_signature
 from src.models.swap import SwapRecord, SwapStatus
 
 logger = logging.getLogger(__name__)
 
-SWAP_MANAGER_ABI = [
-    {
-        "inputs": [
-            {"name": "user", "type": "address"},
-            {"name": "inputTokenId", "type": "bytes32"},
-            {"name": "inputAmount", "type": "uint256"},
-            {"name": "inputNonce", "type": "uint256"},
-            {"name": "inputSignature", "type": "bytes"},
-            {"name": "outputTokenId", "type": "bytes32"},
-            {"name": "outputAmount", "type": "uint256"},
-            {"name": "outputNonce", "type": "uint256"},
-            {"name": "outputSignature", "type": "bytes"},
-        ],
-        "name": "swap",
-        "outputs": [],
-        "stateMutability": "nonpayable",
-        "type": "function",
-    }
-]
+SWAP_MANAGER_ABI = load_abi("SwapManager")
 
 
 class SwapExecutor:
@@ -51,7 +35,7 @@ class SwapExecutor:
         input_signature: str,
     ) -> SwapRecord:
         quote = self._validate_quote(quote_id, user_address)
-        self._validate_signature_format(input_signature)
+        validate_signature(input_signature, "input_signature")
 
         lp_balance = await self.accounting.get_lp_balance(quote["to_token_id"])
         if int(lp_balance.balance) < int(quote["to_amount_estimate"]):
@@ -94,6 +78,21 @@ class SwapExecutor:
                 input_sig_bytes = bytes.fromhex(input_signature[2:] if input_signature.startswith("0x") else input_signature)
                 output_sig_bytes = bytes.fromhex(output_signature[2:] if output_signature.startswith("0x") else output_signature)
 
+                self._update_swap(
+                    swap_id,
+                    output_nonce=lp_nonce,
+                    output_signature=output_signature,
+                )
+                logger.info(
+                    "swap %s signed output: lp=%s to=%s token=%s amount=%s nonce=%s",
+                    swap_id,
+                    self.settings.liquidity_provider_address,
+                    user_address,
+                    quote["to_token_id"],
+                    quote["to_amount_estimate"],
+                    lp_nonce,
+                )
+
                 tx_hash = await asyncio.to_thread(
                     self.sapphire.execute_contract_call,
                     contract_address=self.settings.swap_manager_contract_address,
@@ -116,7 +115,7 @@ class SwapExecutor:
 
         except Exception as exc:
             logger.exception(f"Swap {swap_id} failed")
-            error_msg = self._sanitize_error(str(exc))
+            error_msg = sanitize_error(str(exc))
             self._update_swap(swap_id, status=SwapStatus.FAILED.value, error=error_msg)
 
         return self._get_swap(swap_id)
@@ -136,27 +135,6 @@ class SwapExecutor:
             raise ValueError("Quote was not created for this user")
 
         return quote
-
-    def _validate_signature_format(self, signature: str) -> None:
-        if not signature.startswith("0x"):
-            raise ValueError("Signature must start with 0x")
-        try:
-            sig_bytes = bytes.fromhex(signature[2:])
-        except ValueError:
-            raise ValueError("Signature must be valid hex")
-        if len(sig_bytes) != 65:
-            raise ValueError("Signature must be 65 bytes")
-
-    def _sanitize_error(self, error: str) -> str:
-        if "reverted" in error.lower():
-            return "Swap transaction reverted on-chain"
-        if "insufficient funds" in error.lower():
-            return "Insufficient gas funds for transaction"
-        if "nonce" in error.lower():
-            return "Transaction nonce conflict"
-        if len(error) > 200:
-            return error[:200]
-        return error
 
     def _get_swap(self, swap_id: str) -> SwapRecord:
         db = get_db()

@@ -49,6 +49,28 @@ MIGRATIONS = [
     "CREATE INDEX IF NOT EXISTS idx_swaps_status ON swaps(status);",
     "CREATE INDEX IF NOT EXISTS idx_swaps_user ON swaps(user_address);",
     "CREATE INDEX IF NOT EXISTS idx_quotes_expires ON quotes(expires_at);",
+    """
+    CREATE TABLE IF NOT EXISTS earn_transactions (
+        id TEXT PRIMARY KEY,
+        operation TEXT NOT NULL,
+        pool_id TEXT NOT NULL,
+        user_address TEXT NOT NULL,
+        token_id TEXT NOT NULL,
+        amount TEXT NOT NULL,
+        signer_address TEXT NOT NULL,
+        nonce INTEGER NOT NULL,
+        signature TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        tx_hash TEXT,
+        error TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+    );
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_earn_tx_status ON earn_transactions(status);",
+    "CREATE INDEX IF NOT EXISTS idx_earn_tx_user ON earn_transactions(user_address);",
+    "ALTER TABLE swaps ADD COLUMN output_nonce INTEGER;",
+    "ALTER TABLE swaps ADD COLUMN output_signature TEXT;",
 ]
 
 
@@ -87,5 +109,10 @@ def close_db() -> None:
 
 def _run_migrations(conn: sqlite3.Connection) -> None:
     for sql in MIGRATIONS:
-        conn.execute(sql)
+        try:
+            conn.execute(sql)
+        except sqlite3.OperationalError as exc:
+            if "duplicate column name" in str(exc).lower():
+                continue
+            raise
     conn.commit()

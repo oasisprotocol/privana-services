@@ -56,6 +56,9 @@ def load_settings(refresh: bool = False) -> Settings:
             swap_manager_contract_address=os.getenv(
                 "SWAP_MANAGER_CONTRACT_ADDRESS", _defaults.swap_manager_contract_address
             ),
+            earn_manager_contract_address=os.getenv(
+                "EARN_MANAGER_CONTRACT_ADDRESS", _defaults.earn_manager_contract_address
+            ),
             sapphire_rpc_url=os.getenv("SAPPHIRE_RPC_URL", _defaults.sapphire_rpc_url),
             quote_ttl=_get_int("QUOTE_TTL", _defaults.quote_ttl),
             fee_bps=_get_int("FEE_BPS", _defaults.fee_bps),

@@ -1,6 +1,6 @@
 import pytest
 
-from src.core.validation import validate_address, validate_amount, validate_token_id
+from src.core.validation import validate_address, validate_amount, validate_signature, validate_token_id
 
 
 class TestValidateTokenId:
@@ -60,3 +60,20 @@ class TestValidateAmount:
     def test_rejects_float_string(self):
         with pytest.raises(ValueError, match="valid integer"):
             validate_amount("1.5")
+
+
+class TestValidateSignature:
+    def test_valid_65_byte_sig(self):
+        validate_signature("0x" + "aa" * 65)
+
+    def test_rejects_no_prefix(self):
+        with pytest.raises(ValueError, match="must start with 0x"):
+            validate_signature("aa" * 65)
+
+    def test_rejects_invalid_hex(self):
+        with pytest.raises(ValueError, match="must be valid hex"):
+            validate_signature("0x" + "zz" * 65)
+
+    def test_rejects_wrong_length(self):
+        with pytest.raises(ValueError, match="must be 65 bytes"):
+            validate_signature("0x" + "aa" * 64)

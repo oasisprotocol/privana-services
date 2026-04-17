@@ -21,3 +21,30 @@ def validate_amount(value: str, name: str = "amount") -> None:
         raise ValueError(f"{name} must be a valid integer string") from None
     if parsed <= 0:
         raise ValueError(f"{name} must be greater than zero")
+
+
+MAX_ERROR_LENGTH = 500
+
+
+def sanitize_error(error: str) -> str:
+    lower = error.lower()
+    if "reverted" in lower:
+        return "Transaction reverted on-chain"
+    if "insufficient funds" in lower:
+        return "Insufficient gas funds for transaction"
+    if "nonce" in lower:
+        return "Transaction nonce conflict"
+    if len(error) > MAX_ERROR_LENGTH:
+        return error[:MAX_ERROR_LENGTH]
+    return error
+
+
+def validate_signature(value: str, name: str = "signature") -> None:
+    if not value.startswith("0x"):
+        raise ValueError(f"{name} must start with 0x")
+    try:
+        sig_bytes = bytes.fromhex(value[2:])
+    except ValueError:
+        raise ValueError(f"{name} must be valid hex") from None
+    if len(sig_bytes) != 65:
+        raise ValueError(f"{name} must be 65 bytes")

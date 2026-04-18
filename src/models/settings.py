@@ -26,3 +26,5 @@ class Settings:
     fee_bps: int = 10
     max_swap_amount_usd: int = 100_000
     lifi_token_map: str = ""
+
+    admin_api_key: str = ""

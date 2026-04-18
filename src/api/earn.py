@@ -1,14 +1,17 @@
 import asyncio
 import logging
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
+from src.api.admin_auth import require_admin
 from src.models.earn import (
     BalanceListResponse,
     BalanceResponse,
     DepositQuoteResponse,
     DepositRequest,
     DepositResponse,
+    HarvestRequest,
+    HarvestResponse,
     PoolDetailResponse,
     PoolListResponse,
     PoolResponse,
@@ -140,3 +143,20 @@ async def get_balances(
     except Exception as exc:
         logger.exception("Failed to get balances")
         raise HTTPException(status_code=500, detail="Failed to get balances") from exc
+
+
+@router.post(
+    "/harvest",
+    response_model=HarvestResponse,
+    dependencies=[Depends(require_admin)],
+)
+async def harvest(payload: HarvestRequest) -> HarvestResponse:
+    try:
+        service = get_vault_service()
+        result = await service.harvest(
+            pool_id_hex=payload.pool_id,
+            yield_amount=payload.yield_amount,
+        )
+        return HarvestResponse(**result)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc

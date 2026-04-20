@@ -65,6 +65,8 @@ def load_settings(refresh: bool = False) -> Settings:
             max_swap_amount_usd=_get_int("MAX_SWAP_AMOUNT_USD", _defaults.max_swap_amount_usd),
             lifi_token_map=os.getenv("LIFI_TOKEN_MAP", _defaults.lifi_token_map),
             admin_api_key=os.getenv("ADMIN_API_KEY", _defaults.admin_api_key),
+            base_sepolia_rpc_url=os.getenv("BASE_SEPOLIA_RPC_URL", _defaults.base_sepolia_rpc_url),
+            aave_pool_address=os.getenv("AAVE_POOL_ADDRESS", _defaults.aave_pool_address),
         )
     return _settings
 

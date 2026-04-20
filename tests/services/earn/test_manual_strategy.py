@@ -18,13 +18,13 @@ async def test_apy_is_zero(strategy: ManualStrategy) -> None:
 
 
 @pytest.mark.asyncio
-async def test_deploy_is_noop(strategy: ManualStrategy) -> None:
-    assert await strategy.deploy(1_000_000) is None
+async def test_deposit_to_earn_is_noop(strategy: ManualStrategy) -> None:
+    assert await strategy.deposit_to_earn(1_000_000) is None
 
 
 @pytest.mark.asyncio
-async def test_withdraw_is_noop(strategy: ManualStrategy) -> None:
-    assert await strategy.withdraw(1_000_000) is None
+async def test_withdraw_from_earn_is_noop(strategy: ManualStrategy) -> None:
+    assert await strategy.withdraw_from_earn(1_000_000) is None
 
 
 @pytest.mark.asyncio

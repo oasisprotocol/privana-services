@@ -36,19 +36,19 @@ async def test_get_apy_bps_delegates_to_client(strategy: AaveStrategy, aave_clie
 
 
 @pytest.mark.asyncio
-async def test_deploy_is_noop(strategy: AaveStrategy, caplog) -> None:
+async def test_deposit_to_earn_is_noop(strategy: AaveStrategy, caplog) -> None:
     with caplog.at_level(logging.WARNING):
-        assert await strategy.deploy(1_000_000) is None
+        assert await strategy.deposit_to_earn(1_000_000) is None
 
-    assert any("deploy is a no-op" in r.message for r in caplog.records)
+    assert any("deposit_to_earn: not implemented" in r.message for r in caplog.records)
 
 
 @pytest.mark.asyncio
-async def test_withdraw_is_noop(strategy: AaveStrategy, caplog) -> None:
+async def test_withdraw_from_earn_is_noop(strategy: AaveStrategy, caplog) -> None:
     with caplog.at_level(logging.WARNING):
-        assert await strategy.withdraw(500_000) is None
+        assert await strategy.withdraw_from_earn(500_000) is None
 
-    assert any("withdraw is a no-op" in r.message for r in caplog.records)
+    assert any("withdraw_from_earn: not implemented" in r.message for r in caplog.records)
 
 
 @pytest.mark.asyncio

@@ -338,6 +338,15 @@ class VaultService:
         the exchange rate rises and every holder's underlying balance goes
         up proportionally. No user signature required — onlyOwner on-chain
         and gated by admin API key at the edge.
+
+        Role: pure accounting update. Does NOT pull funds from any external
+        protocol (e.g. Aave) — admin must pre-fund the pool's accounting
+        balance before calling. yield_amount is determined off-service by
+        the admin.
+
+        TODO: this function goes away once Aave integration lands — at that
+        point totalAssets will be derived from the pool's aToken balance
+        rather than mutated by explicit calls.
         """
         validate_amount(yield_amount, "yield_amount")
 

@@ -23,12 +23,12 @@ class BaseStrategy(ABC):
         """Current APY in basis points (500 = 5%)."""
 
     @abstractmethod
-    async def deploy(self, amount: int) -> None:
-        """Move idle pool funds into the external protocol."""
+    async def deposit_to_earn(self, amount: int) -> None:
+        """Move idle pool funds into the external earn protocol."""
 
     @abstractmethod
-    async def withdraw(self, amount: int) -> None:
-        """Pull funds back from the external protocol to the pool."""
+    async def withdraw_from_earn(self, amount: int) -> None:
+        """Pull funds back from the external earn protocol to the pool."""
 
     @abstractmethod
     async def pending_yield(self) -> int:

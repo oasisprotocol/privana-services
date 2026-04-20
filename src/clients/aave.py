@@ -17,8 +17,8 @@ RAY_TO_BPS = 10**23
 class AaveClient:
     """Read-only Aave V3 Pool client — queries supply/borrow rates.
 
-    Sprint 3 uses this for reporting APY on earn pools. Sprint 4 will
-    extend to write paths (supply, withdraw) but those live on the
+    Reports APY on earn pools.
+    TODO: extend to write paths (supply, withdraw) but those live on the
     strategy side, not here.
     """
 
@@ -37,7 +37,8 @@ class AaveClient:
         Aave V3 returns currentLiquidityRate as APR (linear annualized) in
         RAY units (1e27). We convert to bps via integer division. The
         APR→APY gap at typical supply rates (<10%) is under ~2 bps and is
-        rounded away; Sprint 4 can compound explicitly if needed.
+        rounded away.
+        TODO: compound explicitly if needed?
         """
         asset = Web3.to_checksum_address(asset_address)
         reserve = self.pool.functions.getReserveData(asset).call()

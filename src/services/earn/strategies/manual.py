@@ -19,10 +19,10 @@ class ManualStrategy(BaseStrategy):
     async def get_apy_bps(self) -> int:
         return 0
 
-    async def deploy(self, amount: int) -> None:
+    async def deposit_to_earn(self, amount: int) -> None:
         return None
 
-    async def withdraw(self, amount: int) -> None:
+    async def withdraw_from_earn(self, amount: int) -> None:
         return None
 
     async def pending_yield(self) -> int:

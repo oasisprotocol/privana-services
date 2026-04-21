@@ -48,3 +48,28 @@ class AaveStrategy(BaseStrategy):
 
     async def pending_yield(self) -> int:
         return 0
+
+    async def total_assets(self) -> int:
+        """aToken balance held by the LP EOA for this asset — principal plus
+        accrued Aave yield.
+        TODO: thread the holder address through explicitly once the pool
+        address model lands; for now we lean on the client's LP account.
+        """
+        return self._client.get_aToken_balance(
+            self._asset_address, self._client.account_address,
+        )
+
+    async def is_healthy(self) -> bool:
+        """Treat a successful supply-rate read as a cheap liveness proxy. If
+        getReserveData throws, the pool is unreachable or the asset isn't
+        listed — either way, don't route deposits here.
+        """
+        try:
+            self._client.get_supply_apy_bps(self._asset_address)
+            return True
+        except Exception as exc:
+            logger.warning(
+                "AaveStrategy.is_healthy: probe failed asset=%s err=%s",
+                self._asset_address, exc,
+            )
+            return False

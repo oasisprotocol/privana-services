@@ -30,3 +30,13 @@ async def test_withdraw_from_earn_is_noop(strategy: ManualStrategy) -> None:
 @pytest.mark.asyncio
 async def test_pending_yield_is_zero(strategy: ManualStrategy) -> None:
     assert await strategy.pending_yield() == 0
+
+
+@pytest.mark.asyncio
+async def test_total_assets_is_zero(strategy: ManualStrategy) -> None:
+    assert await strategy.total_assets() == 0
+
+
+@pytest.mark.asyncio
+async def test_is_healthy_is_true(strategy: ManualStrategy) -> None:
+    assert await strategy.is_healthy() is True

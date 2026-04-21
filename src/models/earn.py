@@ -127,6 +127,19 @@ class WithdrawResponse(BaseModel):
     status: str
 
 
+class HarvestRequest(BaseModel):
+    pool_id: str = Field(..., description="Earn pool ID (hex)")
+    yield_amount: str = Field(..., description="Yield to realize in base units")
+
+
+class HarvestResponse(BaseModel):
+    pool_id: str
+    yield_amount: str
+    exchange_rate: Optional[str] = None
+    tx_hash: Optional[str] = None
+    status: str
+
+
 class BalanceResponse(BaseModel):
     pool_id: str
     token_id: str

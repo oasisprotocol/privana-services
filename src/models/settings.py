@@ -26,3 +26,8 @@ class Settings:
     fee_bps: int = 10
     max_swap_amount_usd: int = 100_000
     lifi_token_map: str = ""
+
+    admin_api_key: str = ""
+
+    base_sepolia_rpc_url: str = "https://sepolia.base.org"
+    aave_pool_address: str = "0x8bAB6d1b75f19e9eD9fCe8b9BD338844fF79aE27"

@@ -309,3 +309,56 @@ class TestGetAllBalances:
 
         balances = await service.get_all_balances(USER_ADDRESS)
         assert balances == []
+
+
+class TestHarvest:
+    async def test_successful_harvest(self, test_db):
+        service, contract, saph, _ = _make_service()
+        contract.functions.getPool.return_value.call.side_effect = [
+            (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1000, 1050, True),
+            (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1000, 1100, True),
+        ]
+
+        result = await service.harvest(POOL_ID_HEX, "50")
+
+        assert result["status"] == "completed"
+        assert result["tx_hash"] == "0x" + "ff" * 32
+        assert result["yield_amount"] == "50"
+        assert result["exchange_rate"] == "1.1"
+
+        row = test_db.execute("SELECT * FROM earn_transactions").fetchone()
+        assert row["operation"] == "harvest"
+        assert row["amount"] == "50"
+        assert row["status"] == "completed"
+
+    async def test_rejects_missing_pool(self, test_db):
+        service, contract, _, _ = _make_service()
+        contract.functions.getPool.return_value.call.return_value = (
+            b"\x00" * 32,
+            "0x0000000000000000000000000000000000000000",
+            0, 0, False,
+        )
+        with pytest.raises(ValueError, match="not found"):
+            await service.harvest(POOL_ID_HEX, "50")
+
+    async def test_rejects_zero_yield(self, test_db):
+        service, _, _, _ = _make_service()
+        with pytest.raises(ValueError, match="greater than zero"):
+            await service.harvest(POOL_ID_HEX, "0")
+
+    async def test_failed_harvest_marks_row(self, test_db):
+        service, contract, saph, _ = _make_service()
+        contract.functions.getPool.return_value.call.return_value = (
+            bytes.fromhex(USDC_TOKEN_ID[2:]),
+            POOL_ADDRESS,
+            1000, 1050, True,
+        )
+        saph.execute_contract_call.side_effect = RuntimeError("execution reverted: only owner")
+
+        result = await service.harvest(POOL_ID_HEX, "50")
+        assert result["status"] == "failed"
+        assert result["tx_hash"] is None
+
+        row = test_db.execute("SELECT * FROM earn_transactions").fetchone()
+        assert row["status"] == "failed"
+        assert row["error"] == "Transaction reverted on-chain"

@@ -13,10 +13,10 @@ class StrategyRegistry:
 
     Why a registry: the vault service must stay protocol-agnostic. Adding a
     new protocol later (Compound, Morpho, Pendle, ...) should be a new file
-    under strategies/ plus a single registration call — not an edit to
+    under strategies/ plus a single registration call, not an edit to
     vault_service.py.
 
-    Missing pool_id → falls back to ManualStrategy so pools without a
+    Missing pool_id falls back to ManualStrategy so pools without a
     configured adapter continue to work as they did before Sprint 4.
     TODO: decide whether the fallback should be an error instead once
     all pools are expected to have strategies declared.
@@ -68,7 +68,7 @@ def get_strategy_registry() -> StrategyRegistry:
 
 
 def reset_strategy_registry() -> None:
-    """Test hook — clears the module-level singleton so each test gets a
+    """Test hook. Clears the module-level singleton so each test gets a
     fresh registry.
     """
     global _registry_instance

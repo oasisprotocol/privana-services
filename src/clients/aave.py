@@ -20,7 +20,7 @@ AAVE_REFERRAL_CODE = 0
 
 
 class AaveClient:
-    """Aave V3 Pool client — read rates/balances and write supply/withdraw.
+    """Aave V3 Pool client. Reads rates/balances and writes supply/withdraw.
 
     Reads are free (no signer). Writes use the LP EOA on Base Sepolia via
     standard web3 signing (non-confidential chain, no sapphirepy wrapper).

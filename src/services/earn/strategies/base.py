@@ -9,7 +9,7 @@ class BaseStrategy(ABC):
     on-chain principal + accrued yield as total_assets, and signal whether
     the underlying protocol is healthy enough to route deposits into.
 
-    Strategies are stateless — they don't persist anything themselves. The
+    Strategies are stateless. They don't persist anything themselves. The
     vault reads share/asset state from EarnManager and uses the strategy as
     a pure adapter over the external protocol.
     """
@@ -41,7 +41,7 @@ class BaseStrategy(ABC):
 
     @abstractmethod
     async def total_assets(self) -> int:
-        """Current pool AUM held by this strategy, in base units — principal
+        """Current pool AUM held by this strategy, in base units: principal
         plus accrued yield as reported by the external protocol (e.g. aToken
         balance for Aave). Returns 0 for strategies that don't hold funds
         externally (e.g. manual).

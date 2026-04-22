@@ -36,11 +36,41 @@ async def test_get_apy_bps_delegates_to_client(strategy: AaveStrategy, aave_clie
 
 
 @pytest.mark.asyncio
-async def test_deposit_to_earn_is_noop(strategy: AaveStrategy, caplog) -> None:
-    with caplog.at_level(logging.WARNING):
-        assert await strategy.deposit_to_earn(1_000_000) is None
+async def test_deposit_to_earn_supplies_with_existing_allowance(
+    strategy: AaveStrategy, aave_client
+) -> None:
+    aave_client.get_allowance.return_value = 10_000_000
+    aave_client.supply.return_value = "0xabc"
 
-    assert any("deposit_to_earn: not implemented" in r.message for r in caplog.records)
+    await strategy.deposit_to_earn(1_000_000)
+
+    aave_client.get_allowance.assert_called_once_with(ASSET_ADDRESS)
+    aave_client.approve_pool.assert_not_called()
+    aave_client.supply.assert_called_once_with(ASSET_ADDRESS, 1_000_000)
+
+
+@pytest.mark.asyncio
+async def test_deposit_to_earn_tops_up_allowance_when_insufficient(
+    strategy: AaveStrategy, aave_client
+) -> None:
+    aave_client.get_allowance.return_value = 500_000
+    aave_client.supply.return_value = "0xabc"
+
+    await strategy.deposit_to_earn(1_000_000)
+
+    aave_client.approve_pool.assert_called_once_with(ASSET_ADDRESS, 1_000_000)
+    aave_client.supply.assert_called_once_with(ASSET_ADDRESS, 1_000_000)
+
+
+@pytest.mark.asyncio
+async def test_deposit_to_earn_rejects_non_positive_amount(
+    strategy: AaveStrategy, aave_client
+) -> None:
+    with pytest.raises(ValueError, match="positive amount"):
+        await strategy.deposit_to_earn(0)
+
+    aave_client.supply.assert_not_called()
+    aave_client.approve_pool.assert_not_called()
 
 
 @pytest.mark.asyncio

@@ -7,16 +7,21 @@ logger = logging.getLogger(__name__)
 
 
 class AaveStrategy(BaseStrategy):
-    """Aave V3 strategy — live APY, deposit/withdraw are no-ops for now.
+    """Aave V3 strategy. Supplies to and redeems from Aave V3 on Base.
 
     The asset address is passed at construction time because pools in our
     accounting system are keyed by tokenId, not by chain-specific ERC-20
     addresses. Whoever instantiates the strategy per pool resolves that
     mapping once.
 
-    TODO: implement deposit_to_earn / withdraw_from_earn using the flexvaults
-    withdrawal + deposit-listener flow. Until then, funds stay in the pool's
-    accounting slot and yield is realized via the admin harvest endpoint.
+    Scope: this adapter only handles the Aave-side of the flow (approve +
+    supply, withdraw). Moving funds from the flexvaults accounting layer
+    on Sapphire to the LP EOA on Base, and back, is the VaultService's
+    job. Precondition for deposit_to_earn: the ERC-20 balance is already
+    on the LP EOA on Base.
+
+    TODO: once accounting exposes a cross-chain withdrawal primitive, the
+    vault service will drive it; MVP assumes admin pre-funds the LP EOA.
     """
 
     def __init__(self, client: AaveClient, asset_address: str) -> None:
@@ -35,9 +40,29 @@ class AaveStrategy(BaseStrategy):
         return self._client.get_supply_apy_bps(self._asset_address)
 
     async def deposit_to_earn(self, amount: int) -> None:
-        logger.warning(
-            "AaveStrategy.deposit_to_earn: not implemented yet: asset=%s amount=%d",
-            self._asset_address, amount,
+        """Supply `amount` of the underlying asset to Aave.
+
+        Ensures the pool has sufficient allowance; if not, submits an approve
+        tx first. Approval is only refreshed when short; we don't reset to
+        zero beforehand because (a) the asset is sitting on our own EOA so
+        there's no front-running risk and (b) an extra tx per deposit is
+        wasteful.
+        """
+        if amount <= 0:
+            raise ValueError(f"deposit_to_earn requires a positive amount, got {amount}")
+
+        allowance = self._client.get_allowance(self._asset_address)
+        if allowance < amount:
+            logger.info(
+                "AaveStrategy.deposit_to_earn: topping up allowance asset=%s current=%d needed=%d",
+                self._asset_address, allowance, amount,
+            )
+            self._client.approve_pool(self._asset_address, amount)
+
+        tx_hash = self._client.supply(self._asset_address, amount)
+        logger.info(
+            "AaveStrategy.deposit_to_earn: supplied asset=%s amount=%d tx=%s",
+            self._asset_address, amount, tx_hash,
         )
 
     async def withdraw_from_earn(self, amount: int) -> None:
@@ -50,8 +75,8 @@ class AaveStrategy(BaseStrategy):
         return 0
 
     async def total_assets(self) -> int:
-        """aToken balance held by the LP EOA for this asset — principal plus
-        accrued Aave yield.
+        """aToken balance held by the LP EOA for this asset, which equals
+        principal plus accrued Aave yield.
         TODO: thread the holder address through explicitly once the pool
         address model lands; for now we lean on the client's LP account.
         """
@@ -62,7 +87,7 @@ class AaveStrategy(BaseStrategy):
     async def is_healthy(self) -> bool:
         """Treat a successful supply-rate read as a cheap liveness proxy. If
         getReserveData throws, the pool is unreachable or the asset isn't
-        listed — either way, don't route deposits here.
+        listed; either way, don't route deposits here.
         """
         try:
             self._client.get_supply_apy_bps(self._asset_address)

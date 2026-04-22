@@ -136,6 +136,6 @@ class TestAccountingClient:
         assert isinstance(result, Balance)
         assert result.balance == "1000000000000000000"
         mock_http_client.request.assert_called_once_with(
-            "GET", "http://test:8000/v1/accounting/balances/0x2c7536E3605D9C16a7a3D7b1898e529396a65c23/0xtoken",
-            headers={"X-SIWE-Token": "test-siwe", "Authorization": "Bearer test-jwt"},
+            "GET", "http://test:8000/v1/accounting/balances/0xtoken",
+            headers={"Authorization": "Bearer test-jwt"},
         )

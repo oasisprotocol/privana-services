@@ -79,10 +79,7 @@ class AccountingClient:
         self._auth_timestamp = asyncio.get_event_loop().time()
 
     def _auth_headers(self) -> dict:
-        return {
-            "X-SIWE-Token": self._siwe_token,
-            "Authorization": f"Bearer {self._jwt_token}",
-        }
+        return {"Authorization": f"Bearer {self._jwt_token}"}
 
     async def _authenticated_request(self, method: str, url: str) -> httpx.Response:
         await self._ensure_authenticated()
@@ -102,7 +99,7 @@ class AccountingClient:
     async def get_lp_balance(self, token_id: str) -> Balance:
         response = await self._authenticated_request(
             "GET",
-            f"{self.base_url}/v1/accounting/balances/{self._lp_address}/{token_id}",
+            f"{self.base_url}/v1/accounting/balances/{token_id}",
         )
         return Balance(**response.json())
 

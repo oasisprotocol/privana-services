@@ -11,7 +11,7 @@ POOL_ADDRESS = "0x152E6a7125665764a4F1F1df80E8f5D49Bf0239c"
 USER_ADDRESS = "0xd8991364507FAfC256EafF950d28618735753476"
 
 
-def _make_service():
+def _make_service(registry=None):
     settings = Settings(
         earn_manager_contract_address="0x1111111111111111111111111111111111111111",
         liquidity_provider_private_key="0x4c0883a69102937d6231471b5dbb6204fe512961708279f69e0f0fcbf24b5830",
@@ -38,7 +38,7 @@ def _make_service():
         mock_acct.return_value = acct
 
         from src.services.earn.vault_service import VaultService
-        service = VaultService()
+        service = VaultService(registry=registry)
         service.contract = contract
         return service, contract, saph, acct
 
@@ -362,3 +362,116 @@ class TestHarvest:
         row = test_db.execute("SELECT * FROM earn_transactions").fetchone()
         assert row["status"] == "failed"
         assert row["error"] == "Transaction reverted on-chain"
+
+
+class TestStrategyRouting:
+    async def test_deposit_routes_to_strategy(self, test_db):
+        from src.services.earn.registry import StrategyRegistry
+
+        registry = StrategyRegistry()
+        strategy = MagicMock()
+        strategy.name = "aave-v3"
+        strategy.deposit_to_earn = AsyncMock()
+        registry.register(POOL_ID_HEX, strategy)
+
+        service, contract, _, _ = _make_service(registry=registry)
+        contract.functions.getPool.return_value.call.return_value = (
+            bytes.fromhex(USDC_TOKEN_ID[2:]),
+            POOL_ADDRESS,
+            1000, 1050, True,
+        )
+        contract.functions.getUserShares.return_value.call.side_effect = [0, 952]
+
+        result = await service.deposit(
+            POOL_ID_HEX, USER_ADDRESS, "1000", 5, "0x" + "aa" * 65
+        )
+
+        assert result["status"] == "completed"
+        strategy.deposit_to_earn.assert_awaited_once_with(1000)
+
+    async def test_deposit_strategy_failure_does_not_fail_user_response(self, test_db):
+        from src.services.earn.registry import StrategyRegistry
+
+        registry = StrategyRegistry()
+        strategy = MagicMock()
+        strategy.name = "aave-v3"
+        strategy.deposit_to_earn = AsyncMock(side_effect=RuntimeError("aave rpc down"))
+        registry.register(POOL_ID_HEX, strategy)
+
+        service, contract, _, _ = _make_service(registry=registry)
+        contract.functions.getPool.return_value.call.return_value = (
+            bytes.fromhex(USDC_TOKEN_ID[2:]),
+            POOL_ADDRESS,
+            1000, 1050, True,
+        )
+        contract.functions.getUserShares.return_value.call.side_effect = [0, 952]
+
+        result = await service.deposit(
+            POOL_ID_HEX, USER_ADDRESS, "1000", 5, "0x" + "aa" * 65
+        )
+
+        assert result["status"] == "completed"
+        strategy.deposit_to_earn.assert_awaited_once()
+
+    async def test_deposit_manual_strategy_skips_routing(self, test_db):
+        service, contract, _, _ = _make_service()
+        contract.functions.getPool.return_value.call.return_value = (
+            bytes.fromhex(USDC_TOKEN_ID[2:]),
+            POOL_ADDRESS,
+            1000, 1050, True,
+        )
+        contract.functions.getUserShares.return_value.call.side_effect = [0, 952]
+
+        result = await service.deposit(
+            POOL_ID_HEX, USER_ADDRESS, "1000", 5, "0x" + "aa" * 65
+        )
+
+        assert result["status"] == "completed"
+
+    async def test_withdraw_reclaims_from_strategy(self, test_db):
+        from src.services.earn.registry import StrategyRegistry
+
+        registry = StrategyRegistry()
+        strategy = MagicMock()
+        strategy.name = "aave-v3"
+        strategy.withdraw_from_earn = AsyncMock()
+        registry.register(POOL_ID_HEX, strategy)
+
+        service, contract, _, _ = _make_service(registry=registry)
+        contract.functions.getPool.return_value.call.return_value = (
+            bytes.fromhex(USDC_TOKEN_ID[2:]),
+            POOL_ADDRESS,
+            1000, 1050, True,
+        )
+        contract.functions.getUserShares.return_value.call.side_effect = [500, 500, 25]
+        contract.functions.convertToAssets.return_value.call.return_value = 525
+
+        with patch("src.services.earn.vault_service.sign_transfer", return_value="0x" + "bb" * 65):
+            result = await service.withdraw(POOL_ID_HEX, USER_ADDRESS, "500")
+
+        assert result["status"] == "completed"
+        strategy.withdraw_from_earn.assert_awaited_once_with(500)
+
+    async def test_withdraw_strategy_failure_still_executes_onchain(self, test_db):
+        from src.services.earn.registry import StrategyRegistry
+
+        registry = StrategyRegistry()
+        strategy = MagicMock()
+        strategy.name = "aave-v3"
+        strategy.withdraw_from_earn = AsyncMock(side_effect=RuntimeError("aave rpc down"))
+        registry.register(POOL_ID_HEX, strategy)
+
+        service, contract, _, _ = _make_service(registry=registry)
+        contract.functions.getPool.return_value.call.return_value = (
+            bytes.fromhex(USDC_TOKEN_ID[2:]),
+            POOL_ADDRESS,
+            1000, 1050, True,
+        )
+        contract.functions.getUserShares.return_value.call.side_effect = [500, 500, 25]
+        contract.functions.convertToAssets.return_value.call.return_value = 525
+
+        with patch("src.services.earn.vault_service.sign_transfer", return_value="0x" + "bb" * 65):
+            result = await service.withdraw(POOL_ID_HEX, USER_ADDRESS, "500")
+
+        assert result["status"] == "completed"
+        strategy.withdraw_from_earn.assert_awaited_once()

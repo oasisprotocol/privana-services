@@ -14,6 +14,7 @@ from src.core.config import load_settings
 from src.core.db import db_write, get_db
 from src.core.eip712 import sign_transfer
 from src.core.validation import sanitize_error, validate_address, validate_amount, validate_signature
+from src.services.earn.registry import StrategyRegistry, get_strategy_registry
 
 logger = logging.getLogger(__name__)
 
@@ -34,11 +35,12 @@ def _exchange_rate(total_assets: int, total_shares: int) -> str:
 
 
 class VaultService:
-    def __init__(self) -> None:
+    def __init__(self, registry: Optional[StrategyRegistry] = None) -> None:
         self.settings = load_settings()
         self.sapphire = get_sapphire_client()
         self.accounting = get_accounting_client()
         self._withdraw_lock = asyncio.Lock()
+        self._registry = registry if registry is not None else get_strategy_registry()
         self.contract_address = Web3.to_checksum_address(
             self.settings.earn_manager_contract_address
         )
@@ -46,6 +48,41 @@ class VaultService:
             address=self.contract_address,
             abi=EARN_MANAGER_ABI,
         )
+
+    async def _route_to_strategy(self, pool_id_hex: str, amount: int) -> None:
+        """After a successful EarnManager.deposit, push the same amount into
+        the pool's configured yield strategy. Best-effort: failures are
+        logged but do not propagate, because the user's shares are already
+        minted and rolling the accounting-side tx back is impossible from
+        here. Orphan-fund recovery belongs to the Sprint 4.5 reconciler.
+        """
+        strategy = self._registry.get(pool_id_hex)
+        if strategy.name == "manual":
+            return
+        try:
+            await strategy.deposit_to_earn(amount)
+        except Exception:
+            logger.exception(
+                "strategy.deposit_to_earn failed pool=%s amount=%d strategy=%s",
+                pool_id_hex, amount, strategy.name,
+            )
+
+    async def _reclaim_from_strategy(self, pool_id_hex: str, amount: int) -> None:
+        """Before a user withdraw, pull `amount` back from the strategy so
+        the pool has liquidity to pay out. Best-effort: if the call fails
+        we still attempt the accounting-side withdrawal, assuming the pool
+        has sufficient idle balance. The reconciler flags any drift.
+        """
+        strategy = self._registry.get(pool_id_hex)
+        if strategy.name == "manual":
+            return
+        try:
+            await strategy.withdraw_from_earn(amount)
+        except Exception:
+            logger.exception(
+                "strategy.withdraw_from_earn failed pool=%s amount=%d strategy=%s",
+                pool_id_hex, amount, strategy.name,
+            )
 
     def get_pool(self, pool_id: bytes) -> dict:
         pool = self.contract.functions.getPool(pool_id).call()
@@ -199,6 +236,8 @@ class VaultService:
 
         self._update_transaction(tx_id, status=EARN_STATUS_COMPLETED, tx_hash=tx_hash)
 
+        await self._route_to_strategy(pool_id_hex, int(amount))
+
         try:
             shares_after = self.get_user_shares(user_address, pool_id)
             shares_minted = shares_after - shares_before
@@ -249,6 +288,8 @@ class VaultService:
         max_withdraw = self.convert_to_assets(pool_id, shares) if shares > 0 else 0
         if int(amount) > max_withdraw:
             raise ValueError("Insufficient shares for this withdrawal")
+
+        await self._reclaim_from_strategy(pool_id_hex, int(amount))
 
         async with self._withdraw_lock:
             pool_nonce = await self.accounting.get_transfer_nonce(pool["pool_address"])

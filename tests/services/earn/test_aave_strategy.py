@@ -74,11 +74,29 @@ async def test_deposit_to_earn_rejects_non_positive_amount(
 
 
 @pytest.mark.asyncio
-async def test_withdraw_from_earn_is_noop(strategy: AaveStrategy, caplog) -> None:
-    with caplog.at_level(logging.WARNING):
-        assert await strategy.withdraw_from_earn(500_000) is None
+async def test_withdraw_from_earn_redeems_from_aave(
+    strategy: AaveStrategy, aave_client
+) -> None:
+    aave_client.withdraw.return_value = "0xdef"
 
-    assert any("withdraw_from_earn: not implemented" in r.message for r in caplog.records)
+    await strategy.withdraw_from_earn(500_000)
+
+    aave_client.withdraw.assert_called_once_with(ASSET_ADDRESS, 500_000)
+
+
+@pytest.mark.asyncio
+async def test_withdraw_from_earn_rejects_non_positive_amount(
+    strategy: AaveStrategy, aave_client
+) -> None:
+    with pytest.raises(ValueError, match="positive amount"):
+        await strategy.withdraw_from_earn(0)
+
+    aave_client.withdraw.assert_not_called()
+
+    with pytest.raises(ValueError, match="positive amount"):
+        await strategy.withdraw_from_earn(-1)
+
+    aave_client.withdraw.assert_not_called()
 
 
 @pytest.mark.asyncio

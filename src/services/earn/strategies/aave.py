@@ -66,9 +66,19 @@ class AaveStrategy(BaseStrategy):
         )
 
     async def withdraw_from_earn(self, amount: int) -> None:
-        logger.warning(
-            "AaveStrategy.withdraw_from_earn: not implemented yet: asset=%s amount=%d",
-            self._asset_address, amount,
+        """Redeem `amount` of the underlying asset from Aave. Funds return to
+        the LP EOA on Base.
+
+        Re-depositing them into the flexvaults accounting layer on Sapphire
+        is the VaultService's job. This adapter only handles the Aave side.
+        """
+        if amount <= 0:
+            raise ValueError(f"withdraw_from_earn requires a positive amount, got {amount}")
+
+        tx_hash = self._client.withdraw(self._asset_address, amount)
+        logger.info(
+            "AaveStrategy.withdraw_from_earn: redeemed asset=%s amount=%d tx=%s",
+            self._asset_address, amount, tx_hash,
         )
 
     async def pending_yield(self) -> int:

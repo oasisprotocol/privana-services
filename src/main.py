@@ -45,11 +45,24 @@ def _validate_settings() -> None:
 async def lifespan(_app: FastAPI):
     from src.clients.accounting import get_accounting_client
     from src.clients.lifi import get_lifi_client
+    from src.services.earn.registry import (
+        get_strategy_registry,
+        register_aave_strategies_from_config,
+    )
 
     logger.info("FlexVaults Swap starting...")
 
     _validate_settings()
     get_db()
+
+    try:
+        registered = register_aave_strategies_from_config(
+            get_strategy_registry(), settings.aave_pool_assets,
+        )
+        if registered:
+            logger.info("Earn strategy registry: %d Aave pool(s) registered", registered)
+    except Exception:
+        logger.exception("Earn strategy registration failed; pools fall back to manual")
 
     yield
 

@@ -1,3 +1,4 @@
+import json
 import logging
 from typing import Optional
 
@@ -73,3 +74,43 @@ def reset_strategy_registry() -> None:
     """
     global _registry_instance
     _registry_instance = None
+
+
+def register_aave_strategies_from_config(registry: StrategyRegistry, raw_config: str) -> int:
+    """Parse `AAVE_POOL_ASSETS` JSON and register an AaveStrategy per pool.
+
+    Config format: `{"<pool_id_hex>": "<asset_address>", ...}`. An empty or
+    whitespace-only string is treated as "no Aave pools configured" and the
+    helper short-circuits without touching the registry.
+
+    Returns the number of pools registered. Failures (bad JSON, missing
+    fields) are logged but do not crash the app: the registry just falls
+    back to ManualStrategy for the affected pools.
+    """
+    if not raw_config.strip():
+        logger.info("AAVE_POOL_ASSETS not configured; skipping Aave strategy registration")
+        return 0
+
+    try:
+        pool_assets = json.loads(raw_config)
+    except json.JSONDecodeError:
+        logger.exception("AAVE_POOL_ASSETS contains invalid JSON; skipping registration")
+        return 0
+
+    if not isinstance(pool_assets, dict):
+        logger.error("AAVE_POOL_ASSETS must be a JSON object; got %s", type(pool_assets).__name__)
+        return 0
+
+    from src.clients.aave import get_aave_client
+    from src.services.earn.strategies.aave import AaveStrategy
+
+    client = get_aave_client()
+    count = 0
+    for pool_id, asset_address in pool_assets.items():
+        if not isinstance(asset_address, str) or not asset_address:
+            logger.error("AAVE_POOL_ASSETS pool=%s has invalid asset_address; skipping", pool_id)
+            continue
+        registry.register(pool_id, AaveStrategy(client=client, asset_address=asset_address))
+        logger.info("Registered AaveStrategy pool=%s asset=%s", pool_id, asset_address)
+        count += 1
+    return count

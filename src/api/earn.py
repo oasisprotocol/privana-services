@@ -27,19 +27,20 @@ async def list_pools() -> PoolListResponse:
     try:
         service = get_vault_service()
         pools = await asyncio.to_thread(service.list_pools)
-        return PoolListResponse(
-            pools=[
+        responses = []
+        for p in pools:
+            effective = await service.effective_total_assets(p["pool_id"], p["total_assets"])
+            responses.append(
                 PoolResponse(
                     pool_id=p["pool_id"],
                     token_id=p["token_id"],
                     strategy="aave-v3",
-                    total_assets=str(p["total_assets"]),
+                    total_assets=str(effective),
                     apy_bps=0,
                     status="active" if p["active"] else "paused",
                 )
-                for p in pools
-            ]
-        )
+            )
+        return PoolListResponse(pools=responses)
     except Exception as exc:
         logger.exception("Failed to list earn pools")
         raise HTTPException(status_code=500, detail="Failed to list pools") from exc
@@ -53,12 +54,13 @@ async def get_pool(pool_id: str) -> PoolDetailResponse:
         p = await asyncio.to_thread(service.get_pool, pool_id_bytes)
         if p["pool_address"] == "0x0000000000000000000000000000000000000000":
             raise ValueError("Pool not found")
+        effective = await service.effective_total_assets(pool_id, p["total_assets"])
         return PoolDetailResponse(
             pool_id=pool_id,
             token_id=p["token_id"],
             strategy="aave-v3",
             total_shares=str(p["total_shares"]),
-            total_assets=str(p["total_assets"]),
+            total_assets=str(effective),
             pool_address=p["pool_address"],
             apy_bps=0,
             status="active" if p["active"] else "paused",

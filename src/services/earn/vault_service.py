@@ -149,8 +149,8 @@ class VaultService:
 
         shares_estimate = self.convert_to_shares(pool_id, int(amount))
         total_shares = pool["total_shares"]
-        total_assets = pool["total_assets"]
-        exchange_rate = _exchange_rate(total_assets, total_shares)
+        effective_assets = await self.effective_total_assets(pool_id_hex, pool["total_assets"])
+        exchange_rate = _exchange_rate(effective_assets, total_shares)
 
         transfer_nonce = await self.accounting.get_transfer_nonce(user_address)
 
@@ -241,11 +241,12 @@ class VaultService:
             shares_after = self.get_user_shares(user_address, pool_id)
             shares_minted = shares_after - shares_before
             pool_after = self.get_pool(pool_id)
+            effective_assets = await self.effective_total_assets(pool_id_hex, pool_after["total_assets"])
             return {
                 "pool_id": pool_id_hex,
                 "amount": amount,
                 "shares_minted": str(shares_minted),
-                "exchange_rate": _exchange_rate(pool_after["total_assets"], pool_after["total_shares"]),
+                "exchange_rate": _exchange_rate(effective_assets, pool_after["total_shares"]),
                 "tx_hash": tx_hash,
                 "status": "completed",
             }
@@ -351,11 +352,12 @@ class VaultService:
             shares_after = self.get_user_shares(user_address, pool_id)
             shares_burned = shares_before - shares_after
             pool_after = self.get_pool(pool_id)
+            effective_assets = await self.effective_total_assets(pool_id_hex, pool_after["total_assets"])
             return {
                 "pool_id": pool_id_hex,
                 "amount": amount,
                 "shares_burned": str(shares_burned),
-                "exchange_rate": _exchange_rate(pool_after["total_assets"], pool_after["total_shares"]),
+                "exchange_rate": _exchange_rate(effective_assets, pool_after["total_shares"]),
                 "tx_hash": tx_hash,
                 "status": "completed",
             }
@@ -444,12 +446,13 @@ class VaultService:
             if shares == 0:
                 return None
             underlying = await asyncio.to_thread(self.convert_to_assets, pool_id, shares)
+            effective_assets = await self.effective_total_assets(pool["pool_id"], pool["total_assets"])
             return {
                 "pool_id": pool["pool_id"],
                 "token_id": pool["token_id"],
                 "shares": str(shares),
                 "underlying_amount": str(underlying),
-                "exchange_rate": _exchange_rate(pool["total_assets"], pool["total_shares"]),
+                "exchange_rate": _exchange_rate(effective_assets, pool["total_shares"]),
             }
 
         results = await asyncio.gather(*[fetch_balance(p) for p in pools])

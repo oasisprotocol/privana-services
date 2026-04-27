@@ -18,10 +18,18 @@ def _mock_pool():
     }
 
 
+def _mock_service(**overrides) -> MagicMock:
+    svc = MagicMock()
+    svc.effective_total_assets = AsyncMock(side_effect=lambda _pool_id, on_chain: on_chain)
+    for k, v in overrides.items():
+        setattr(svc, k, v)
+    return svc
+
+
 class TestListPoolsRoute:
     async def test_returns_200_with_pools(self, api_client):
         with patch("src.api.earn.get_vault_service") as mock_svc:
-            svc = MagicMock()
+            svc = _mock_service()
             svc.list_pools.return_value = [_mock_pool()]
             mock_svc.return_value = svc
 
@@ -35,7 +43,7 @@ class TestListPoolsRoute:
 
     async def test_returns_empty_list(self, api_client):
         with patch("src.api.earn.get_vault_service") as mock_svc:
-            svc = MagicMock()
+            svc = _mock_service()
             svc.list_pools.return_value = []
             mock_svc.return_value = svc
 
@@ -47,7 +55,7 @@ class TestListPoolsRoute:
         with patch("src.api.earn.get_vault_service") as mock_svc:
             pool = _mock_pool()
             pool["active"] = False
-            svc = MagicMock()
+            svc = _mock_service()
             svc.list_pools.return_value = [pool]
             mock_svc.return_value = svc
 
@@ -56,18 +64,28 @@ class TestListPoolsRoute:
 
     async def test_returns_500_on_error(self, api_client):
         with patch("src.api.earn.get_vault_service") as mock_svc:
-            svc = MagicMock()
+            svc = _mock_service()
             svc.list_pools.side_effect = RuntimeError("rpc down")
             mock_svc.return_value = svc
 
             r = await api_client.get("/v1/earn/pools")
             assert r.status_code == 500
 
+    async def test_total_assets_reflects_strategy_live_aum(self, api_client):
+        with patch("src.api.earn.get_vault_service") as mock_svc:
+            svc = MagicMock()
+            svc.list_pools.return_value = [_mock_pool()]
+            svc.effective_total_assets = AsyncMock(return_value=1100)
+            mock_svc.return_value = svc
+
+            r = await api_client.get("/v1/earn/pools")
+            assert r.json()["pools"][0]["total_assets"] == "1100"
+
 
 class TestGetPoolRoute:
     async def test_returns_200_for_existing_pool(self, api_client):
         with patch("src.api.earn.get_vault_service") as mock_svc:
-            svc = MagicMock()
+            svc = _mock_service()
             svc.get_pool.return_value = _mock_pool()
             mock_svc.return_value = svc
 
@@ -80,7 +98,7 @@ class TestGetPoolRoute:
 
     async def test_returns_404_for_missing_pool(self, api_client):
         with patch("src.api.earn.get_vault_service") as mock_svc:
-            svc = MagicMock()
+            svc = _mock_service()
             pool = _mock_pool()
             pool["pool_address"] = "0x0000000000000000000000000000000000000000"
             svc.get_pool.return_value = pool

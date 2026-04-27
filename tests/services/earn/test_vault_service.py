@@ -468,3 +468,50 @@ class TestEffectiveTotalAssets:
         service, _, _, _ = _make_service(registry=registry)
 
         assert await service.effective_total_assets(POOL_ID_HEX, 500) == 500
+
+
+class TestLiveAUMInResponses:
+    async def test_deposit_quote_uses_live_aum(self):
+        from src.services.earn.registry import StrategyRegistry
+
+        registry = StrategyRegistry()
+        strategy = MagicMock()
+        strategy.name = "aave-v3"
+        strategy.total_assets = AsyncMock(return_value=1100)
+        registry.register(POOL_ID_HEX, strategy)
+
+        service, contract, _, _ = _make_service(registry=registry)
+        contract.functions.getPool.return_value.call.return_value = (
+            bytes.fromhex(USDC_TOKEN_ID[2:]),
+            POOL_ADDRESS,
+            1000, 1000, True,
+        )
+        contract.functions.convertToShares.return_value.call.return_value = 909
+
+        quote = await service.get_deposit_quote(POOL_ID_HEX, "1000", USER_ADDRESS)
+        assert quote["exchange_rate"] == "1.1"
+
+    async def test_get_all_balances_uses_live_aum(self):
+        from src.services.earn.registry import StrategyRegistry
+
+        registry = StrategyRegistry()
+        strategy = MagicMock()
+        strategy.name = "aave-v3"
+        strategy.total_assets = AsyncMock(return_value=1200)
+        registry.register(POOL_ID_HEX, strategy)
+
+        service, contract, _, _ = _make_service(registry=registry)
+        pool_id_bytes = bytes.fromhex(POOL_ID_HEX[2:])
+        contract.functions.getPoolCount.return_value.call.return_value = 1
+        contract.functions.poolIds.return_value.call.return_value = pool_id_bytes
+        contract.functions.getPool.return_value.call.return_value = (
+            bytes.fromhex(USDC_TOKEN_ID[2:]),
+            POOL_ADDRESS,
+            1000, 1000, True,
+        )
+        contract.functions.getUserShares.return_value.call.return_value = 500
+        contract.functions.convertToAssets.return_value.call.return_value = 600
+
+        balances = await service.get_all_balances(USER_ADDRESS)
+        assert len(balances) == 1
+        assert balances[0]["exchange_rate"] == "1.2"

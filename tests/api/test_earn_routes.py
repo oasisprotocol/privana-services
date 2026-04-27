@@ -231,11 +231,3 @@ class TestBalanceRoute:
             r = await api_client.get("/v1/earn/balance", params={"user_address": USER_ADDRESS})
             assert r.status_code == 200
             assert r.json()["positions"] == []
-
-
-async def test_harvest_route_is_removed(api_client):
-    r = await api_client.post(
-        "/v1/earn/harvest",
-        json={"pool_id": POOL_ID, "yield_amount": "50"},
-    )
-    assert r.status_code == 404

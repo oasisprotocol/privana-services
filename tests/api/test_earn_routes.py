@@ -233,76 +233,9 @@ class TestBalanceRoute:
             assert r.json()["positions"] == []
 
 
-ADMIN_KEY = "test-admin-key"
-
-
-class TestHarvestRoute:
-    async def test_returns_200_on_success(self, api_client):
-        with patch("src.api.admin_auth.load_settings") as mock_settings, \
-             patch("src.api.earn.get_vault_service") as mock_svc:
-            mock_settings.return_value.admin_api_key = ADMIN_KEY
-            svc = MagicMock()
-            svc.harvest = AsyncMock(return_value={
-                "pool_id": POOL_ID,
-                "yield_amount": "50",
-                "exchange_rate": "1.1",
-                "tx_hash": "0x" + "ff" * 32,
-                "status": "completed",
-            })
-            mock_svc.return_value = svc
-
-            r = await api_client.post(
-                "/v1/earn/harvest",
-                json={"pool_id": POOL_ID, "yield_amount": "50"},
-                headers={"X-Admin-API-Key": ADMIN_KEY},
-            )
-            assert r.status_code == 200
-            assert r.json()["yield_amount"] == "50"
-            assert r.json()["exchange_rate"] == "1.1"
-
-    async def test_returns_401_without_key(self, api_client):
-        with patch("src.api.admin_auth.load_settings") as mock_settings:
-            mock_settings.return_value.admin_api_key = ADMIN_KEY
-
-            r = await api_client.post(
-                "/v1/earn/harvest",
-                json={"pool_id": POOL_ID, "yield_amount": "50"},
-            )
-            assert r.status_code == 401
-
-    async def test_returns_401_with_wrong_key(self, api_client):
-        with patch("src.api.admin_auth.load_settings") as mock_settings:
-            mock_settings.return_value.admin_api_key = ADMIN_KEY
-
-            r = await api_client.post(
-                "/v1/earn/harvest",
-                json={"pool_id": POOL_ID, "yield_amount": "50"},
-                headers={"X-Admin-API-Key": "wrong"},
-            )
-            assert r.status_code == 401
-
-    async def test_returns_503_when_admin_unconfigured(self, api_client):
-        with patch("src.api.admin_auth.load_settings") as mock_settings:
-            mock_settings.return_value.admin_api_key = ""
-
-            r = await api_client.post(
-                "/v1/earn/harvest",
-                json={"pool_id": POOL_ID, "yield_amount": "50"},
-                headers={"X-Admin-API-Key": "anything"},
-            )
-            assert r.status_code == 503
-
-    async def test_returns_400_on_value_error(self, api_client):
-        with patch("src.api.admin_auth.load_settings") as mock_settings, \
-             patch("src.api.earn.get_vault_service") as mock_svc:
-            mock_settings.return_value.admin_api_key = ADMIN_KEY
-            svc = MagicMock()
-            svc.harvest = AsyncMock(side_effect=ValueError("Pool not found"))
-            mock_svc.return_value = svc
-
-            r = await api_client.post(
-                "/v1/earn/harvest",
-                json={"pool_id": POOL_ID, "yield_amount": "50"},
-                headers={"X-Admin-API-Key": ADMIN_KEY},
-            )
-            assert r.status_code == 400
+async def test_harvest_route_is_removed(api_client):
+    r = await api_client.post(
+        "/v1/earn/harvest",
+        json={"pool_id": POOL_ID, "yield_amount": "50"},
+    )
+    assert r.status_code == 404

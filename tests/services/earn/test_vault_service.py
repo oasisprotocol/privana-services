@@ -311,59 +311,6 @@ class TestGetAllBalances:
         assert balances == []
 
 
-class TestHarvest:
-    async def test_successful_harvest(self, test_db):
-        service, contract, saph, _ = _make_service()
-        contract.functions.getPool.return_value.call.side_effect = [
-            (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1000, 1050, True),
-            (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1000, 1100, True),
-        ]
-
-        result = await service.harvest(POOL_ID_HEX, "50")
-
-        assert result["status"] == "completed"
-        assert result["tx_hash"] == "0x" + "ff" * 32
-        assert result["yield_amount"] == "50"
-        assert result["exchange_rate"] == "1.1"
-
-        row = test_db.execute("SELECT * FROM earn_transactions").fetchone()
-        assert row["operation"] == "harvest"
-        assert row["amount"] == "50"
-        assert row["status"] == "completed"
-
-    async def test_rejects_missing_pool(self, test_db):
-        service, contract, _, _ = _make_service()
-        contract.functions.getPool.return_value.call.return_value = (
-            b"\x00" * 32,
-            "0x0000000000000000000000000000000000000000",
-            0, 0, False,
-        )
-        with pytest.raises(ValueError, match="not found"):
-            await service.harvest(POOL_ID_HEX, "50")
-
-    async def test_rejects_zero_yield(self, test_db):
-        service, _, _, _ = _make_service()
-        with pytest.raises(ValueError, match="greater than zero"):
-            await service.harvest(POOL_ID_HEX, "0")
-
-    async def test_failed_harvest_marks_row(self, test_db):
-        service, contract, saph, _ = _make_service()
-        contract.functions.getPool.return_value.call.return_value = (
-            bytes.fromhex(USDC_TOKEN_ID[2:]),
-            POOL_ADDRESS,
-            1000, 1050, True,
-        )
-        saph.execute_contract_call.side_effect = RuntimeError("execution reverted: only owner")
-
-        result = await service.harvest(POOL_ID_HEX, "50")
-        assert result["status"] == "failed"
-        assert result["tx_hash"] is None
-
-        row = test_db.execute("SELECT * FROM earn_transactions").fetchone()
-        assert row["status"] == "failed"
-        assert row["error"] == "Transaction reverted on-chain"
-
-
 class TestStrategyRouting:
     async def test_deposit_routes_to_strategy(self, test_db):
         from src.services.earn.registry import StrategyRegistry
@@ -475,3 +422,49 @@ class TestStrategyRouting:
 
         assert result["status"] == "completed"
         strategy.withdraw_from_earn.assert_awaited_once()
+
+
+class TestEffectiveTotalAssets:
+    async def test_manual_strategy_returns_on_chain_value(self):
+        service, _, _, _ = _make_service()
+
+        assert await service.effective_total_assets(POOL_ID_HEX, 1050) == 1050
+
+    async def test_active_strategy_overrides_with_atoken_balance(self):
+        from src.services.earn.registry import StrategyRegistry
+
+        registry = StrategyRegistry()
+        strategy = MagicMock()
+        strategy.name = "aave-v3"
+        strategy.total_assets = AsyncMock(return_value=1100)
+        registry.register(POOL_ID_HEX, strategy)
+
+        service, _, _, _ = _make_service(registry=registry)
+
+        assert await service.effective_total_assets(POOL_ID_HEX, 1000) == 1100
+
+    async def test_strategy_failure_falls_back_to_on_chain(self):
+        from src.services.earn.registry import StrategyRegistry
+
+        registry = StrategyRegistry()
+        strategy = MagicMock()
+        strategy.name = "aave-v3"
+        strategy.total_assets = AsyncMock(side_effect=RuntimeError("rpc down"))
+        registry.register(POOL_ID_HEX, strategy)
+
+        service, _, _, _ = _make_service(registry=registry)
+
+        assert await service.effective_total_assets(POOL_ID_HEX, 1234) == 1234
+
+    async def test_strategy_zero_balance_falls_back_to_on_chain(self):
+        from src.services.earn.registry import StrategyRegistry
+
+        registry = StrategyRegistry()
+        strategy = MagicMock()
+        strategy.name = "aave-v3"
+        strategy.total_assets = AsyncMock(return_value=0)
+        registry.register(POOL_ID_HEX, strategy)
+
+        service, _, _, _ = _make_service(registry=registry)
+
+        assert await service.effective_total_assets(POOL_ID_HEX, 500) == 500

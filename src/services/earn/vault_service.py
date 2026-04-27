@@ -22,7 +22,6 @@ EARN_MANAGER_ABI = load_abi("EarnManager")
 
 EARN_OP_DEPOSIT = "deposit"
 EARN_OP_WITHDRAW = "withdraw"
-EARN_OP_HARVEST = "harvest"
 EARN_STATUS_PENDING = "pending"
 EARN_STATUS_COMPLETED = "completed"
 EARN_STATUS_FAILED = "failed"
@@ -371,87 +370,29 @@ class VaultService:
                 "status": "completed",
             }
 
-    async def harvest(self, pool_id_hex: str, yield_amount: str) -> dict:
-        """Admin-triggered harvest — records realized yield on-chain.
+    async def effective_total_assets(self, pool_id_hex: str, on_chain_total: int) -> int:
+        """Live AUM for a pool, derived from the strategy when available.
 
-        Calls EarnManager.harvest(poolId, yieldAmount) which increases the
-        pool's totalAssets by yield_amount. Since totalShares is unchanged,
-        the exchange rate rises and every holder's underlying balance goes
-        up proportionally. No user signature required — onlyOwner on-chain
-        and gated by admin API key at the edge.
+        For Aave-style strategies, on-chain totalAssets only records principal
+        at deposit/withdraw time; live yield lives in the aToken balance, so
+        we ask the strategy directly. ManualStrategy reports 0, in which case
+        the on-chain total is authoritative (no external capital).
 
-        Role: pure accounting update. Does NOT pull funds from any external
-        protocol (e.g. Aave) — admin must pre-fund the pool's accounting
-        balance before calling. yield_amount is determined off-service by
-        the admin.
-
-        TODO: this function goes away once Aave integration lands — at that
-        point totalAssets will be derived from the pool's aToken balance
-        rather than mutated by explicit calls.
+        Best-effort: any strategy failure falls back to the on-chain value so
+        reads stay available even when the protocol RPC is down.
         """
-        validate_amount(yield_amount, "yield_amount")
-
-        pool_id = bytes.fromhex(pool_id_hex.removeprefix("0x"))
-        pool = self.get_pool(pool_id)
-        if pool["pool_address"] == "0x0000000000000000000000000000000000000000":
-            raise ValueError("Pool not found")
-
-        tx_id = str(uuid.uuid4())
-        now = int(time.time())
-        db = get_db()
-        db_write(
-            db,
-            """INSERT INTO earn_transactions
-               (id, operation, pool_id, user_address, token_id, amount,
-                signer_address, nonce, signature, status, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                tx_id, EARN_OP_HARVEST, pool_id_hex, "", pool["token_id"], yield_amount,
-                "", 0, "",
-                EARN_STATUS_PENDING, now, now,
-            ),
-        )
-        logger.info("earn harvest %s: pool=%s amount=%s", tx_id, pool_id_hex, yield_amount)
-
+        strategy = self._registry.get(pool_id_hex)
+        if strategy.name == "manual":
+            return on_chain_total
         try:
-            tx_hash = await asyncio.to_thread(
-                self.sapphire.execute_contract_call,
-                contract_address=self.contract_address,
-                abi=EARN_MANAGER_ABI,
-                function_name="harvest",
-                args=[pool_id, int(yield_amount)],
-            )
-        except Exception as exc:
-            logger.exception("Earn harvest %s failed", tx_id)
-            self._update_transaction(tx_id, status=EARN_STATUS_FAILED, error=sanitize_error(str(exc)))
-            return {
-                "pool_id": pool_id_hex,
-                "yield_amount": yield_amount,
-                "exchange_rate": None,
-                "tx_hash": None,
-                "status": "failed",
-            }
-
-        self._update_transaction(tx_id, status=EARN_STATUS_COMPLETED, tx_hash=tx_hash)
-
-        try:
-            pool_after = self.get_pool(pool_id)
-            return {
-                "pool_id": pool_id_hex,
-                "yield_amount": yield_amount,
-                "exchange_rate": _exchange_rate(pool_after["total_assets"], pool_after["total_shares"]),
-                "tx_hash": tx_hash,
-                "status": "completed",
-            }
+            external = await strategy.total_assets()
         except Exception:
-            logger.warning("Post-tx read failed for harvest %s, returning degraded response", tx_id)
-            return {
-                "pool_id": pool_id_hex,
-                "yield_amount": yield_amount,
-                "exchange_rate": None,
-                "tx_hash": tx_hash,
-                "status": "completed",
-            }
+            logger.exception(
+                "strategy.total_assets failed pool=%s strategy=%s; falling back to on-chain",
+                pool_id_hex, strategy.name,
+            )
+            return on_chain_total
+        return external if external > 0 else on_chain_total
 
     def _record_transaction(
         self,

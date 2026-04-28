@@ -64,7 +64,6 @@ async def get_pool(pool_id: str) -> PoolDetailResponse:
             pool_address=p["pool_address"],
             apy_bps=0,
             status="active" if p["active"] else "paused",
-            last_harvest_at=None,
             created_at=0,
         )
     except ValueError as exc:

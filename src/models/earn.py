@@ -15,7 +15,6 @@ class PoolStatus(str, Enum):
 class TransactionType(str, Enum):
     DEPOSIT = "deposit"
     WITHDRAW = "withdraw"
-    HARVEST = "harvest"
 
 
 class PoolRecord(BaseModel):
@@ -27,7 +26,6 @@ class PoolRecord(BaseModel):
     pool_address: str
     apy_bps: int
     status: str
-    last_harvest_at: Optional[int] = None
     created_at: int
     updated_at: int
 
@@ -75,7 +73,6 @@ class PoolDetailResponse(BaseModel):
     pool_address: str
     apy_bps: int
     status: str
-    last_harvest_at: Optional[int] = None
     created_at: int
 
 
@@ -122,19 +119,6 @@ class WithdrawResponse(BaseModel):
     pool_id: str
     amount: str
     shares_burned: Optional[str] = None
-    exchange_rate: Optional[str] = None
-    tx_hash: Optional[str] = None
-    status: str
-
-
-class HarvestRequest(BaseModel):
-    pool_id: str = Field(..., description="Earn pool ID (hex)")
-    yield_amount: str = Field(..., description="Yield to realize in base units")
-
-
-class HarvestResponse(BaseModel):
-    pool_id: str
-    yield_amount: str
     exchange_rate: Optional[str] = None
     tx_hash: Optional[str] = None
     status: str

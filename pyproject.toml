@@ -15,6 +15,7 @@ dependencies = [
     "web3>=6.0.0",
     "eth-account>=0.11.0",
     "sapphire.py>=0.2.3",
+    "flexvaults-sdk",
 ]
 
 [project.optional-dependencies]
@@ -55,3 +56,6 @@ testpaths = ["tests"]
 markers = [
     "integration: end-to-end tests against live testnet (require .env credentials)",
 ]
+
+[tool.uv.sources]
+flexvaults-sdk = { path = "../flexvaults-sdk/packages/sdk-py" }

@@ -685,29 +685,18 @@ wheels = [
 
 [[package]]
 name = "flexvaults-sdk"
-version = "0.1.6"
-source = { directory = "../flexvaults-sdk/packages/sdk-py" }
+version = "0.1.13"
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "eth-account" },
     { name = "eth-typing" },
     { name = "httpx" },
     { name = "pydantic" },
 ]
-
-[package.metadata]
-requires-dist = [
-    { name = "eth-account", specifier = ">=0.13.0" },
-    { name = "eth-typing", specifier = ">=5.0.0" },
-    { name = "httpx", specifier = ">=0.27.0" },
-    { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.11.0" },
-    { name = "pydantic", specifier = ">=2.0.0" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },
-    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.24.0" },
-    { name = "pytest-httpx", marker = "extra == 'dev'", specifier = ">=0.34.0" },
-    { name = "respx", marker = "extra == 'dev'", specifier = ">=0.22.0" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.7.0" },
+sdist = { url = "https://files.pythonhosted.org/packages/12/df/a7ec88cf5ba719c301fab1d6820b1b30bd88021ced17d3cb5962544f9de1/flexvaults_sdk-0.1.13.tar.gz", hash = "sha256:fc3ad5f39c9eff0f2288fc26e254d93da745520ee0a6eb20581403837f4ed271", size = 100859, upload-time = "2026-04-22T14:43:49.788Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e2/18/48bc8d372e7a625169ae7a16c7a7861d20a41b12de015633643064d03055/flexvaults_sdk-0.1.13-py3-none-any.whl", hash = "sha256:ec8e6ad300eafe53eb0a93dec05140221b41f0b9ef3821028ace747ac32bf409", size = 20797, upload-time = "2026-04-22T14:43:48.178Z" },
 ]
-provides-extras = ["dev"]
 
 [[package]]
 name = "flexvaults-swap"
@@ -743,7 +732,7 @@ dev = [
 requires-dist = [
     { name = "eth-account", specifier = ">=0.11.0" },
     { name = "fastapi", specifier = ">=0.104.0" },
-    { name = "flexvaults-sdk", directory = "../flexvaults-sdk/packages/sdk-py" },
+    { name = "flexvaults-sdk", specifier = ">=0.1.13" },
     { name = "httpx", specifier = ">=0.25.0" },
     { name = "pydantic", specifier = ">=2.0.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0.0" },

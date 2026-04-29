@@ -99,6 +99,15 @@ class AaveClient:
         contract = self.w3.eth.contract(address=asset, abi=ERC20_ABI)
         return self._send_write_tx(asset, contract, "approve", [self.pool_address, amount])
 
+    def transfer_erc20(self, asset_address: str, to_address: str, amount: int) -> str:
+        """Plain ERC20.transfer from the LP EOA. Used to push redeemed
+        Aave funds back to the flexvaults deposit address on Base.
+        """
+        asset = Web3.to_checksum_address(asset_address)
+        recipient = Web3.to_checksum_address(to_address)
+        contract = self.w3.eth.contract(address=asset, abi=ERC20_ABI)
+        return self._send_write_tx(asset, contract, "transfer", [recipient, amount])
+
     def get_allowance(self, asset_address: str, owner: Optional[str] = None) -> int:
         """Current ERC20 allowance the pool has to pull `asset_address` from `owner`
         (defaults to the LP EOA).

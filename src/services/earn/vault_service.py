@@ -50,38 +50,27 @@ class VaultService:
 
     async def _route_to_strategy(self, pool_id_hex: str, amount: int) -> None:
         """After a successful EarnManager.deposit, push the same amount into
-        the pool's configured yield strategy. Best-effort: failures are
-        logged but do not propagate, because the user's shares are already
-        minted and rolling the accounting-side tx back is impossible from
-        here. Orphan-fund recovery belongs to the Sprint 4.5 reconciler.
+        the pool's configured yield strategy. Blocks until the strategy
+        confirms the funds reached the external protocol; raises on failure
+        so the deposit endpoint surfaces the error rather than reporting a
+        successful deposit for funds still sitting in pool balance.
         """
         strategy = self._registry.get(pool_id_hex)
         if strategy.name == "manual":
             return
-        try:
-            await strategy.deposit_to_earn(amount)
-        except Exception:
-            logger.exception(
-                "strategy.deposit_to_earn failed pool=%s amount=%d strategy=%s",
-                pool_id_hex, amount, strategy.name,
-            )
+        await strategy.deposit_to_earn(amount)
 
     async def _reclaim_from_strategy(self, pool_id_hex: str, amount: int) -> None:
         """Before a user withdraw, pull `amount` back from the strategy so
-        the pool has liquidity to pay out. Best-effort: if the call fails
-        we still attempt the accounting-side withdrawal, assuming the pool
-        has sufficient idle balance. The reconciler flags any drift.
+        the pool has liquidity to pay out. Blocks until the credit is
+        observed in pool's accounting balance; raises on failure so the
+        EarnManager.withdraw step is never executed when pool can't cover
+        the payout.
         """
         strategy = self._registry.get(pool_id_hex)
         if strategy.name == "manual":
             return
-        try:
-            await strategy.withdraw_from_earn(amount)
-        except Exception:
-            logger.exception(
-                "strategy.withdraw_from_earn failed pool=%s amount=%d strategy=%s",
-                pool_id_hex, amount, strategy.name,
-            )
+        await strategy.withdraw_from_earn(amount)
 
     def get_pool(self, pool_id: bytes) -> dict:
         pool = self.contract.functions.getPool(pool_id).call()

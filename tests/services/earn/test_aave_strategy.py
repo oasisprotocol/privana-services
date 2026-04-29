@@ -12,6 +12,7 @@ TOKEN_ID = "0xc719650e9f4b0f27d956638c54518932ef9d15e720a1a2b2850250bcd0816514"
 POOL_ADDRESS = "0xd8991364507FAfC256EafF950d28618735753476"
 LP_PRIVATE_KEY = "0x7b07a59f24f1900ec4e6ac3e521c1acd2cca3518f717abda1dc8bbcbbc344c4e"
 ACCOUNTING_CONTRACT = "0xFfB141bF8269E458b074A274bE6E8F971f08A401"
+DEPOSIT_ADDRESS_BASE = "0x1d5D19e0e68001624323f63c60479BD3AeE7E029"
 
 
 @dataclass
@@ -49,6 +50,39 @@ class _WithdrawalInfo:
     transaction_hash: str | None = None
 
 
+@dataclass
+class _Balance:
+    user_address: str
+    token_id: str
+    balance: int
+    token_symbol: str = "USDC"
+    chain_id: int = 84532
+
+
+@dataclass
+class _TransactionData:
+    to: str = "0x0"
+    value: int = 0
+    data: str = "0x"
+    chain_id: int = 84532
+
+
+@dataclass
+class _DepositQuote:
+    user_address: str
+    token_id: str
+    amount: int
+    deposit_address: str
+    transaction: _TransactionData
+    instructions: str = ""
+
+
+@dataclass
+class _IncludeDepositResponse:
+    submission_id: str
+    status: str = "pending"
+
+
 def _strategy_settings() -> Settings:
     return Settings(
         liquidity_provider_private_key=LP_PRIVATE_KEY,
@@ -78,6 +112,21 @@ def flexvaults():
     client.get_withdrawal_info = AsyncMock(
         return_value=_WithdrawalInfo(index=1, status="completed", transaction_hash="0xabc"),
     )
+    client.get_deposit_quote = AsyncMock(
+        return_value=_DepositQuote(
+            user_address=POOL_ADDRESS,
+            token_id=TOKEN_ID,
+            amount=1_000_000,
+            deposit_address=DEPOSIT_ADDRESS_BASE,
+            transaction=_TransactionData(),
+        ),
+    )
+    client.include_deposit = AsyncMock(
+        return_value=_IncludeDepositResponse(submission_id="dep-1"),
+    )
+    client.get_balance = AsyncMock(
+        return_value=_Balance(user_address=POOL_ADDRESS, token_id=TOKEN_ID, balance=0),
+    )
     return client
 
 
@@ -92,7 +141,6 @@ def strategy(aave_client, flexvaults):
             token_id=TOKEN_ID,
             flexvaults_client=flexvaults,
             poll_interval_sec=0,
-            withdrawal_timeout_sec=5,
         )
 
 
@@ -211,31 +259,7 @@ async def test_deposit_to_earn_propagates_request_failure(strategy, aave_client,
 
 
 @pytest.mark.asyncio
-async def test_bridge_to_base_times_out_when_relay_stalls(
-    strategy, aave_client, flexvaults, monkeypatch
-) -> None:
-    flexvaults.get_pending_withdrawals.return_value = _PendingWithdrawals(
-        user_address=POOL_ADDRESS,
-        withdrawals=[_PendingWithdrawal(index=99, amount=1_000_000)],
-    )
-
-    timestamps = iter([0.0, 0.0])
-    monkeypatch.setattr(
-        "src.services.earn.strategies.aave.time.monotonic",
-        lambda: next(timestamps, 1_000_000.0),
-    )
-    monkeypatch.setattr("src.services.earn.strategies.aave.asyncio.sleep", AsyncMock())
-
-    with pytest.raises(TimeoutError, match="did not complete"):
-        await strategy.deposit_to_earn(1_000_000)
-
-    aave_client.supply.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_bridge_to_base_raises_when_resolution_not_completed(
-    strategy, aave_client, flexvaults
-) -> None:
+async def test_bridge_raises_on_terminal_failed_status(strategy, aave_client, flexvaults) -> None:
     flexvaults.get_pending_withdrawals.side_effect = [
         _PendingWithdrawals(user_address=POOL_ADDRESS, withdrawals=[]),
         _PendingWithdrawals(
@@ -255,12 +279,98 @@ async def test_bridge_to_base_raises_when_resolution_not_completed(
 
 
 @pytest.mark.asyncio
-async def test_withdraw_from_earn_redeems_from_aave(strategy, aave_client) -> None:
-    aave_client.withdraw.return_value = "0xdef"
+async def test_bridge_raises_when_pending_terminal_status(strategy, aave_client, flexvaults) -> None:
+    flexvaults.get_pending_withdrawals.side_effect = [
+        _PendingWithdrawals(user_address=POOL_ADDRESS, withdrawals=[]),
+        _PendingWithdrawals(
+            user_address=POOL_ADDRESS,
+            withdrawals=[_PendingWithdrawal(index=2, amount=1_000_000, status="rejected")],
+        ),
+    ]
 
-    await strategy.withdraw_from_earn(500_000)
+    with pytest.raises(RuntimeError, match="terminal status=rejected"):
+        await strategy.deposit_to_earn(1_000_000)
 
-    aave_client.withdraw.assert_called_once_with(ASSET_ADDRESS, 500_000)
+
+@pytest.mark.asyncio
+async def test_bridge_keeps_polling_while_state_unresolved(
+    strategy, aave_client, flexvaults
+) -> None:
+    flexvaults.get_pending_withdrawals.side_effect = [
+        _PendingWithdrawals(user_address=POOL_ADDRESS, withdrawals=[]),
+        _PendingWithdrawals(
+            user_address=POOL_ADDRESS,
+            withdrawals=[_PendingWithdrawal(index=5, amount=1_000_000)],
+        ),
+        _PendingWithdrawals(
+            user_address=POOL_ADDRESS,
+            withdrawals=[_PendingWithdrawal(index=5, amount=1_000_000)],
+        ),
+        _PendingWithdrawals(user_address=POOL_ADDRESS, withdrawals=[]),
+    ]
+    aave_client.get_allowance.return_value = 10_000_000
+
+    await strategy.deposit_to_earn(1_000_000)
+
+    assert flexvaults.get_pending_withdrawals.await_count == 4
+    aave_client.supply.assert_called_once_with(ASSET_ADDRESS, 1_000_000)
+
+
+@pytest.mark.asyncio
+async def test_withdraw_from_earn_redeems_transfers_and_polls_until_credited(
+    strategy, aave_client, flexvaults
+) -> None:
+    aave_client.withdraw.return_value = "0xredeem"
+    aave_client.transfer_erc20.return_value = "0xtransfer"
+    flexvaults.get_balance.side_effect = [
+        _Balance(user_address=POOL_ADDRESS, token_id=TOKEN_ID, balance=0),
+        _Balance(user_address=POOL_ADDRESS, token_id=TOKEN_ID, balance=0),
+        _Balance(user_address=POOL_ADDRESS, token_id=TOKEN_ID, balance=750_000),
+        _Balance(user_address=POOL_ADDRESS, token_id=TOKEN_ID, balance=1_000_000),
+    ]
+
+    await strategy.withdraw_from_earn(1_000_000)
+
+    aave_client.withdraw.assert_called_once_with(ASSET_ADDRESS, 1_000_000, to=POOL_ADDRESS)
+
+    flexvaults.get_deposit_quote.assert_awaited_once()
+    quote_request = flexvaults.get_deposit_quote.await_args.args[0]
+    assert quote_request.user_address == POOL_ADDRESS
+    assert quote_request.token_id == TOKEN_ID
+    assert quote_request.amount == 1_000_000
+
+    aave_client.transfer_erc20.assert_called_once_with(
+        ASSET_ADDRESS, DEPOSIT_ADDRESS_BASE, 1_000_000,
+    )
+
+    flexvaults.include_deposit.assert_awaited_once()
+    include_request = flexvaults.include_deposit.await_args.args[0]
+    assert include_request.user_address == POOL_ADDRESS
+    assert include_request.token_id == TOKEN_ID
+    assert include_request.evm_transaction_data == "0xtransfer"
+
+    assert flexvaults.get_balance.await_count >= 3
+
+
+@pytest.mark.asyncio
+async def test_withdraw_from_earn_uses_pre_balance_baseline(
+    strategy, aave_client, flexvaults
+) -> None:
+    """Pre-existing balance shouldn't satisfy the credit check; we must wait
+    for an additional `amount` to land.
+    """
+    aave_client.withdraw.return_value = "0xredeem"
+    aave_client.transfer_erc20.return_value = "0xtransfer"
+    flexvaults.get_balance.side_effect = [
+        _Balance(user_address=POOL_ADDRESS, token_id=TOKEN_ID, balance=400_000),
+        _Balance(user_address=POOL_ADDRESS, token_id=TOKEN_ID, balance=400_000),
+        _Balance(user_address=POOL_ADDRESS, token_id=TOKEN_ID, balance=900_000),
+        _Balance(user_address=POOL_ADDRESS, token_id=TOKEN_ID, balance=1_400_000),
+    ]
+
+    await strategy.withdraw_from_earn(1_000_000)
+
+    assert flexvaults.get_balance.await_count == 4
 
 
 @pytest.mark.asyncio
@@ -271,6 +381,20 @@ async def test_withdraw_from_earn_rejects_non_positive_amount(strategy, aave_cli
         await strategy.withdraw_from_earn(-1)
 
     aave_client.withdraw.assert_not_called()
+    aave_client.transfer_erc20.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_withdraw_from_earn_propagates_aave_failure(
+    strategy, aave_client, flexvaults
+) -> None:
+    aave_client.withdraw.side_effect = RuntimeError("aave reverted")
+
+    with pytest.raises(RuntimeError, match="aave reverted"):
+        await strategy.withdraw_from_earn(1_000_000)
+
+    aave_client.transfer_erc20.assert_not_called()
+    flexvaults.include_deposit.assert_not_called()
 
 
 @pytest.mark.asyncio

@@ -2,6 +2,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from src.models.settings import Settings
 from src.services.earn.registry import (
     StrategyRegistry,
     get_strategy_registry,
@@ -13,6 +14,17 @@ from src.services.earn.strategies.manual import ManualStrategy
 
 POOL_ID = "abc123"
 POOL_ID_PREFIXED = "0xABC123"
+
+
+def _settings() -> Settings:
+    return Settings(
+        liquidity_provider_private_key=(
+            "0x7b07a59f24f1900ec4e6ac3e521c1acd2cca3518f717abda1dc8bbcbbc344c4e"
+        ),
+        liquidity_provider_address="0xd8991364507FAfC256EafF950d28618735753476",
+        accounting_contract_address="0xFfB141bF8269E458b074A274bE6E8F971f08A401",
+        accounting_chain_id=23295,
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -112,20 +124,53 @@ class TestRegisterAaveFromConfig:
 
     def test_registers_each_pool(self, registry: StrategyRegistry) -> None:
         config = (
-            '{"0xab12": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", '
-            '"0xcd34": "0x4200000000000000000000000000000000000006"}'
+            '{"0xab12": {"token_id": "0xaaaa", "asset_address": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"}, '
+            '"0xcd34": {"token_id": "0xbbbb", "asset_address": "0x4200000000000000000000000000000000000006"}}'
         )
-        with patch("src.clients.aave.get_aave_client", return_value=MagicMock()):
+        with patch("src.clients.aave.get_aave_client", return_value=MagicMock()), \
+             patch("src.services.earn.strategies.aave.load_settings", return_value=_settings()):
             count = register_aave_strategies_from_config(registry, config)
 
         assert count == 2
         assert sorted(registry.pool_ids()) == ["ab12", "cd34"]
-        assert registry.get("0xab12").name == "aave-v3"
-        assert registry.get("0xab12").asset_address == "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+        registered = registry.get("0xab12")
+        assert registered.name == "aave-v3"
+        assert registered.asset_address == "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+        assert registered.token_id == "0xaaaa"
+
+    def test_skips_legacy_flat_entries(self, registry: StrategyRegistry, caplog) -> None:
+        config = (
+            '{"0xab12": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", '
+            '"0xcd34": {"token_id": "0xbbbb", "asset_address": "0x4200000000000000000000000000000000000006"}}'
+        )
+        with patch("src.clients.aave.get_aave_client", return_value=MagicMock()), \
+             patch("src.services.earn.strategies.aave.load_settings", return_value=_settings()):
+            count = register_aave_strategies_from_config(registry, config)
+
+        assert count == 1
+        assert registry.pool_ids() == ["cd34"]
+        assert any("legacy flat shape" in r.message for r in caplog.records)
+
+    def test_skips_entries_with_missing_token_id(self, registry: StrategyRegistry, caplog) -> None:
+        config = (
+            '{"0xab12": {"asset_address": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"}, '
+            '"0xcd34": {"token_id": "0xbbbb", "asset_address": "0x4200000000000000000000000000000000000006"}}'
+        )
+        with patch("src.clients.aave.get_aave_client", return_value=MagicMock()), \
+             patch("src.services.earn.strategies.aave.load_settings", return_value=_settings()):
+            count = register_aave_strategies_from_config(registry, config)
+
+        assert count == 1
+        assert registry.pool_ids() == ["cd34"]
+        assert any("invalid token_id" in r.message for r in caplog.records)
 
     def test_skips_entries_with_invalid_asset_address(self, registry: StrategyRegistry, caplog) -> None:
-        config = '{"0xab12": "", "0xcd34": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"}'
-        with patch("src.clients.aave.get_aave_client", return_value=MagicMock()):
+        config = (
+            '{"0xab12": {"token_id": "0xaaaa", "asset_address": ""}, '
+            '"0xcd34": {"token_id": "0xbbbb", "asset_address": "0x4200000000000000000000000000000000000006"}}'
+        )
+        with patch("src.clients.aave.get_aave_client", return_value=MagicMock()), \
+             patch("src.services.earn.strategies.aave.load_settings", return_value=_settings()):
             count = register_aave_strategies_from_config(registry, config)
 
         assert count == 1

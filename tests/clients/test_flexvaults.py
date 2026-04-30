@@ -1,9 +1,36 @@
-from unittest.mock import patch
+from dataclasses import dataclass
+from unittest.mock import AsyncMock, patch
 
+import pytest
 from flexvaults import FlexvaultsClient
 
-from src.clients.flexvaults import get_flexvaults_client, reset_flexvaults_client
+from src.clients.flexvaults import (
+    get_authenticated_flexvaults_client,
+    get_flexvaults_client,
+    reset_flexvaults_client,
+)
 from src.models.settings import Settings
+
+
+LP_PRIVATE_KEY = "0x7b07a59f24f1900ec4e6ac3e521c1acd2cca3518f717abda1dc8bbcbbc344c4e"
+LP_ADDRESS = "0xd8991364507FAfC256EafF950d28618735753476"
+
+
+@dataclass
+class _SiweNonce:
+    address: str
+    nonce: str
+    expires_in: int = 300
+
+
+@dataclass
+class _SiweLogin:
+    siwe_token: str
+    jwt_access_token: str
+    jwt_refresh_token: str = ""
+    address: str = LP_ADDRESS
+    jwt_expires_in: int = 3600
+    jwt_refresh_expires_in: int = 86400
 
 
 def test_get_flexvaults_client_returns_singleton():
@@ -44,4 +71,80 @@ def test_reset_flexvaults_client_clears_singleton():
         second = get_flexvaults_client()
 
     assert first is not second
+    reset_flexvaults_client()
+
+
+@pytest.mark.asyncio
+async def test_authenticate_signs_siwe_and_sets_bearer_token():
+    reset_flexvaults_client()
+    settings = Settings(
+        accounting_api_base_url="https://accounting.example",
+        liquidity_provider_private_key=LP_PRIVATE_KEY,
+        liquidity_provider_address=LP_ADDRESS,
+        accounting_chain_id=23295,
+    )
+
+    with patch("src.clients.flexvaults.load_settings", return_value=settings):
+        client = get_flexvaults_client()
+        client.get_siwe_nonce = AsyncMock(
+            return_value=_SiweNonce(address=LP_ADDRESS, nonce="abc123"),
+        )
+        client.login_with_siwe = AsyncMock(
+            return_value=_SiweLogin(siwe_token="siwe", jwt_access_token="jwt-token"),
+        )
+
+        authed = await get_authenticated_flexvaults_client()
+
+    assert authed is client
+    client.get_siwe_nonce.assert_awaited_once_with(LP_ADDRESS)
+    client.login_with_siwe.assert_awaited_once()
+    siwe_msg, signature = client.login_with_siwe.await_args.args
+    assert "wants you to sign in" in siwe_msg
+    assert LP_ADDRESS in siwe_msg
+    assert "Nonce: abc123" in siwe_msg
+    assert signature.startswith("0x")
+    assert client._http.get_header("Authorization") == "Bearer jwt-token"
+    reset_flexvaults_client()
+
+
+@pytest.mark.asyncio
+async def test_authenticate_caches_token_across_calls():
+    reset_flexvaults_client()
+    settings = Settings(
+        accounting_api_base_url="https://accounting.example",
+        liquidity_provider_private_key=LP_PRIVATE_KEY,
+        liquidity_provider_address=LP_ADDRESS,
+        accounting_chain_id=23295,
+    )
+
+    with patch("src.clients.flexvaults.load_settings", return_value=settings):
+        client = get_flexvaults_client()
+        client.get_siwe_nonce = AsyncMock(
+            return_value=_SiweNonce(address=LP_ADDRESS, nonce="abc123"),
+        )
+        client.login_with_siwe = AsyncMock(
+            return_value=_SiweLogin(siwe_token="siwe", jwt_access_token="jwt-token"),
+        )
+
+        first = await get_authenticated_flexvaults_client()
+        second = await get_authenticated_flexvaults_client()
+
+    assert first is second
+    assert client.login_with_siwe.await_count == 1
+    reset_flexvaults_client()
+
+
+@pytest.mark.asyncio
+async def test_authenticate_requires_lp_private_key():
+    reset_flexvaults_client()
+    settings = Settings(
+        accounting_api_base_url="https://accounting.example",
+        liquidity_provider_private_key="",
+        liquidity_provider_address=LP_ADDRESS,
+    )
+
+    with patch("src.clients.flexvaults.load_settings", return_value=settings):
+        with pytest.raises(RuntimeError, match="LIQUIDITY_PROVIDER_PRIVATE_KEY"):
+            await get_authenticated_flexvaults_client()
+
     reset_flexvaults_client()

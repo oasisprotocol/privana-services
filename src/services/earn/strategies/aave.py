@@ -17,7 +17,10 @@ from flexvaults import (
 from flexvaults.types.common import Network
 
 from src.clients.aave import AaveClient
-from src.clients.flexvaults import get_flexvaults_client
+from src.clients.flexvaults import (
+    get_authenticated_flexvaults_client,
+    get_flexvaults_client,
+)
 from src.core.config import load_settings
 from src.services.earn.strategies.base import BaseStrategy
 
@@ -30,8 +33,6 @@ _NETWORK_BY_CHAIN_ID: dict[int, Network] = {
 }
 
 DEFAULT_POLL_INTERVAL_SEC = 3.0
-
-_TERMINAL_FAILED_STATUSES = frozenset({"failed", "rejected", "cancelled", "canceled"})
 
 
 def _network_for_chain(chain_id: int) -> Network:
@@ -104,6 +105,14 @@ class AaveStrategy(BaseStrategy):
             self._flexvaults = get_flexvaults_client()
         return self._flexvaults
 
+    async def _get_authed_flexvaults(self) -> FlexvaultsClient:
+        """Auth-required SDK calls share the singleton; tests inject a
+        pre-mocked client so SIWE is bypassed.
+        """
+        if self._flexvaults is not None:
+            return self._flexvaults
+        return await get_authenticated_flexvaults_client()
+
     async def get_apy_bps(self) -> int:
         return self._client.get_supply_apy_bps(self._asset_address)
 
@@ -161,7 +170,7 @@ class AaveStrategy(BaseStrategy):
             raise ValueError(f"withdraw_from_earn requires a positive amount, got {amount}")
 
         client = self._get_flexvaults()
-        pre_balance = await self._read_pool_balance(client)
+        pre_balance = await self._read_pool_balance()
 
         redeem_tx = self._client.withdraw(self._asset_address, amount, to=self._pool_address)
         logger.info(
@@ -196,29 +205,29 @@ class AaveStrategy(BaseStrategy):
         )
 
         target_balance = pre_balance + amount
-        await self._poll_until_balance_at_least(client, target_balance)
+        await self._poll_until_balance_at_least(target_balance)
         logger.info(
             "AaveStrategy.withdraw_from_earn: pool balance credited pool=%s token=%s amount=%d",
             self._pool_address, self._token_id, amount,
         )
 
     async def _bridge_to_base(self, amount: int) -> None:
-        """Submit an accounting Withdraw and block until its state resolves.
+        """Submit an accounting Withdraw and block until accounting reports
+        the request resolved.
 
-        Polling is unbounded by wall-clock time: the loop only exits when
-        the withdrawal is gone from the pending list and `get_withdrawal_info`
-        reports a terminal status. `completed` returns; `failed`, `rejected`,
-        `cancelled` raise. Any other status is treated as still-pending and
-        polled again.
+        State-based, no wall-clock timeout: the loop only exits when our
+        withdrawal's `resolved` flag flips True (the relay completed the
+        on-chain transfer). The PyPI SDK does not surface a failed/rejected
+        status enum on this endpoint, so a hard relay failure surfaces only
+        if `request_withdrawal` itself rejects synchronously.
         """
         client = self._get_flexvaults()
         lp_account = Account.from_key(self._lp_private_key)
 
         pre = await client.get_pending_withdrawals(self._pool_address)
-        pre_indices: set[int] = {w.index for w in pre.withdrawals}
+        pre_indices: set[int] = {w.index for w in pre.pending_withdrawals}
 
-        nonce_resp = await client.get_transfer_nonce(self._pool_address)
-        nonce = nonce_resp.nonce
+        nonce = (await client.get_withdrawal_nonce(self._pool_address)).nonce
 
         signature = sign_withdraw_message(
             SignWithdrawParams(
@@ -250,7 +259,7 @@ class AaveStrategy(BaseStrategy):
         own_index: Optional[int] = None
         while True:
             pending = await client.get_pending_withdrawals(self._pool_address)
-            current_indices = {w.index for w in pending.withdrawals}
+            current_indices = {w.index for w in pending.pending_withdrawals}
 
             if own_index is None:
                 new_indices = current_indices - pre_indices
@@ -258,48 +267,32 @@ class AaveStrategy(BaseStrategy):
                     own_index = min(new_indices)
 
             if own_index is not None:
-                pending_status = next(
-                    (w.status for w in pending.withdrawals if w.index == own_index),
-                    None,
-                )
-                if pending_status and pending_status.lower() in _TERMINAL_FAILED_STATUSES:
-                    raise RuntimeError(
-                        f"AaveStrategy._bridge_to_base: withdrawal {own_index} reported "
-                        f"terminal status={pending_status}"
+                info = await client.get_withdrawal_info(own_index)
+                if info.resolved:
+                    logger.info(
+                        "AaveStrategy._bridge_to_base: withdrawal resolved index=%d tx=%s",
+                        own_index, info.tx_identifier,
                     )
-
-                if own_index not in current_indices:
-                    info = await client.get_withdrawal_info(own_index)
-                    status = (info.status or "").lower()
-                    if status == "completed":
-                        logger.info(
-                            "AaveStrategy._bridge_to_base: withdrawal completed index=%d tx=%s",
-                            own_index, info.transaction_hash,
-                        )
-                        return
-                    if status in _TERMINAL_FAILED_STATUSES:
-                        raise RuntimeError(
-                            f"AaveStrategy._bridge_to_base: withdrawal {own_index} resolved with "
-                            f"status={info.status}"
-                        )
+                    return
 
             await asyncio.sleep(self._poll_interval_sec)
 
-    async def _read_pool_balance(self, client: FlexvaultsClient) -> int:
-        balance = await client.get_balance(self._pool_address, self._token_id)
+    async def _read_pool_balance(self) -> int:
+        """Read the pool's accounting balance for this token. The PyPI SDK
+        infers user from the bearer token, so we use the SIWE-authenticated
+        client (LP/pool key) here.
+        """
+        client = await self._get_authed_flexvaults()
+        balance = await client.get_balance(self._token_id)
         return int(balance.balance)
 
-    async def _poll_until_balance_at_least(
-        self,
-        client: FlexvaultsClient,
-        target_balance: int,
-    ) -> None:
+    async def _poll_until_balance_at_least(self, target_balance: int) -> None:
         """Block (state-based, no timer) until the pool's accounting balance
         is at least `target_balance`. The relay credits asynchronously after
         the on-chain ERC20 transfer; this is how we know the credit landed.
         """
         while True:
-            current = await self._read_pool_balance(client)
+            current = await self._read_pool_balance()
             if current >= target_balance:
                 return
             await asyncio.sleep(self._poll_interval_sec)

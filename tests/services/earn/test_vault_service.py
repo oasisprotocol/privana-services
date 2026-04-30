@@ -147,7 +147,7 @@ class TestDeposit:
             POOL_ADDRESS,
             1000, 1050, True,
         )
-        contract.functions.getUserShares.return_value.call.side_effect = [0, 952]
+        contract.functions.userShares.return_value.call.side_effect = [0, 952]
 
         result = await service.deposit(
             POOL_ID_HEX, USER_ADDRESS, "1000", 5, "0x" + "aa" * 65
@@ -171,7 +171,7 @@ class TestDeposit:
             POOL_ADDRESS,
             1000, 1050, True,
         )
-        contract.functions.getUserShares.return_value.call.return_value = 0
+        contract.functions.userShares.return_value.call.return_value = 0
         saph.execute_contract_call.side_effect = RuntimeError("onchain revert")
 
         result = await service.deposit(
@@ -193,7 +193,7 @@ class TestWithdraw:
             POOL_ADDRESS,
             1000, 1050, True,
         )
-        contract.functions.getUserShares.return_value.call.return_value = 100
+        contract.functions.userShares.return_value.call.return_value = 100
         contract.functions.convertToAssets.return_value.call.return_value = 105
 
         with pytest.raises(ValueError, match="Insufficient shares"):
@@ -206,7 +206,7 @@ class TestWithdraw:
             POOL_ADDRESS,
             1000, 1050, True,
         )
-        contract.functions.getUserShares.return_value.call.side_effect = [500, 500, 25]
+        contract.functions.userShares.return_value.call.side_effect = [500, 500, 25]
         contract.functions.convertToAssets.return_value.call.return_value = 525
 
         with patch("src.services.earn.vault_service.sign_transfer", return_value="0x" + "bb" * 65):
@@ -229,7 +229,7 @@ class TestWithdraw:
             POOL_ADDRESS,
             1000, 1050, True,
         )
-        contract.functions.getUserShares.return_value.call.side_effect = [500, 500]
+        contract.functions.userShares.return_value.call.side_effect = [500, 500]
         contract.functions.convertToAssets.return_value.call.return_value = 525
         saph.execute_contract_call.side_effect = RuntimeError("insufficient funds for gas")
 
@@ -268,7 +268,7 @@ class TestExchangeRateZeroShares:
             POOL_ADDRESS,
             0, 0, True,
         )
-        contract.functions.getUserShares.return_value.call.return_value = 0
+        contract.functions.userShares.return_value.call.return_value = 0
 
         balances = await service.get_all_balances(USER_ADDRESS)
         assert balances == []
@@ -286,7 +286,7 @@ class TestGetAllBalances:
             POOL_ADDRESS,
             1000, 1050, True,
         )
-        contract.functions.getUserShares.return_value.call.return_value = 500
+        contract.functions.userShares.return_value.call.return_value = 500
         contract.functions.convertToAssets.return_value.call.return_value = 525
 
         balances = await service.get_all_balances(USER_ADDRESS)
@@ -305,7 +305,7 @@ class TestGetAllBalances:
             POOL_ADDRESS,
             1000, 1050, True,
         )
-        contract.functions.getUserShares.return_value.call.return_value = 0
+        contract.functions.userShares.return_value.call.return_value = 0
 
         balances = await service.get_all_balances(USER_ADDRESS)
         assert balances == []
@@ -327,7 +327,7 @@ class TestStrategyRouting:
             POOL_ADDRESS,
             1000, 1050, True,
         )
-        contract.functions.getUserShares.return_value.call.side_effect = [0, 952]
+        contract.functions.userShares.return_value.call.side_effect = [0, 952]
 
         result = await service.deposit(
             POOL_ID_HEX, USER_ADDRESS, "1000", 5, "0x" + "aa" * 65
@@ -351,7 +351,7 @@ class TestStrategyRouting:
             POOL_ADDRESS,
             1000, 1050, True,
         )
-        contract.functions.getUserShares.return_value.call.side_effect = [0, 952]
+        contract.functions.userShares.return_value.call.side_effect = [0, 952]
 
         with pytest.raises(RuntimeError, match="aave rpc down"):
             await service.deposit(
@@ -367,7 +367,7 @@ class TestStrategyRouting:
             POOL_ADDRESS,
             1000, 1050, True,
         )
-        contract.functions.getUserShares.return_value.call.side_effect = [0, 952]
+        contract.functions.userShares.return_value.call.side_effect = [0, 952]
 
         result = await service.deposit(
             POOL_ID_HEX, USER_ADDRESS, "1000", 5, "0x" + "aa" * 65
@@ -390,7 +390,7 @@ class TestStrategyRouting:
             POOL_ADDRESS,
             1000, 1050, True,
         )
-        contract.functions.getUserShares.return_value.call.side_effect = [500, 500, 25]
+        contract.functions.userShares.return_value.call.side_effect = [500, 500, 25]
         contract.functions.convertToAssets.return_value.call.return_value = 525
 
         with patch("src.services.earn.vault_service.sign_transfer", return_value="0x" + "bb" * 65):
@@ -414,7 +414,7 @@ class TestStrategyRouting:
             POOL_ADDRESS,
             1000, 1050, True,
         )
-        contract.functions.getUserShares.return_value.call.return_value = 500
+        contract.functions.userShares.return_value.call.return_value = 500
         contract.functions.convertToAssets.return_value.call.return_value = 525
 
         with patch("src.services.earn.vault_service.sign_transfer", return_value="0x" + "bb" * 65):
@@ -618,7 +618,7 @@ class TestLiveAUMInResponses:
             POOL_ADDRESS,
             1000, 1000, True,
         )
-        contract.functions.getUserShares.return_value.call.return_value = 500
+        contract.functions.userShares.return_value.call.return_value = 500
         contract.functions.convertToAssets.return_value.call.return_value = 600
 
         balances = await service.get_all_balances(USER_ADDRESS)

@@ -93,12 +93,13 @@ class VaultService:
         return pools
 
     def get_user_shares(self, user_address: str, pool_id: bytes) -> int:
-        # token param is empty — getUserShares uses it for the auth gate
-        # (accounting.balanceOf), but we call from the service, not end-users.
-        return self.contract.functions.getUserShares(
-            Web3.to_checksum_address(user_address),
+        # Read the public mapping directly. EarnManager.getUserShares() runs
+        # an accounting.balanceOf auth gate that reverts when called from
+        # this service (no msg.sender attribution); the public storage
+        # getter skips the gate and returns the same value.
+        return self.contract.functions.userShares(
             pool_id,
-            b"",
+            Web3.to_checksum_address(user_address),
         ).call()
 
     def convert_to_shares(self, pool_id: bytes, assets: int) -> int:

@@ -181,6 +181,8 @@ class VaultService:
         if not pool["active"]:
             raise ValueError("Pool is not active")
 
+        await self.sync_total_assets(pool_id_hex)
+
         sig_bytes = bytes.fromhex(signature.removeprefix("0x"))
 
         tx_id = self._record_transaction(
@@ -272,6 +274,8 @@ class VaultService:
         if pool["pool_address"] == "0x0000000000000000000000000000000000000000":
             raise ValueError("Pool not found")
         # No active check — users must always be able to exit paused pools.
+
+        await self.sync_total_assets(pool_id_hex)
 
         shares = self.get_user_shares(user_address, pool_id)
         max_withdraw = self.convert_to_assets(pool_id, shares) if shares > 0 else 0
@@ -384,6 +388,56 @@ class VaultService:
             )
             return on_chain_total
         return external if external > 0 else on_chain_total
+
+    async def sync_total_assets(self, pool_id_hex: str) -> Optional[int]:
+        """Push the strategy's live AUM into EarnManager.totalAssets so
+        share math reflects accrued yield.
+
+        No-ops for manual pools (no external capital) and when the strategy
+        already matches on-chain. Best-effort: a failed sync logs and
+        returns None instead of raising, so deposit and withdraw paths can
+        still proceed against a slightly stale exchange rate. Calls
+        `EarnManager.syncTotalAssets(poolId, newTotalAssets)` on Sapphire.
+        """
+        strategy = self._registry.get(pool_id_hex)
+        if strategy.name == "manual":
+            return None
+
+        pool_id = bytes.fromhex(pool_id_hex.removeprefix("0x"))
+        try:
+            external = await strategy.total_assets()
+        except Exception:
+            logger.exception(
+                "sync_total_assets read failed pool=%s strategy=%s",
+                pool_id_hex, strategy.name,
+            )
+            return None
+        if external <= 0:
+            return None
+
+        on_chain = self.get_pool(pool_id)["total_assets"]
+        if external == on_chain:
+            return on_chain
+
+        try:
+            await asyncio.to_thread(
+                self.sapphire.execute_contract_call,
+                contract_address=self.contract_address,
+                abi=EARN_MANAGER_ABI,
+                function_name="syncTotalAssets",
+                args=[pool_id, external],
+            )
+        except Exception:
+            logger.exception(
+                "syncTotalAssets tx failed pool=%s old=%d new=%d",
+                pool_id_hex, on_chain, external,
+            )
+            return None
+        logger.info(
+            "syncTotalAssets succeeded pool=%s old=%d new=%d",
+            pool_id_hex, on_chain, external,
+        )
+        return external
 
     def _record_transaction(
         self,

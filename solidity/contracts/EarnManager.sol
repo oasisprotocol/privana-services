@@ -106,6 +106,16 @@ contract EarnManager is Ownable {
         pool.totalAssets += yieldAmount;
     }
 
+    /// @dev Replace totalAssets with an externally observed value. Used to
+    /// reflect accrued yield held in an off-chain strategy (e.g. Aave aToken
+    /// balance) before share math runs. Total shares are unchanged, so any
+    /// delta dilutes or boosts each share's claim proportionally.
+    function syncTotalAssets(bytes32 poolId, uint256 newTotalAssets) external onlyOwner {
+        Pool storage pool = pools[poolId];
+        if (pool.poolAddress == address(0)) revert PoolNotFound();
+        pool.totalAssets = newTotalAssets;
+    }
+
     function getPool(bytes32 poolId) external view returns (Pool memory) {
         return pools[poolId];
     }

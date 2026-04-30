@@ -471,6 +471,114 @@ class TestEffectiveTotalAssets:
         assert await service.effective_total_assets(POOL_ID_HEX, 500) == 500
 
 
+class TestSyncTotalAssets:
+    async def test_manual_strategy_is_noop(self):
+        service, _, sapphire, _ = _make_service()
+
+        result = await service.sync_total_assets(POOL_ID_HEX)
+
+        assert result is None
+        sapphire.execute_contract_call.assert_not_called()
+
+    async def test_skips_when_external_matches_on_chain(self):
+        from src.services.earn.registry import StrategyRegistry
+
+        registry = StrategyRegistry()
+        strategy = MagicMock()
+        strategy.name = "aave-v3"
+        strategy.total_assets = AsyncMock(return_value=1500)
+        registry.register(POOL_ID_HEX, strategy)
+
+        service, contract, sapphire, _ = _make_service(registry=registry)
+        contract.functions.getPool.return_value.call.return_value = (
+            bytes.fromhex(USDC_TOKEN_ID[2:]),
+            POOL_ADDRESS,
+            1000, 1500, True,
+        )
+
+        result = await service.sync_total_assets(POOL_ID_HEX)
+
+        assert result == 1500
+        sapphire.execute_contract_call.assert_not_called()
+
+    async def test_calls_contract_when_drifted(self):
+        from src.services.earn.registry import StrategyRegistry
+
+        registry = StrategyRegistry()
+        strategy = MagicMock()
+        strategy.name = "aave-v3"
+        strategy.total_assets = AsyncMock(return_value=1700)
+        registry.register(POOL_ID_HEX, strategy)
+
+        service, contract, sapphire, _ = _make_service(registry=registry)
+        contract.functions.getPool.return_value.call.return_value = (
+            bytes.fromhex(USDC_TOKEN_ID[2:]),
+            POOL_ADDRESS,
+            1000, 1500, True,
+        )
+
+        result = await service.sync_total_assets(POOL_ID_HEX)
+
+        assert result == 1700
+        sapphire.execute_contract_call.assert_called_once()
+        call_kwargs = sapphire.execute_contract_call.call_args.kwargs
+        assert call_kwargs["function_name"] == "syncTotalAssets"
+        assert call_kwargs["args"][1] == 1700
+
+    async def test_strategy_read_failure_returns_none(self):
+        from src.services.earn.registry import StrategyRegistry
+
+        registry = StrategyRegistry()
+        strategy = MagicMock()
+        strategy.name = "aave-v3"
+        strategy.total_assets = AsyncMock(side_effect=RuntimeError("rpc down"))
+        registry.register(POOL_ID_HEX, strategy)
+
+        service, _, sapphire, _ = _make_service(registry=registry)
+
+        result = await service.sync_total_assets(POOL_ID_HEX)
+
+        assert result is None
+        sapphire.execute_contract_call.assert_not_called()
+
+    async def test_contract_failure_returns_none(self):
+        from src.services.earn.registry import StrategyRegistry
+
+        registry = StrategyRegistry()
+        strategy = MagicMock()
+        strategy.name = "aave-v3"
+        strategy.total_assets = AsyncMock(return_value=1700)
+        registry.register(POOL_ID_HEX, strategy)
+
+        service, contract, sapphire, _ = _make_service(registry=registry)
+        contract.functions.getPool.return_value.call.return_value = (
+            bytes.fromhex(USDC_TOKEN_ID[2:]),
+            POOL_ADDRESS,
+            1000, 1500, True,
+        )
+        sapphire.execute_contract_call.side_effect = RuntimeError("sapphire timeout")
+
+        result = await service.sync_total_assets(POOL_ID_HEX)
+
+        assert result is None
+
+    async def test_zero_external_skips_sync(self):
+        from src.services.earn.registry import StrategyRegistry
+
+        registry = StrategyRegistry()
+        strategy = MagicMock()
+        strategy.name = "aave-v3"
+        strategy.total_assets = AsyncMock(return_value=0)
+        registry.register(POOL_ID_HEX, strategy)
+
+        service, _, sapphire, _ = _make_service(registry=registry)
+
+        result = await service.sync_total_assets(POOL_ID_HEX)
+
+        assert result is None
+        sapphire.execute_contract_call.assert_not_called()
+
+
 class TestLiveAUMInResponses:
     async def test_deposit_quote_uses_live_aum(self):
         from src.services.earn.registry import StrategyRegistry

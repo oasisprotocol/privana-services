@@ -240,6 +240,53 @@ describe('EarnManager', function () {
     });
   });
 
+  describe('syncTotalAssets', function () {
+    it('should overwrite totalAssets without changing shares', async function () {
+      const { earnManager, mockAccounting, user } = await deployWithPool();
+      const amount = ethers.parseUnits('1000', 6);
+
+      await mockAccounting.setBalance(user.address, TOKEN_ID, amount);
+      await earnManager.deposit(POOL_ID, user.address, amount, 0, DUMMY_SIG);
+
+      const sharesBefore = await earnManager.getUserShares(user.address, POOL_ID, '0x');
+
+      const newTotal = ethers.parseUnits('1100', 6);
+      await earnManager.syncTotalAssets(POOL_ID, newTotal);
+
+      const pool = await earnManager.getPool(POOL_ID);
+      expect(pool.totalAssets).to.equal(newTotal);
+      expect(pool.totalShares).to.equal(amount);
+      expect(await earnManager.getUserShares(user.address, POOL_ID, '0x')).to.equal(sharesBefore);
+    });
+
+    it('should accept lowering totalAssets (loss scenario)', async function () {
+      const { earnManager, mockAccounting, user } = await deployWithPool();
+      const amount = ethers.parseUnits('1000', 6);
+
+      await mockAccounting.setBalance(user.address, TOKEN_ID, amount);
+      await earnManager.deposit(POOL_ID, user.address, amount, 0, DUMMY_SIG);
+
+      const newTotal = ethers.parseUnits('900', 6);
+      await earnManager.syncTotalAssets(POOL_ID, newTotal);
+
+      const pool = await earnManager.getPool(POOL_ID);
+      expect(pool.totalAssets).to.equal(newTotal);
+    });
+
+    it('should reject non-owner', async function () {
+      const { earnManager, user } = await deployWithPool();
+      await expect(earnManager.connect(user).syncTotalAssets(POOL_ID, 1000))
+        .to.be.revertedWithCustomError(earnManager, 'OwnableUnauthorizedAccount');
+    });
+
+    it('should reject nonexistent pool', async function () {
+      const { earnManager } = await loadFixture(deployFixture);
+      const fakePool = ethers.keccak256(ethers.toUtf8Bytes('fake'));
+      await expect(earnManager.syncTotalAssets(fakePool, 1000))
+        .to.be.revertedWithCustomError(earnManager, 'PoolNotFound');
+    });
+  });
+
   describe('multi-user scenario', function () {
     it('should distribute yield proportionally', async function () {
       const { earnManager, mockAccounting, user, poolWallet, otherUser } = await deployWithPool();

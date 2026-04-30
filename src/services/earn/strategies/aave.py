@@ -101,13 +101,13 @@ class AaveStrategy(BaseStrategy):
         return self._pool_address
 
     def _get_flexvaults(self) -> FlexvaultsClient:
-        if self._flexvaults is None:
-            self._flexvaults = get_flexvaults_client()
-        return self._flexvaults
+        if self._flexvaults is not None:
+            return self._flexvaults
+        return get_flexvaults_client()
 
     async def _get_authed_flexvaults(self) -> FlexvaultsClient:
-        """Auth-required SDK calls share the singleton; tests inject a
-        pre-mocked client so SIWE is bypassed.
+        """Auth-required SDK calls share the SIWE-authenticated singleton.
+        Tests inject a pre-mocked client to bypass SIWE.
         """
         if self._flexvaults is not None:
             return self._flexvaults
@@ -196,13 +196,20 @@ class AaveStrategy(BaseStrategy):
             quote.deposit_address, amount, transfer_tx,
         )
 
-        await client.include_deposit(
-            IncludeDepositRequest(
-                user_address=self._pool_address,
-                token_id=self._token_id,
-                evm_transaction_data=transfer_tx,
+        try:
+            await client.include_deposit(
+                IncludeDepositRequest(
+                    user_address=self._pool_address,
+                    token_id=self._token_id,
+                    evm_transaction_data=transfer_tx,
+                )
             )
-        )
+        except Exception as exc:
+            logger.warning(
+                "AaveStrategy.withdraw_from_earn: include_deposit nudge failed (%s); "
+                "relying on relay auto-pickup",
+                exc,
+            )
 
         target_balance = pre_balance + amount
         await self._poll_until_balance_at_least(target_balance)

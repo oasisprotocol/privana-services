@@ -128,7 +128,7 @@ class AaveClient:
         if self._account is None:
             raise RuntimeError("AaveClient has no signer configured")
         fn = getattr(contract.functions, function_name)(*args)
-        nonce = self.w3.eth.get_transaction_count(self._account.address)
+        nonce = self.w3.eth.get_transaction_count(self._account.address, "pending")
         tx = fn.build_transaction({
             "from": self._account.address,
             "nonce": nonce,

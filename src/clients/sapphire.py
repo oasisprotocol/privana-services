@@ -1,3 +1,4 @@
+import ctypes
 import logging
 from typing import Optional
 
@@ -9,6 +10,35 @@ from src.core.config import load_settings
 logger = logging.getLogger(__name__)
 
 DEFAULT_GAS_LIMIT = 500_000
+
+
+def _patch_sapphirepy_argtypes() -> None:
+    """Sapphirepy <= 0.x ships a wrapper with truncated `argtypes` (7 fields),
+    while the underlying C function takes 9 (pk, sender, recipient, rpc_url,
+    eth_amount, gas_limit, data, gas_cost_gwei, nonce). With the short list,
+    ctypes silently passes garbage for the trailing args, which manifests as
+    a Sapphire runtime "invalid nonce" rejection. Append the missing two
+    `c_int` types so the binary reads gas_cost_gwei and nonce correctly.
+    Idempotent: skips when argtypes already match.
+    """
+    try:
+        from sapphirepy.wrapper import lib
+    except ImportError:
+        return
+    expected = 9
+    current = list(lib.SendETHTransaction.argtypes or [])
+    if len(current) >= expected:
+        return
+    missing = expected - len(current)
+    lib.SendETHTransaction.argtypes = current + [ctypes.c_int] * missing
+    logger.warning(
+        "Patched sapphirepy.wrapper argtypes (was %d fields, now %d). "
+        "Remove this shim once upstream sapphirepy ships the fix.",
+        len(current), expected,
+    )
+
+
+_patch_sapphirepy_argtypes()
 
 
 def _send_encrypted_tx(pk, sender, recipient, rpc_url, gas_limit, calldata, gas_gwei, nonce):

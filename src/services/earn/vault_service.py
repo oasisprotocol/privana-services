@@ -127,22 +127,35 @@ class VaultService:
         amount: str,
         user_address: str,
     ) -> dict:
+        """Build a deposit quote with the four independent reads dispatched
+        in parallel: getPool + convertToShares on Sapphire, the strategy's
+        live total_assets on Base, and the accounting transfer nonce over
+        HTTP. Sequential, each leg costs an RPC roundtrip on a slow public
+        endpoint; running them concurrently makes the slowest leg the
+        floor instead of the sum.
+        """
         validate_address(user_address, "user_address")
         validate_amount(amount, "amount")
 
         pool_id = bytes.fromhex(pool_id_hex.removeprefix("0x"))
-        pool = self.get_pool(pool_id)
+        amount_int = int(amount)
+
+        pool, shares_estimate, strategy_aum, transfer_nonce = await asyncio.gather(
+            asyncio.to_thread(self.get_pool, pool_id),
+            asyncio.to_thread(self.convert_to_shares, pool_id, amount_int),
+            self._strategy_total_assets_safe(pool_id_hex),
+            self.accounting.get_transfer_nonce(user_address),
+        )
+
         if pool["pool_address"] == "0x0000000000000000000000000000000000000000":
             raise ValueError("Pool not found")
         if not pool["active"]:
             raise ValueError("Pool is not active")
 
-        shares_estimate = self.convert_to_shares(pool_id, int(amount))
-        total_shares = pool["total_shares"]
-        effective_assets = await self.effective_total_assets(pool_id_hex, pool["total_assets"])
-        exchange_rate = _exchange_rate(effective_assets, total_shares)
-
-        transfer_nonce = await self.accounting.get_transfer_nonce(user_address)
+        effective_assets = (
+            strategy_aum if strategy_aum is not None and strategy_aum > 0 else pool["total_assets"]
+        )
+        exchange_rate = _exchange_rate(effective_assets, pool["total_shares"])
 
         return {
             "pool_id": pool_id_hex,
@@ -153,6 +166,23 @@ class VaultService:
             "pool_address": pool["pool_address"],
             "transfer_nonce": transfer_nonce,
         }
+
+    async def _strategy_total_assets_safe(self, pool_id_hex: str) -> Optional[int]:
+        """Best-effort strategy AUM read for parallel-fetch paths. Returns
+        None when there's no external strategy or the read fails, letting
+        the caller fall back to the on-chain pool snapshot.
+        """
+        strategy = self._registry.get(pool_id_hex)
+        if strategy.name == "manual":
+            return None
+        try:
+            return await strategy.total_assets()
+        except Exception:
+            logger.exception(
+                "_strategy_total_assets_safe failed pool=%s strategy=%s",
+                pool_id_hex, strategy.name,
+            )
+            return None
 
     async def deposit(
         self,

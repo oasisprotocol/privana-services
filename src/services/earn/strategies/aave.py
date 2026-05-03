@@ -310,9 +310,14 @@ class AaveStrategy(BaseStrategy):
     async def total_assets(self) -> int:
         """aToken balance held by the pool address for this asset, which
         equals principal plus accrued Aave yield.
+
+        The underlying web3 read is synchronous; offload via ``to_thread``
+        so concurrent gather() siblings keep making progress.
         """
-        return self._client.get_aToken_balance(
-            self._asset_address, self._pool_address,
+        return await asyncio.to_thread(
+            self._client.get_aToken_balance,
+            self._asset_address,
+            self._pool_address,
         )
 
     async def is_healthy(self) -> bool:

@@ -157,7 +157,9 @@ class VaultService:
         )
         exchange_rate = _exchange_rate(effective_assets, pool["total_shares"])
 
+        now = int(time.time())
         return {
+            "quote_id": str(uuid.uuid4()),
             "pool_id": pool_id_hex,
             "token_id": pool["token_id"],
             "amount": amount,
@@ -165,6 +167,7 @@ class VaultService:
             "exchange_rate": exchange_rate,
             "pool_address": pool["pool_address"],
             "transfer_nonce": transfer_nonce,
+            "expires_at": now + self.settings.quote_ttl,
         }
 
     async def _strategy_total_assets_safe(self, pool_id_hex: str) -> Optional[int]:

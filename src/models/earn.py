@@ -81,6 +81,7 @@ class PoolListResponse(BaseModel):
 
 
 class DepositQuoteResponse(BaseModel):
+    quote_id: str
     pool_id: str
     token_id: str
     amount: str
@@ -88,6 +89,7 @@ class DepositQuoteResponse(BaseModel):
     exchange_rate: str
     pool_address: str
     transfer_nonce: int
+    expires_at: int
 
 
 class DepositRequest(BaseModel):

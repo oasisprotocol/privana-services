@@ -1,3 +1,4 @@
+import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -117,6 +118,8 @@ class TestDepositQuote:
         assert quote["shares_estimate"] == "952"
         assert quote["pool_address"] == POOL_ADDRESS
         assert quote["transfer_nonce"] == 7
+        assert quote["quote_id"]
+        assert quote["expires_at"] > int(time.time())
 
     async def test_rejects_missing_pool(self):
         service, contract, _, _ = _make_service()

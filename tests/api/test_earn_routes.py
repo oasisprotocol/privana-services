@@ -113,6 +113,7 @@ class TestDepositQuoteRoute:
         with patch("src.api.earn.get_vault_service") as mock_svc:
             svc = MagicMock()
             svc.get_deposit_quote = AsyncMock(return_value={
+                "quote_id": "11111111-1111-1111-1111-111111111111",
                 "pool_id": POOL_ID,
                 "token_id": USDC_TOKEN_ID,
                 "amount": "1000",
@@ -120,6 +121,7 @@ class TestDepositQuoteRoute:
                 "exchange_rate": "1.05",
                 "pool_address": POOL_ADDRESS,
                 "transfer_nonce": 5,
+                "expires_at": 9999999999,
             })
             mock_svc.return_value = svc
 

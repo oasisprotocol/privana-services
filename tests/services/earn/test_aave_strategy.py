@@ -42,6 +42,7 @@ class _WithdrawalNonce:
 class _TxSubmission:
     submission_id: str
     status: str = "pending"
+    detail: str | None = None
 
 
 @dataclass
@@ -414,6 +415,21 @@ async def test_retry_on_network_error_recovers_from_transient_drop(strategy) -> 
 
     assert result == "ok"
     assert factory.call_count == 3
+
+
+@pytest.mark.asyncio
+async def test_bridge_fails_fast_when_request_rejected(
+    strategy, aave_client, flexvaults
+) -> None:
+    flexvaults.request_withdrawal.return_value = _TxSubmission(
+        submission_id="sub-x", status="rejected",
+    )
+
+    with pytest.raises(RuntimeError, match="Withdrawal request rejected.*rejected"):
+        await strategy.deposit_to_earn(1_000_000)
+
+    flexvaults.get_withdrawal_info.assert_not_called()
+    aave_client.supply.assert_not_called()
 
 
 @pytest.mark.asyncio

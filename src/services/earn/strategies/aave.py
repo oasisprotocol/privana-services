@@ -37,6 +37,8 @@ _NETWORK_BY_CHAIN_ID: dict[int, Network] = {
 
 DEFAULT_POLL_INTERVAL_SEC = 3.0
 
+_ACCEPTED_SUBMISSION_STATUSES = frozenset({"success", "pending", "accepted", "ok", "submitted"})
+
 
 def _network_for_chain(chain_id: int) -> Network:
     network = _NETWORK_BY_CHAIN_ID.get(chain_id)
@@ -293,7 +295,7 @@ class AaveStrategy(BaseStrategy):
                 ),
             )
         )
-        await client.request_withdrawal(
+        submission = await client.request_withdrawal(
             WithdrawalRequest(
                 user_address=self._pool_address,
                 token_id=self._token_id,
@@ -303,9 +305,16 @@ class AaveStrategy(BaseStrategy):
             )
         )
         logger.info(
-            "AaveStrategy._bridge_to_base: requested withdrawal pool=%s token=%s amount=%d nonce=%d",
+            "AaveStrategy._bridge_to_base: requested withdrawal pool=%s token=%s "
+            "amount=%d nonce=%d status=%s detail=%s",
             self._pool_address, self._token_id, amount, nonce,
+            submission.status, submission.detail,
         )
+        if submission.status not in _ACCEPTED_SUBMISSION_STATUSES:
+            raise RuntimeError(
+                f"Withdrawal request rejected: status={submission.status} "
+                f"detail={submission.detail}"
+            )
 
         own_index: Optional[int] = None
         while True:

@@ -397,4 +397,48 @@ async def test_is_healthy_false_when_rate_read_raises(strategy, aave_client) -> 
     assert await strategy.is_healthy() is False
 
 
+@pytest.mark.asyncio
+async def test_retry_on_network_error_recovers_from_transient_drop(strategy) -> None:
+    from flexvaults.client.errors import NetworkError
+
+    factory = MagicMock(side_effect=[
+        NetworkError("Server disconnected"),
+        NetworkError("Server disconnected again"),
+        "ok",
+    ])
+
+    async def call() -> str:
+        return factory()
+
+    result = await strategy._retry_on_network_error("probe", call)
+
+    assert result == "ok"
+    assert factory.call_count == 3
+
+
+@pytest.mark.asyncio
+async def test_bridge_survives_transient_network_error_mid_poll(
+    strategy, aave_client, flexvaults
+) -> None:
+    from flexvaults.client.errors import NetworkError
+
+    flexvaults.get_pending_withdrawals.side_effect = [
+        _PendingWithdrawalsResponse(user_address=POOL_ADDRESS, pending_withdrawals=[]),
+        NetworkError("Server disconnected"),
+        _PendingWithdrawalsResponse(
+            user_address=POOL_ADDRESS,
+            pending_withdrawals=[_PendingWithdrawal(index=99, amount=1_000_000)],
+        ),
+    ]
+    flexvaults.get_withdrawal_info.return_value = _WithdrawalInfo(
+        index=99, resolved=True, tx_identifier="0xresolved",
+    )
+    aave_client.get_allowance.return_value = 10_000_000
+
+    await strategy.deposit_to_earn(1_000_000)
+
+    assert flexvaults.get_pending_withdrawals.await_count == 3
+    aave_client.supply.assert_called_once_with(ASSET_ADDRESS, 1_000_000)
+
+
 _ = asyncio

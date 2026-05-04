@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Optional
+from typing import Awaitable, Callable, Optional, TypeVar
 
 from eth_account import Account
 from flexvaults import (
@@ -14,6 +14,7 @@ from flexvaults import (
     WithdrawMessage,
     sign_withdraw_message,
 )
+from flexvaults.client.errors import NetworkError
 from flexvaults.types.common import Network
 
 from src.clients.aave import AaveClient
@@ -25,6 +26,8 @@ from src.core.config import load_settings
 from src.services.earn.strategies.base import BaseStrategy
 
 logger = logging.getLogger(__name__)
+
+T = TypeVar("T")
 
 
 _NETWORK_BY_CHAIN_ID: dict[int, Network] = {
@@ -218,6 +221,38 @@ class AaveStrategy(BaseStrategy):
             self._pool_address, self._token_id, amount,
         )
 
+    async def _retry_on_network_error(
+        self,
+        op: str,
+        factory: Callable[[], Awaitable[T]],
+    ) -> T:
+        """Run an idempotent SDK read, swallowing transient ``NetworkError``s
+        so the bridge polling loop honors its "state-based, no timeout"
+        contract.
+
+        The accounting relay sits behind staging infra that occasionally
+        drops a single read with "Server disconnected without sending a
+        response." Letting that bubble up aborted the bridge mid-poll while
+        the on-chain side had already advanced (shares minted, balance
+        debited), leaving deposits silently partial. Retries here only ever
+        wrap reads we know are safe to repeat; mutating calls
+        (``request_withdrawal``, ``include_deposit``) stay outside this
+        helper so we never duplicate intent on a flaky network.
+
+        ``factory`` rebuilds the awaitable each attempt because coroutines
+        aren't reusable. We sleep ``_poll_interval_sec`` between tries to
+        match the surrounding poll cadence.
+        """
+        while True:
+            try:
+                return await factory()
+            except NetworkError as exc:
+                logger.warning(
+                    "AaveStrategy.%s: transient network error, retrying after %.1fs (%s)",
+                    op, self._poll_interval_sec, exc,
+                )
+                await asyncio.sleep(self._poll_interval_sec)
+
     async def _bridge_to_base(self, amount: int) -> None:
         """Submit an accounting Withdraw and block until accounting reports
         the request resolved.
@@ -226,15 +261,24 @@ class AaveStrategy(BaseStrategy):
         withdrawal's `resolved` flag flips True (the relay completed the
         on-chain transfer). The PyPI SDK does not surface a failed/rejected
         status enum on this endpoint, so a hard relay failure surfaces only
-        if `request_withdrawal` itself rejects synchronously.
+        if `request_withdrawal` itself rejects synchronously. Idempotent
+        reads tunnel through ``_retry_on_network_error`` so a single dropped
+        TCP read doesn't tear the loop down.
         """
         client = self._get_flexvaults()
         lp_account = Account.from_key(self._lp_private_key)
 
-        pre = await client.get_pending_withdrawals(self._pool_address)
+        pre = await self._retry_on_network_error(
+            "get_pending_withdrawals",
+            lambda: client.get_pending_withdrawals(self._pool_address),
+        )
         pre_indices: set[int] = {w.index for w in pre.pending_withdrawals}
 
-        nonce = (await client.get_withdrawal_nonce(self._pool_address)).nonce
+        nonce_resp = await self._retry_on_network_error(
+            "get_withdrawal_nonce",
+            lambda: client.get_withdrawal_nonce(self._pool_address),
+        )
+        nonce = nonce_resp.nonce
 
         signature = sign_withdraw_message(
             SignWithdrawParams(
@@ -265,7 +309,10 @@ class AaveStrategy(BaseStrategy):
 
         own_index: Optional[int] = None
         while True:
-            pending = await client.get_pending_withdrawals(self._pool_address)
+            pending = await self._retry_on_network_error(
+                "get_pending_withdrawals",
+                lambda: client.get_pending_withdrawals(self._pool_address),
+            )
             current_indices = {w.index for w in pending.pending_withdrawals}
 
             if own_index is None:
@@ -274,7 +321,11 @@ class AaveStrategy(BaseStrategy):
                     own_index = min(new_indices)
 
             if own_index is not None:
-                info = await client.get_withdrawal_info(own_index)
+                idx = own_index
+                info = await self._retry_on_network_error(
+                    "get_withdrawal_info",
+                    lambda: client.get_withdrawal_info(idx),
+                )
                 if info.resolved:
                     logger.info(
                         "AaveStrategy._bridge_to_base: withdrawal resolved index=%d tx=%s",
@@ -287,10 +338,14 @@ class AaveStrategy(BaseStrategy):
     async def _read_pool_balance(self) -> int:
         """Read the pool's accounting balance for this token. The PyPI SDK
         infers user from the bearer token, so we use the SIWE-authenticated
-        client (LP/pool key) here.
+        client (LP/pool key) here. Wrapped in the network-retry helper so a
+        flaky read can't take down the post-redeem credit poll.
         """
         client = await self._get_authed_flexvaults()
-        balance = await client.get_balance(self._token_id)
+        balance = await self._retry_on_network_error(
+            "get_balance",
+            lambda: client.get_balance(self._token_id),
+        )
         return int(balance.balance)
 
     async def _poll_until_balance_at_least(self, target_balance: int) -> None:

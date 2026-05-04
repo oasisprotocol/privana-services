@@ -13,13 +13,22 @@ DEFAULT_GAS_LIMIT = 500_000
 
 
 def _patch_sapphirepy_argtypes() -> None:
-    """Sapphirepy <= 0.x ships a wrapper with truncated `argtypes` (7 fields),
-    while the underlying C function takes 9 (pk, sender, recipient, rpc_url,
-    eth_amount, gas_limit, data, gas_cost_gwei, nonce). With the short list,
-    ctypes silently passes garbage for the trailing args, which manifests as
-    a Sapphire runtime "invalid nonce" rejection. Append the missing two
-    `c_int` types so the binary reads gas_cost_gwei and nonce correctly.
-    Idempotent: skips when argtypes already match.
+    """Workaround for upstream sapphirepy <= 0.x.
+
+    Symptom: every encrypted Sapphire tx fails with "invalid nonce" even when
+    the nonce is correct.
+
+    Cause: sapphirepy.wrapper declares `lib.SendETHTransaction.argtypes`
+    with only 7 entries while the underlying Rust binary's signature is 9
+    (pk, sender, recipient, rpc_url, eth_amount, gas_limit, data,
+    gas_cost_gwei, nonce). ctypes silently passes garbage for the trailing
+    two args, so the binary reads a corrupted nonce and the chain rejects
+    the tx.
+
+    Fix: append the missing two `c_int` slots to argtypes at startup. Runs
+    once at import time, idempotent (skips when already matched), and is
+    safe to remove once upstream ships the corrected signature. See commit
+    8b3a0aa for the original landing of this shim.
     """
     try:
         from sapphirepy.wrapper import lib
@@ -67,6 +76,12 @@ class SapphireClient:
         self.account = Account.from_key(settings.liquidity_provider_private_key)
         self.private_key = settings.liquidity_provider_private_key.removeprefix("0x")
         self.chain_id = self.w3.eth.chain_id
+        if self.chain_id != settings.accounting_chain_id:
+            raise RuntimeError(
+                "ACCOUNTING_CHAIN_ID does not match SAPPHIRE_RPC_URL: "
+                f"env={settings.accounting_chain_id} rpc={self.chain_id}. "
+                "Either fix the env var or point SAPPHIRE_RPC_URL at the matching network."
+            )
 
     def is_connected(self) -> bool:
         try:

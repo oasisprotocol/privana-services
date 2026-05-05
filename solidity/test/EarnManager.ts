@@ -1,5 +1,5 @@
 import { expect } from 'chai';
-import { ethers } from 'hardhat';
+import { ethers, upgrades } from 'hardhat';
 import { loadFixture } from '@nomicfoundation/hardhat-network-helpers';
 
 describe('EarnManager', function () {
@@ -18,9 +18,12 @@ describe('EarnManager', function () {
     ).deploy();
     await mockAccounting.waitForDeployment();
 
-    const earnManager = await (
-      await ethers.getContractFactory('EarnManager')
-    ).deploy(await mockAccounting.getAddress());
+    const factory = await ethers.getContractFactory('EarnManager');
+    const earnManager = await upgrades.deployProxy(
+      factory,
+      [await mockAccounting.getAddress()],
+      { kind: 'uups', initializer: 'initialize' },
+    );
     await earnManager.waitForDeployment();
 
     return { earnManager, mockAccounting, owner, user, poolWallet, otherUser };
@@ -46,8 +49,15 @@ describe('EarnManager', function () {
 
     it('should reject zero accounting address', async function () {
       const factory = await ethers.getContractFactory('EarnManager');
-      await expect(factory.deploy(ethers.ZeroAddress))
-        .to.be.revertedWithCustomError(await loadFixture(deployFixture).then(f => f.earnManager), 'ZeroAddress');
+      await expect(
+        upgrades.deployProxy(factory, [ethers.ZeroAddress], {
+          kind: 'uups',
+          initializer: 'initialize',
+        }),
+      ).to.be.revertedWithCustomError(
+        await loadFixture(deployFixture).then((f) => f.earnManager),
+        'ZeroAddress',
+      );
     });
   });
 

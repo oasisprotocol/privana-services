@@ -1,4 +1,4 @@
-import { ethers } from 'hardhat';
+import { ethers, upgrades } from 'hardhat';
 
 async function main() {
   const [deployer] = await ethers.getSigners();
@@ -9,12 +9,21 @@ async function main() {
 
   console.log('Accounting proxy:', ACCOUNTING_PROXY);
 
+  // UUPS proxy: implementation deployed first, then ERC1967Proxy points at it
+  // and runs `initialize(_accounting)` atomically. Returned address is the
+  // proxy. Future upgrades go through `upgrades.upgradeProxy(proxy, NewImpl)`.
   const factory = await ethers.getContractFactory('EarnManager');
-  const contract = await factory.deploy(ACCOUNTING_PROXY);
-  await contract.waitForDeployment();
+  const proxy = await upgrades.deployProxy(factory, [ACCOUNTING_PROXY], {
+    kind: 'uups',
+    initializer: 'initialize',
+  });
+  await proxy.waitForDeployment();
 
-  const address = await contract.getAddress();
-  console.log('EarnManager deployed to:', address);
+  const proxyAddress = await proxy.getAddress();
+  const implAddress = await upgrades.erc1967.getImplementationAddress(proxyAddress);
+  console.log('EarnManager proxy deployed to:', proxyAddress);
+  console.log('Implementation deployed to:    ', implAddress);
+  console.log('Set EARN_MANAGER_CONTRACT_ADDRESS to the PROXY address.');
 }
 
 main().catch((error) => {

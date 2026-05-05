@@ -1,10 +1,17 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import "./interfaces/IAccounting.sol";
 
-contract EarnManager is Ownable {
+/// @title EarnManager (UUPS upgradeable)
+/// @notice Pool registry and share accounting for FlexVaults earn strategies.
+/// @dev Deployed behind an ERC1967 proxy. Storage layout MUST stay
+/// append-only across upgrades: never reorder, remove, or change the type of
+/// existing slots; new state goes at the end (and consumes from `__gap`).
+contract EarnManager is Initializable, OwnableUpgradeable, UUPSUpgradeable {
     IAccounting public accounting;
 
     struct Pool {
@@ -19,6 +26,11 @@ contract EarnManager is Ownable {
     mapping(bytes32 => mapping(address => uint256)) public userShares;
     bytes32[] public poolIds;
 
+    /// @dev Reserved slots for future state additions without disturbing the
+    /// layout of any inheriting contract or proxy. Decrement when adding a
+    /// new variable to keep the total occupied storage size constant.
+    uint256[50] private __gap;
+
     error ZeroAddress();
     error ZeroAmount();
     error PoolNotFound();
@@ -26,10 +38,19 @@ contract EarnManager is Ownable {
     error PoolAlreadyExists();
     error InsufficientShares();
 
-    constructor(address _accounting) Ownable(msg.sender) {
+    /// @custom:oz-upgrades-unsafe-allow constructor
+    constructor() {
+        _disableInitializers();
+    }
+
+    function initialize(address _accounting) external initializer {
         if (_accounting == address(0)) revert ZeroAddress();
+        __Ownable_init(msg.sender);
+        __UUPSUpgradeable_init();
         accounting = IAccounting(_accounting);
     }
+
+    function _authorizeUpgrade(address newImplementation) internal override onlyOwner {}
 
     function createPool(
         bytes32 poolId,

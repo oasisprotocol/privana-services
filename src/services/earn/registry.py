@@ -76,23 +76,56 @@ def reset_strategy_registry() -> None:
     _registry_instance = None
 
 
-def register_aave_strategies_from_config(registry: StrategyRegistry, raw_config: str) -> int:
+def _extract_token_id(entry: object, pool_id: str) -> Optional[str]:
+    """Pull a token_id out of an AAVE_POOL_ASSETS entry, accepting both the
+    new canonical form (a bare token_id string) and the legacy nested form
+    (``{"token_id": ..., "asset_address": ...}``).
+
+    The legacy ``asset_address`` field is now ignored: the registry asks
+    accounting for the canonical address keyed by token_id, so the env value
+    is at best redundant and at worst drifts silently. We log a deprecation
+    warning whenever we see it.
+    """
+    if isinstance(entry, str):
+        return entry or None
+    if isinstance(entry, dict):
+        token_id = entry.get("token_id")
+        if "asset_address" in entry:
+            logger.warning(
+                "AAVE_POOL_ASSETS pool=%s: 'asset_address' is deprecated and "
+                "ignored; the address is resolved via accounting.get_token_info now. "
+                "Drop it from your env or replace the entry with just the token_id.",
+                pool_id,
+            )
+        if isinstance(token_id, str) and token_id:
+            return token_id
+        return None
+    logger.error(
+        "AAVE_POOL_ASSETS pool=%s must be a token_id string or {'token_id': ...}; got %s",
+        pool_id, type(entry).__name__,
+    )
+    return None
+
+
+async def register_aave_strategies_from_config(registry: StrategyRegistry, raw_config: str) -> int:
     """Parse `AAVE_POOL_ASSETS` JSON and register an AaveStrategy per pool.
 
-    Canonical config format:
-        `{"<pool_id_hex>": {"token_id": "<bytes32>", "asset_address": "<addr>"}, ...}`.
+    Canonical config format (preferred):
+        ``{"<pool_id_hex>": "<token_id>", ...}``.
 
-    Legacy flat form `{"<pool_id_hex>": "<asset_address>"}` is detected and
-    skipped with a clear error: token_id is required because the strategy
-    needs to bridge accounting funds across chains via the SDK. Operators
-    must migrate to the nested form.
+    Legacy nested form ``{"<pool_id_hex>": {"token_id": "...", "asset_address": "..."}}``
+    is still accepted; ``asset_address`` is ignored with a deprecation
+    warning. Asset addresses are now resolved per pool via
+    ``accounting.get_token_info(token_id)``, removing the drift risk between
+    env config and the canonical accounting record.
 
     Empty or whitespace-only input is treated as "no Aave pools configured"
     and short-circuits.
 
-    Returns the number of pools registered. Failures (bad JSON, missing
-    fields, legacy entries) are logged but do not crash the app: the
-    registry just falls back to ManualStrategy for the affected pools.
+    Returns the number of pools registered. Per-pool failures (bad shape,
+    missing token_id, accounting lookup failure, missing token_address) are
+    logged but do not crash the app: the registry just falls back to
+    ManualStrategy for the affected pools.
     """
     if not raw_config.strip():
         logger.info("AAVE_POOL_ASSETS not configured; skipping Aave strategy registration")
@@ -109,32 +142,33 @@ def register_aave_strategies_from_config(registry: StrategyRegistry, raw_config:
         return 0
 
     from src.clients.aave import get_aave_client
+    from src.clients.accounting import get_accounting_client
     from src.services.earn.strategies.aave import AaveStrategy
 
     client = get_aave_client()
+    accounting = get_accounting_client()
     count = 0
     for pool_id, entry in pool_assets.items():
-        if isinstance(entry, str):
-            logger.error(
-                "AAVE_POOL_ASSETS pool=%s uses legacy flat shape; expected "
-                "{'token_id': ..., 'asset_address': ...}; skipping",
-                pool_id,
-            )
+        token_id = _extract_token_id(entry, pool_id)
+        if not token_id:
+            logger.error("AAVE_POOL_ASSETS pool=%s has invalid token_id; skipping", pool_id)
             continue
-        if not isinstance(entry, dict):
-            logger.error(
-                "AAVE_POOL_ASSETS pool=%s must be an object with token_id+asset_address; got %s",
-                pool_id, type(entry).__name__,
+
+        try:
+            token_info = await accounting.get_token_info(token_id)
+        except Exception:
+            logger.exception(
+                "AAVE_POOL_ASSETS pool=%s: failed to resolve token_id=%s via accounting; skipping",
+                pool_id, token_id,
             )
             continue
 
-        token_id = entry.get("token_id")
-        asset_address = entry.get("asset_address")
-        if not isinstance(token_id, str) or not token_id:
-            logger.error("AAVE_POOL_ASSETS pool=%s has invalid token_id; skipping", pool_id)
-            continue
-        if not isinstance(asset_address, str) or not asset_address:
-            logger.error("AAVE_POOL_ASSETS pool=%s has invalid asset_address; skipping", pool_id)
+        asset_address = token_info.token_address
+        if not asset_address:
+            logger.error(
+                "AAVE_POOL_ASSETS pool=%s: accounting has no token_address for token_id=%s; skipping",
+                pool_id, token_id,
+            )
             continue
 
         registry.register(
@@ -142,8 +176,8 @@ def register_aave_strategies_from_config(registry: StrategyRegistry, raw_config:
             AaveStrategy(client=client, asset_address=asset_address, token_id=token_id),
         )
         logger.info(
-            "Registered AaveStrategy pool=%s asset=%s token=%s",
-            pool_id, asset_address, token_id,
+            "Registered AaveStrategy pool=%s asset=%s token=%s chain=%s",
+            pool_id, asset_address, token_id, token_info.chain_id,
         )
         count += 1
     return count

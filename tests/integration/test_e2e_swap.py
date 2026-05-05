@@ -3,13 +3,14 @@ import os
 import httpx
 import pytest
 from dotenv import load_dotenv
+from eth_account import Account
 
 load_dotenv()
 
 from src.core.eip712 import sign_transfer
 
-LP_ADDRESS = os.getenv("LIQUIDITY_PROVIDER_ADDRESS")
 LP_PK = os.getenv("LIQUIDITY_PROVIDER_PRIVATE_KEY")
+LP_ADDRESS = Account.from_key(LP_PK).address if LP_PK else None
 ACCOUNTING_CONTRACT = os.getenv("ACCOUNTING_CONTRACT_ADDRESS")
 CHAIN_ID = int(os.getenv("ACCOUNTING_CHAIN_ID", "23295"))
 
@@ -21,7 +22,7 @@ WETH_TOKEN_ID = "0x335b5cccd1e63b2fe79863a0db73fce430e4e66902e2b78424f8662621e29
 
 pytestmark = [
     pytest.mark.skipif(
-        not LP_PK or not LP_ADDRESS,
+        not LP_PK,
         reason="Integration tests require .env with LP credentials",
     ),
     pytest.mark.integration,

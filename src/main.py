@@ -22,8 +22,6 @@ _ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 
 def _validate_settings() -> None:
     errors = []
-    if settings.liquidity_provider_address == _ZERO_ADDRESS:
-        errors.append("LIQUIDITY_PROVIDER_ADDRESS is not set")
     if not settings.liquidity_provider_private_key:
         errors.append("LIQUIDITY_PROVIDER_PRIVATE_KEY is not set")
     if settings.accounting_contract_address == _ZERO_ADDRESS:

@@ -1,9 +1,10 @@
-import ctypes
 import logging
 from typing import Optional
 
 from eth_account import Account
+from sapphirepy import sapphire
 from web3 import Web3
+from web3.middleware import SignAndSendRawMiddlewareBuilder
 
 from src.core.config import load_settings
 
@@ -12,69 +13,25 @@ logger = logging.getLogger(__name__)
 DEFAULT_GAS_LIMIT = 500_000
 
 
-def _patch_sapphirepy_argtypes() -> None:
-    """Workaround for upstream sapphirepy <= 0.x.
-
-    Symptom: every encrypted Sapphire tx fails with "invalid nonce" even when
-    the nonce is correct.
-
-    Cause: sapphirepy.wrapper declares `lib.SendETHTransaction.argtypes`
-    with only 7 entries while the underlying Rust binary's signature is 9
-    (pk, sender, recipient, rpc_url, eth_amount, gas_limit, data,
-    gas_cost_gwei, nonce). ctypes silently passes garbage for the trailing
-    two args, so the binary reads a corrupted nonce and the chain rejects
-    the tx.
-
-    Fix: append the missing two `c_int` slots to argtypes at startup. Runs
-    once at import time, idempotent (skips when already matched), and is
-    safe to remove once upstream ships the corrected signature. See commit
-    8b3a0aa for the original landing of this shim.
-    """
-    try:
-        from sapphirepy.wrapper import lib
-    except ImportError:
-        return
-    expected = 9
-    current = list(lib.SendETHTransaction.argtypes or [])
-    if len(current) >= expected:
-        return
-    missing = expected - len(current)
-    lib.SendETHTransaction.argtypes = current + [ctypes.c_int] * missing
-    logger.warning(
-        "Patched sapphirepy.wrapper argtypes (was %d fields, now %d). "
-        "Remove this shim once upstream sapphirepy ships the fix.",
-        len(current), expected,
-    )
-
-
-_patch_sapphirepy_argtypes()
-
-
-def _send_encrypted_tx(pk, sender, recipient, rpc_url, gas_limit, calldata, gas_gwei, nonce):
-    from sapphirepy.wrapper import send_encrypted_sapphire_tx
-    result_code, result_str = send_encrypted_sapphire_tx(
-        pk=pk,
-        sender=sender,
-        recipient=recipient,
-        rpc_url=rpc_url,
-        eth_amount=0,
-        gas_limit=gas_limit,
-        data=calldata,
-        gas_cost_gwei=gas_gwei,
-        nonce=nonce,
-    )
-    if result_code != 0 or not result_str:
-        raise RuntimeError(f"Encrypted tx failed: sapphirepy returned code={result_code}")
-    return result_str
-
-
 class SapphireClient:
+    """Web3 client for Oasis Sapphire confidential EVM.
+
+    Uses the official ``oasis-sapphire-py`` middleware: a signing middleware
+    is added first so transactions get signed locally, then ``sapphire.wrap``
+    layers calldata encryption on top. The chain treats encrypted calldata
+    the same as plain calldata at the contract level, so callers just use
+    the standard ``contract.functions.foo(...).transact(...)`` flow and the
+    middleware stack handles encryption + signing transparently.
+    """
+
     def __init__(self) -> None:
         settings = load_settings()
         self.rpc_url = settings.sapphire_rpc_url
-        self.w3 = Web3(Web3.HTTPProvider(self.rpc_url))
         self.account = Account.from_key(settings.liquidity_provider_private_key)
-        self.private_key = settings.liquidity_provider_private_key.removeprefix("0x")
+        self.w3 = Web3(Web3.HTTPProvider(self.rpc_url))
+        self.w3.middleware_onion.add(SignAndSendRawMiddlewareBuilder.build(self.account))
+        self.w3 = sapphire.wrap(self.w3, self.account)
+        self.w3.eth.default_account = self.account.address
         self.chain_id = self.w3.eth.chain_id
         if self.chain_id != settings.accounting_chain_id:
             raise RuntimeError(
@@ -100,26 +57,20 @@ class SapphireClient:
     ) -> str:
         address = Web3.to_checksum_address(contract_address)
         contract = self.w3.eth.contract(address=address, abi=abi)
-        calldata = contract.encode_abi(function_name, args=args)
-
-        gas_price = self.w3.eth.gas_price
-        gas_gwei = max(int(gas_price // 10**9), 100)
-        nonce = self.w3.eth.get_transaction_count(self.account.address)
-
-        tx_hash_hex = _send_encrypted_tx(
-            self.private_key, self.account.address, address,
-            self.rpc_url, gas_limit, calldata, gas_gwei, nonce,
-        )
-
+        tx_hash = contract.functions[function_name](*args).transact({
+            "from": self.account.address,
+            "gas": gas_limit,
+            "gasPrice": self.w3.eth.gas_price,
+        })
+        tx_hash_hex = tx_hash.hex()
+        if not tx_hash_hex.startswith("0x"):
+            tx_hash_hex = "0x" + tx_hash_hex
         logger.info(f"Tx sent (encrypted): {tx_hash_hex}")
-
-        receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash_hex)
-
+        receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash)
         if receipt["status"] != 1:
             raise RuntimeError(f"Transaction reverted: {tx_hash_hex}")
-
         logger.info(f"Tx confirmed: {tx_hash_hex}")
-        return tx_hash_hex if tx_hash_hex.startswith("0x") else f"0x{tx_hash_hex}"
+        return tx_hash_hex
 
 
 _client_instance: Optional[SapphireClient] = None

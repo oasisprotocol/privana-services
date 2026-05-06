@@ -39,6 +39,12 @@ def _make_service(registry=None):
         acct.get_transfer_nonce = AsyncMock(return_value=7)
         mock_acct.return_value = acct
 
+        # Default the on-chain withdraw nonce to 0 so withdraw tests can pass
+        # ``nonce=0`` without tripping the stale-nonce pre-flight check. Tests
+        # that need a different value override
+        # ``contract.functions.withdrawNonces.return_value.call.return_value``.
+        contract.functions.withdrawNonces.return_value.call.return_value = 0
+
         from src.services.earn.vault_service import VaultService
         service = VaultService(registry=registry)
         service.contract = contract
@@ -202,6 +208,16 @@ class TestWithdraw:
 
         with pytest.raises(ValueError, match="Insufficient shares"):
             await service.withdraw(POOL_ID_HEX, USER_ADDRESS, "1000", 0, USER_WITHDRAW_SIG)
+
+    async def test_stale_nonce_is_rejected_before_onchain_call(self):
+        service, contract, saph, _ = _make_service()
+        contract.functions.withdrawNonces.return_value.call.return_value = 5
+
+        with pytest.raises(ValueError, match="Stale withdraw nonce"):
+            await service.withdraw(POOL_ID_HEX, USER_ADDRESS, "100", 4, USER_WITHDRAW_SIG)
+
+        # Pre-flight rejection must short-circuit before any chain call.
+        saph.execute_contract_call.assert_not_called()
 
     async def test_successful_withdraw(self, test_db):
         service, contract, saph, acct = _make_service()

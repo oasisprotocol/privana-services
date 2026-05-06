@@ -319,6 +319,20 @@ class VaultService:
         validate_amount(amount, "amount")
         validate_signature(signature, "signature")
 
+        # Pre-flight nonce check. The contract reads ``withdrawNonces[user]``
+        # from storage and recovers the signer against that value, so a stale
+        # client nonce produces a generic ``InvalidWithdrawSignature`` revert
+        # only after we burn gas dispatching the tx. Comparing the client's
+        # claimed nonce against the live storage value here turns that into
+        # an immediate 400 with a clear message; the client refetches via
+        # ``GET /v1/earn/withdraw/nonce`` and re-signs.
+        current_nonce = self.get_withdraw_nonce(user_address)
+        if nonce != current_nonce:
+            raise ValueError(
+                f"Stale withdraw nonce: expected {current_nonce}, got {nonce}. "
+                "Refetch via /v1/earn/withdraw/nonce and re-sign."
+            )
+
         pool_id = bytes.fromhex(pool_id_hex.removeprefix("0x"))
         pool = self.get_pool(pool_id)
         if pool["pool_address"] == "0x0000000000000000000000000000000000000000":

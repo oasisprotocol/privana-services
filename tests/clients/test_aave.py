@@ -7,7 +7,7 @@ from src.models.settings import Settings
 
 TEST_USDC = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
 TEST_ATOKEN = "0x0000000000000000000000000000000000000aaa"
-TEST_LP_PK = "0x7b07a59f24f1900ec4e6ac3e521c1acd2cca3518f717abda1dc8bbcbbc344c4e"
+TEST_LP_SK = "0x7b07a59f24f1900ec4e6ac3e521c1acd2cca3518f717abda1dc8bbcbbc344c4e"
 TEST_LP_ADDRESS = "0xd8991364507FAfC256EafF950d28618735753476"
 POOL_ADDRESS = "0x8bAB6d1b75f19e9eD9fCe8b9BD338844fF79aE27"
 RAY = 10**27
@@ -19,7 +19,7 @@ def _make_client(with_signer: bool = False):
         "aave_pool_address": POOL_ADDRESS,
     }
     if with_signer:
-        settings_kwargs["liquidity_provider_private_key"] = TEST_LP_PK
+        settings_kwargs["liquidity_provider_secret_key"] = TEST_LP_SK
     settings = Settings(**settings_kwargs)
 
     with patch("src.clients.aave.load_settings") as mock_settings, \

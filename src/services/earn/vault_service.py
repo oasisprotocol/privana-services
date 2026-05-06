@@ -352,7 +352,7 @@ class VaultService:
             pool_nonce = await self.accounting.get_transfer_nonce(pool["pool_address"])
 
             pool_signature = sign_transfer(
-                private_key=self.settings.liquidity_provider_private_key,
+                private_key=self.settings.liquidity_provider_secret_key,
                 chain_id=self.settings.accounting_chain_id,
                 verifying_contract=self.settings.accounting_contract_address,
                 user_address=pool["pool_address"],

@@ -27,7 +27,7 @@ class SapphireClient:
     def __init__(self) -> None:
         settings = load_settings()
         self.rpc_url = settings.sapphire_rpc_url
-        self.account = Account.from_key(settings.liquidity_provider_private_key)
+        self.account = Account.from_key(settings.liquidity_provider_secret_key)
         self.w3 = Web3(Web3.HTTPProvider(self.rpc_url))
         self.w3.middleware_onion.add(SignAndSendRawMiddlewareBuilder.build(self.account))
         self.w3 = sapphire.wrap(self.w3, self.account)

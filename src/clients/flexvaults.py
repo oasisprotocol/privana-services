@@ -42,9 +42,9 @@ async def get_authenticated_flexvaults_client() -> FlexvaultsClient:
 
 async def _authenticate_as_lp(client: FlexvaultsClient) -> str:
     settings = load_settings()
-    if not settings.liquidity_provider_private_key:
+    if not settings.liquidity_provider_secret_key:
         raise RuntimeError(
-            "flexvaults SIWE auth requires LIQUIDITY_PROVIDER_PRIVATE_KEY to be set"
+            "flexvaults SIWE auth requires LIQUIDITY_PROVIDER_SECRET_KEY to be set"
         )
 
     lp_address = settings.liquidity_provider_address
@@ -62,7 +62,7 @@ async def _authenticate_as_lp(client: FlexvaultsClient) -> str:
         f"Expiration Time: {(now + timedelta(hours=24)).strftime('%Y-%m-%dT%H:%M:%SZ')}"
     )
 
-    account = Account.from_key(settings.liquidity_provider_private_key)
+    account = Account.from_key(settings.liquidity_provider_secret_key)
     signed = account.sign_message(encode_defunct(text=message))
     signature = f"0x{signed.signature.hex()}"
 

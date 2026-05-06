@@ -39,9 +39,9 @@ class AaveClient:
             abi=AAVE_POOL_ABI,
         )
         self._account: Optional[Account] = None
-        pk = getattr(settings, "liquidity_provider_private_key", None)
-        if pk:
-            self._account = Account.from_key(pk)
+        sk = settings.liquidity_provider_secret_key
+        if sk:
+            self._account = Account.from_key(sk)
 
     @property
     def account_address(self) -> str:

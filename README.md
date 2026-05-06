@@ -23,7 +23,7 @@ cp .env.testnet .env
 
 | Variable | Description |
 |----------|-------------|
-| `LIQUIDITY_PROVIDER_PRIVATE_KEY` | LP wallet private key (signs accounting transfers and Aave bridges; LP/pool address is derived from this) |
+| `LIQUIDITY_PROVIDER_SECRET_KEY` | LP wallet secret key (signs accounting transfers and Aave bridges; LP/pool address is derived from this). The legacy `LIQUIDITY_PROVIDER_PRIVATE_KEY` env name is still accepted with a deprecation warning. |
 | `ACCOUNTING_CONTRACT_ADDRESS` | Accounting proxy on Sapphire |
 | `ACCOUNTING_CHAIN_ID` | Chain id for EIP-712 domain (Sapphire testnet = `23295`) |
 | `ACCOUNTING_API_BASE_URL` | Accounting REST API (e.g. `https://flexvaults-staging.rofl.build`) |

@@ -38,7 +38,7 @@ class AccountingClient:
         self.base_url = settings.accounting_api_base_url
         self.client = httpx.AsyncClient(timeout=30.0)
         self._lp_address = settings.liquidity_provider_address
-        self._lp_private_key = settings.liquidity_provider_private_key
+        self._lp_secret_key = settings.liquidity_provider_secret_key
         self._chain_id = settings.accounting_chain_id
         self._siwe_token: Optional[str] = None
         self._jwt_token: Optional[str] = None
@@ -50,7 +50,7 @@ class AccountingClient:
             if elapsed < 3600:
                 return
 
-        account = Account.from_key(self._lp_private_key)
+        account = Account.from_key(self._lp_secret_key)
         r = await self.client.get(
             f"{self.base_url}/v1/accounting/auth/nonce?address={self._lp_address}"
         )

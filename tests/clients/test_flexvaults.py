@@ -79,7 +79,7 @@ async def test_authenticate_signs_siwe_and_sets_bearer_token():
     reset_flexvaults_client()
     settings = Settings(
         accounting_api_base_url="https://accounting.example",
-        liquidity_provider_private_key=LP_PRIVATE_KEY,
+        liquidity_provider_secret_key=LP_PRIVATE_KEY,
         liquidity_provider_address=LP_ADDRESS,
         accounting_chain_id=23295,
     )
@@ -112,7 +112,7 @@ async def test_authenticate_caches_token_across_calls():
     reset_flexvaults_client()
     settings = Settings(
         accounting_api_base_url="https://accounting.example",
-        liquidity_provider_private_key=LP_PRIVATE_KEY,
+        liquidity_provider_secret_key=LP_PRIVATE_KEY,
         liquidity_provider_address=LP_ADDRESS,
         accounting_chain_id=23295,
     )
@@ -135,16 +135,16 @@ async def test_authenticate_caches_token_across_calls():
 
 
 @pytest.mark.asyncio
-async def test_authenticate_requires_lp_private_key():
+async def test_authenticate_requires_lp_secret_key():
     reset_flexvaults_client()
     settings = Settings(
         accounting_api_base_url="https://accounting.example",
-        liquidity_provider_private_key="",
+        liquidity_provider_secret_key="",
         liquidity_provider_address=LP_ADDRESS,
     )
 
     with patch("src.clients.flexvaults.load_settings", return_value=settings):
-        with pytest.raises(RuntimeError, match="LIQUIDITY_PROVIDER_PRIVATE_KEY"):
+        with pytest.raises(RuntimeError, match="LIQUIDITY_PROVIDER_SECRET_KEY"):
             await get_authenticated_flexvaults_client()
 
     reset_flexvaults_client()

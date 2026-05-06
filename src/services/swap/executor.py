@@ -65,7 +65,7 @@ class SwapExecutor:
                 )
 
                 output_signature = sign_transfer(
-                    private_key=self.settings.liquidity_provider_private_key,
+                    private_key=self.settings.liquidity_provider_secret_key,
                     chain_id=self.settings.accounting_chain_id,
                     verifying_contract=self.settings.accounting_contract_address,
                     user_address=self.settings.liquidity_provider_address,

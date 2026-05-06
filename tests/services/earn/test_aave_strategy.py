@@ -91,7 +91,7 @@ class _IncludeDepositResponse:
 
 def _strategy_settings() -> Settings:
     return Settings(
-        liquidity_provider_private_key=LP_PRIVATE_KEY,
+        liquidity_provider_secret_key=LP_PRIVATE_KEY,
         liquidity_provider_address=POOL_ADDRESS,
         accounting_contract_address=ACCOUNTING_CONTRACT,
         accounting_chain_id=23295,
@@ -170,7 +170,7 @@ def test_unsupported_chain_id_rejected(aave_client, flexvaults) -> None:
     from src.services.earn.strategies.aave import AaveStrategy
 
     bogus = Settings(
-        liquidity_provider_private_key=LP_PRIVATE_KEY,
+        liquidity_provider_secret_key=LP_PRIVATE_KEY,
         liquidity_provider_address=POOL_ADDRESS,
         accounting_contract_address=ACCOUNTING_CONTRACT,
         accounting_chain_id=1,

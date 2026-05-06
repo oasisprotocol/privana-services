@@ -37,7 +37,7 @@ POOL_ID_PREFIXED = "0xABC123"
 
 def _settings() -> Settings:
     return Settings(
-        liquidity_provider_private_key=(
+        liquidity_provider_secret_key=(
             "0x7b07a59f24f1900ec4e6ac3e521c1acd2cca3518f717abda1dc8bbcbbc344c4e"
         ),
         liquidity_provider_address="0xd8991364507FAfC256EafF950d28618735753476",

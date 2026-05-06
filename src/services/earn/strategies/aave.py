@@ -82,7 +82,7 @@ class AaveStrategy(BaseStrategy):
 
         settings = load_settings()
         self._pool_address = pool_address or settings.liquidity_provider_address
-        self._lp_private_key = settings.liquidity_provider_private_key
+        self._lp_secret_key = settings.liquidity_provider_secret_key
         self._accounting_contract = settings.accounting_contract_address
         self._network = _network_for_chain(settings.accounting_chain_id)
 
@@ -268,7 +268,7 @@ class AaveStrategy(BaseStrategy):
         TCP read doesn't tear the loop down.
         """
         client = self._get_flexvaults()
-        lp_account = Account.from_key(self._lp_private_key)
+        lp_account = Account.from_key(self._lp_secret_key)
 
         pre = await self._retry_on_network_error(
             "get_pending_withdrawals",

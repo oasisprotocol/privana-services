@@ -1,6 +1,8 @@
 import { expect } from 'chai';
 import { ethers, upgrades } from 'hardhat';
 import { loadFixture } from '@nomicfoundation/hardhat-network-helpers';
+import type { HardhatEthersSigner } from '@nomicfoundation/hardhat-ethers/signers';
+import type { EarnManager } from '../typechain-types';
 
 describe('EarnManager', function () {
   const USDC_ADDRESS = '0x036cbd53842c5426634e7929541ec2318f3dcf7e';
@@ -9,6 +11,29 @@ describe('EarnManager', function () {
   const TOKEN_ID = ethers.keccak256(ethers.AbiCoder.defaultAbiCoder().encode(['uint8', 'bytes'], [1, TOKEN_DATA]));
   const POOL_ID = ethers.keccak256(ethers.toUtf8Bytes('usdc-aave-v3'));
   const DUMMY_SIG = '0x' + '00'.repeat(65);
+
+  const WITHDRAW_TYPES = {
+    Withdraw: [
+      { name: 'user', type: 'address' },
+      { name: 'poolId', type: 'bytes32' },
+      { name: 'amount', type: 'uint256' },
+      { name: 'nonce', type: 'uint256' },
+    ],
+  };
+
+  async function signWithdraw(
+    signer: HardhatEthersSigner,
+    earnManager: EarnManager,
+    poolId: string,
+    amount: bigint,
+    nonce: bigint = 0n,
+  ): Promise<string> {
+    const verifyingContract = await earnManager.getAddress();
+    const { chainId } = await ethers.provider.getNetwork();
+    const domain = { name: 'EarnManager', version: '1', chainId, verifyingContract };
+    const value = { user: signer.address, poolId, amount, nonce };
+    return signer.signTypedData(domain, WITHDRAW_TYPES, value);
+  }
 
   async function deployFixture() {
     const [owner, user, poolWallet, otherUser] = await ethers.getSigners();
@@ -171,11 +196,13 @@ describe('EarnManager', function () {
       await mockAccounting.setBalance(user.address, TOKEN_ID, amount);
       await earnManager.deposit(POOL_ID, user.address, amount, 0, DUMMY_SIG);
 
-      await earnManager.withdraw(POOL_ID, user.address, amount, 0, DUMMY_SIG);
+      const userSig = await signWithdraw(user, earnManager, POOL_ID, amount);
+      await earnManager.withdraw(POOL_ID, user.address, amount, 0, DUMMY_SIG, userSig);
 
       expect(await earnManager.getUserShares(user.address, POOL_ID, '0x')).to.equal(0);
       expect(await mockAccounting.balances(user.address, TOKEN_ID)).to.equal(amount);
       expect(await mockAccounting.balances(poolWallet.address, TOKEN_ID)).to.equal(0);
+      expect(await earnManager.withdrawNonces(user.address)).to.equal(1);
     });
 
     it('should withdraw with profit after harvest', async function () {
@@ -188,7 +215,9 @@ describe('EarnManager', function () {
       await earnManager.harvest(POOL_ID, ethers.parseUnits('100', 6));
       await mockAccounting.setBalance(poolWallet.address, TOKEN_ID, ethers.parseUnits('1100', 6));
 
-      await earnManager.withdraw(POOL_ID, user.address, ethers.parseUnits('1100', 6), 0, DUMMY_SIG);
+      const withdrawAmount = ethers.parseUnits('1100', 6);
+      const userSig = await signWithdraw(user, earnManager, POOL_ID, withdrawAmount);
+      await earnManager.withdraw(POOL_ID, user.address, withdrawAmount, 0, DUMMY_SIG, userSig);
 
       expect(await earnManager.getUserShares(user.address, POOL_ID, '0x')).to.equal(0);
       expect(await mockAccounting.balances(user.address, TOKEN_ID)).to.equal(ethers.parseUnits('1100', 6));
@@ -201,21 +230,59 @@ describe('EarnManager', function () {
       await mockAccounting.setBalance(user.address, TOKEN_ID, amount);
       await earnManager.deposit(POOL_ID, user.address, amount, 0, DUMMY_SIG);
 
-      await expect(earnManager.withdraw(POOL_ID, user.address, amount + 1n, 0, DUMMY_SIG))
+      const overdrawAmount = amount + 1n;
+      const userSig = await signWithdraw(user, earnManager, POOL_ID, overdrawAmount);
+      await expect(earnManager.withdraw(POOL_ID, user.address, overdrawAmount, 0, DUMMY_SIG, userSig))
         .to.be.revertedWithCustomError(earnManager, 'InsufficientShares');
     });
 
     it('should reject zero amount', async function () {
       const { earnManager, user } = await deployWithPool();
-      await expect(earnManager.withdraw(POOL_ID, user.address, 0, 0, DUMMY_SIG))
+      const userSig = await signWithdraw(user, earnManager, POOL_ID, 0n);
+      await expect(earnManager.withdraw(POOL_ID, user.address, 0, 0, DUMMY_SIG, userSig))
         .to.be.revertedWithCustomError(earnManager, 'ZeroAmount');
     });
 
     it('should reject nonexistent pool', async function () {
       const { earnManager, user } = await loadFixture(deployFixture);
       const fakePool = ethers.keccak256(ethers.toUtf8Bytes('fake'));
-      await expect(earnManager.withdraw(fakePool, user.address, 1000, 0, DUMMY_SIG))
+      const userSig = await signWithdraw(user, earnManager, fakePool, 1000n);
+      await expect(earnManager.withdraw(fakePool, user.address, 1000, 0, DUMMY_SIG, userSig))
         .to.be.revertedWithCustomError(earnManager, 'PoolNotFound');
+    });
+
+    it('should reject withdraw without user consent signature', async function () {
+      const { earnManager, mockAccounting, user, otherUser } = await deployWithPool();
+      const amount = ethers.parseUnits('1000', 6);
+
+      await mockAccounting.setBalance(user.address, TOKEN_ID, amount);
+      await earnManager.deposit(POOL_ID, user.address, amount, 0, DUMMY_SIG);
+
+      // Attacker (otherUser) signs the withdraw consent for the victim's funds.
+      // Recovered signer != user, so it must revert.
+      const forgedSig = await signWithdraw(otherUser, earnManager, POOL_ID, amount);
+      await expect(
+        earnManager.connect(otherUser).withdraw(POOL_ID, user.address, amount, 0, DUMMY_SIG, forgedSig),
+      ).to.be.revertedWithCustomError(earnManager, 'InvalidWithdrawSignature');
+
+      // Victim is untouched.
+      expect(await earnManager.getUserShares(user.address, POOL_ID, '0x')).to.equal(amount);
+      expect(await earnManager.withdrawNonces(user.address)).to.equal(0);
+    });
+
+    it('should reject reused withdraw signature (nonce replay)', async function () {
+      const { earnManager, mockAccounting, user } = await deployWithPool();
+      const amount = ethers.parseUnits('400', 6);
+
+      await mockAccounting.setBalance(user.address, TOKEN_ID, ethers.parseUnits('1000', 6));
+      await earnManager.deposit(POOL_ID, user.address, ethers.parseUnits('1000', 6), 0, DUMMY_SIG);
+
+      const userSig = await signWithdraw(user, earnManager, POOL_ID, amount, 0n);
+      await earnManager.withdraw(POOL_ID, user.address, amount, 0, DUMMY_SIG, userSig);
+
+      // Same signature, nonce already bumped to 1 → recovery now produces wrong signer.
+      await expect(earnManager.withdraw(POOL_ID, user.address, amount, 0, DUMMY_SIG, userSig))
+        .to.be.revertedWithCustomError(earnManager, 'InvalidWithdrawSignature');
     });
   });
 

@@ -114,6 +114,20 @@ class WithdrawRequest(BaseModel):
     pool_id: str = Field(..., description="Earn pool ID")
     user_address: str = Field(..., description="User wallet address")
     amount: str = Field(..., description="Amount to withdraw in base units")
+    nonce: int = Field(
+        ...,
+        description=(
+            "User withdraw consent nonce, must equal "
+            "EarnManager.withdrawNonces[user_address] at submission time."
+        ),
+    )
+    signature: str = Field(
+        ...,
+        description=(
+            "EIP-712 Withdraw(user, poolId, amount, nonce) signature in the "
+            "EarnManager domain. Authorizes burning the user's pool shares."
+        ),
+    )
 
 
 class WithdrawResponse(BaseModel):

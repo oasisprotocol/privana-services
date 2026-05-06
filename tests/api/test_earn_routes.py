@@ -205,6 +205,8 @@ class TestWithdrawRoute:
                 "pool_id": POOL_ID,
                 "user_address": USER_ADDRESS,
                 "amount": "500",
+                "nonce": 0,
+                "signature": "0x" + "cc" * 65,
             })
             assert r.status_code == 200
             assert r.json()["shares_burned"] == "476"
@@ -219,8 +221,20 @@ class TestWithdrawRoute:
                 "pool_id": POOL_ID,
                 "user_address": USER_ADDRESS,
                 "amount": "999999999",
+                "nonce": 0,
+                "signature": "0x" + "cc" * 65,
             })
             assert r.status_code == 400
+
+    async def test_returns_422_when_signature_missing(self, api_client):
+        # Pydantic-level guard: missing the new fields should be a structural
+        # rejection, not silently accepted as the old shape.
+        r = await api_client.post("/v1/earn/withdraw", json={
+            "pool_id": POOL_ID,
+            "user_address": USER_ADDRESS,
+            "amount": "500",
+        })
+        assert r.status_code == 422
 
 
 class TestBalanceRoute:

@@ -102,6 +102,11 @@ class VaultService:
             Web3.to_checksum_address(user_address),
         ).call()
 
+    def get_withdraw_nonce(self, user_address: str) -> int:
+        return self.contract.functions.withdrawNonces(
+            Web3.to_checksum_address(user_address),
+        ).call()
+
     def convert_to_shares(self, pool_id: bytes, assets: int) -> int:
         return self.contract.functions.convertToShares(pool_id, assets).call()
 
@@ -291,17 +296,28 @@ class VaultService:
         pool_id_hex: str,
         user_address: str,
         amount: str,
+        nonce: int,
+        signature: str,
     ) -> dict:
         """Burn user shares and return the underlying assets.
 
-        Signature flow: the pool (LP) signs an EIP-712 ``Transfer(pool -> user,
-        tokenId, amount, nonce)`` using the liquidity-provider private key held
-        by this service. No user signature is needed — the user's on-chain share
-        balance is itself the authorization, and ``EarnManager.withdraw`` gates
-        the call by burning shares before executing the pool's transfer.
+        Two signatures are required, one from each side of the trust boundary:
+
+        - ``signature``: the user's EIP-712 ``Withdraw(user, poolId, amount, nonce)``
+          consent in the EarnManager's domain, where ``nonce`` matches
+          ``EarnManager.withdrawNonces[user]``. This is what authorizes the
+          burn of the user's shares; without it any caller could force-eject
+          any user from the pool.
+        - The pool's accounting ``Transfer(pool -> user, ...)`` signature, which
+          the service signs locally with the LP key. This is what authorizes
+          accounting to debit the pool's balance.
+
+        ``EarnManager.withdraw`` verifies the user signature first, then runs
+        the share-burn and the accounting transfer with the pool signature.
         """
         validate_address(user_address, "user_address")
         validate_amount(amount, "amount")
+        validate_signature(signature, "signature")
 
         pool_id = bytes.fromhex(pool_id_hex.removeprefix("0x"))
         pool = self.get_pool(pool_id)
@@ -332,7 +348,8 @@ class VaultService:
                 nonce=pool_nonce,
             )
 
-            sig_bytes = bytes.fromhex(pool_signature.removeprefix("0x"))
+            pool_sig_bytes = bytes.fromhex(pool_signature.removeprefix("0x"))
+            user_sig_bytes = bytes.fromhex(signature.removeprefix("0x"))
 
             tx_id = self._record_transaction(
                 operation=EARN_OP_WITHDRAW,
@@ -358,7 +375,8 @@ class VaultService:
                         Web3.to_checksum_address(user_address),
                         int(amount),
                         pool_nonce,
-                        sig_bytes,
+                        pool_sig_bytes,
+                        user_sig_bytes,
                     ],
                 )
             except Exception as exc:

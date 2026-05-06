@@ -10,6 +10,7 @@ USDC_TOKEN_ID = "0x330ba47d00c7ce3018deee017b319fd7cc6473a2ddc9e6eba6ebb4207be15
 POOL_ID_HEX = "0x" + "ab" * 32
 POOL_ADDRESS = "0x152E6a7125665764a4F1F1df80E8f5D49Bf0239c"
 USER_ADDRESS = "0xd8991364507FAfC256EafF950d28618735753476"
+USER_WITHDRAW_SIG = "0x" + "cc" * 65
 
 
 def _make_service(registry=None):
@@ -200,7 +201,7 @@ class TestWithdraw:
         contract.functions.convertToAssets.return_value.call.return_value = 105
 
         with pytest.raises(ValueError, match="Insufficient shares"):
-            await service.withdraw(POOL_ID_HEX, USER_ADDRESS, "1000")
+            await service.withdraw(POOL_ID_HEX, USER_ADDRESS, "1000", 0, USER_WITHDRAW_SIG)
 
     async def test_successful_withdraw(self, test_db):
         service, contract, saph, acct = _make_service()
@@ -213,7 +214,7 @@ class TestWithdraw:
         contract.functions.convertToAssets.return_value.call.return_value = 525
 
         with patch("src.services.earn.vault_service.sign_transfer", return_value="0x" + "bb" * 65):
-            result = await service.withdraw(POOL_ID_HEX, USER_ADDRESS, "500")
+            result = await service.withdraw(POOL_ID_HEX, USER_ADDRESS, "500", 0, USER_WITHDRAW_SIG)
 
         assert result["status"] == "completed"
         assert result["tx_hash"] == "0x" + "ff" * 32
@@ -237,7 +238,7 @@ class TestWithdraw:
         saph.execute_contract_call.side_effect = RuntimeError("insufficient funds for gas")
 
         with patch("src.services.earn.vault_service.sign_transfer", return_value="0x" + "bb" * 65):
-            result = await service.withdraw(POOL_ID_HEX, USER_ADDRESS, "500")
+            result = await service.withdraw(POOL_ID_HEX, USER_ADDRESS, "500", 0, USER_WITHDRAW_SIG)
 
         assert result["status"] == "failed"
         assert result["tx_hash"] is None
@@ -397,7 +398,7 @@ class TestStrategyRouting:
         contract.functions.convertToAssets.return_value.call.return_value = 525
 
         with patch("src.services.earn.vault_service.sign_transfer", return_value="0x" + "bb" * 65):
-            result = await service.withdraw(POOL_ID_HEX, USER_ADDRESS, "500")
+            result = await service.withdraw(POOL_ID_HEX, USER_ADDRESS, "500", 0, USER_WITHDRAW_SIG)
 
         assert result["status"] == "completed"
         strategy.withdraw_from_earn.assert_awaited_once_with(500)
@@ -422,7 +423,7 @@ class TestStrategyRouting:
 
         with patch("src.services.earn.vault_service.sign_transfer", return_value="0x" + "bb" * 65):
             with pytest.raises(RuntimeError, match="aave rpc down"):
-                await service.withdraw(POOL_ID_HEX, USER_ADDRESS, "500")
+                await service.withdraw(POOL_ID_HEX, USER_ADDRESS, "500", 0, USER_WITHDRAW_SIG)
 
         strategy.withdraw_from_earn.assert_awaited_once()
         sapphire.execute_contract_call.assert_not_called()

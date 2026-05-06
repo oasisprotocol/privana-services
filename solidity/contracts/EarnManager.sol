@@ -4,6 +4,8 @@ pragma solidity ^0.8.24;
 import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/utils/cryptography/EIP712Upgradeable.sol";
+import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import "./interfaces/IAccounting.sol";
 
 /// @title EarnManager (UUPS upgradeable)
@@ -11,7 +13,14 @@ import "./interfaces/IAccounting.sol";
 /// @dev Deployed behind an ERC1967 proxy. Storage layout MUST stay
 /// append-only across upgrades: never reorder, remove, or change the type of
 /// existing slots; new state goes at the end (and consumes from `__gap`).
-contract EarnManager is Initializable, OwnableUpgradeable, UUPSUpgradeable {
+contract EarnManager is
+    Initializable,
+    OwnableUpgradeable,
+    UUPSUpgradeable,
+    EIP712Upgradeable
+{
+    using ECDSA for bytes32;
+
     IAccounting public accounting;
 
     struct Pool {
@@ -26,10 +35,20 @@ contract EarnManager is Initializable, OwnableUpgradeable, UUPSUpgradeable {
     mapping(bytes32 => mapping(address => uint256)) public userShares;
     bytes32[] public poolIds;
 
+    /// @notice Per-user monotonic nonce for `withdraw` consent signatures.
+    /// @dev Mirrors the accounting transfer-nonce shape (per-user global, not
+    /// per-pool) so the system has one consistent replay-protection model.
+    /// Bumped after every successful withdraw consent verification.
+    mapping(address => uint256) public withdrawNonces;
+
     /// @dev Reserved slots for future state additions without disturbing the
     /// layout of any inheriting contract or proxy. Decrement when adding a
     /// new variable to keep the total occupied storage size constant.
     uint256[50] private __gap;
+
+    /// @dev EIP-712 typehash for the user's withdraw consent message.
+    bytes32 public constant WITHDRAW_TYPEHASH =
+        keccak256("Withdraw(address user,bytes32 poolId,uint256 amount,uint256 nonce)");
 
     error ZeroAddress();
     error ZeroAmount();
@@ -37,6 +56,7 @@ contract EarnManager is Initializable, OwnableUpgradeable, UUPSUpgradeable {
     error PoolNotActive();
     error PoolAlreadyExists();
     error InsufficientShares();
+    error InvalidWithdrawSignature();
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
@@ -47,6 +67,7 @@ contract EarnManager is Initializable, OwnableUpgradeable, UUPSUpgradeable {
         if (_accounting == address(0)) revert ZeroAddress();
         __Ownable_init(msg.sender);
         __UUPSUpgradeable_init();
+        __EIP712_init("EarnManager", "1");
         accounting = IAccounting(_accounting);
     }
 
@@ -97,16 +118,33 @@ contract EarnManager is Initializable, OwnableUpgradeable, UUPSUpgradeable {
         userShares[poolId][user] += shares;
     }
 
+    /// @notice Burn the user's pool shares and transfer the underlying assets
+    /// back to the user via accounting. Requires both signatures: the user's
+    /// EIP-712 ``Withdraw`` consent (so only the user can authorize the burn)
+    /// and the pool's accounting ``Transfer`` signature (held by the off-chain
+    /// service so accounting can debit the pool).
+    /// @param poolId Earn pool ID.
+    /// @param user Owner of the shares being burned.
+    /// @param amount Underlying asset amount to receive.
+    /// @param poolNonce Accounting transfer nonce for the pool's outbound transfer.
+    /// @param poolSignature Pool's EIP-712 ``Transfer(pool, user, ...)`` signed
+    /// by the LP key. Verified by the accounting contract.
+    /// @param userSignature User's EIP-712 ``Withdraw(user, poolId, amount, nonce)``
+    /// in this contract's domain. Recovered and matched against ``user``;
+    /// ``withdrawNonces[user]`` is used as the nonce and bumped on success.
     function withdraw(
         bytes32 poolId,
         address user,
         uint256 amount,
-        uint256 nonce,
-        bytes calldata signature
+        uint256 poolNonce,
+        bytes calldata poolSignature,
+        bytes calldata userSignature
     ) external {
         Pool storage pool = pools[poolId];
         if (pool.poolAddress == address(0)) revert PoolNotFound();
         if (amount == 0) revert ZeroAmount();
+
+        _consumeWithdrawConsent(user, poolId, amount, userSignature);
 
         /// @dev sharesToBurn = ceil(amount * totalShares / totalAssets)
         /// Round UP to protect pool. Example: pool has 1050 assets, 1000 shares.
@@ -118,7 +156,27 @@ contract EarnManager is Initializable, OwnableUpgradeable, UUPSUpgradeable {
         pool.totalAssets -= amount;
         userShares[poolId][user] -= sharesToBurn;
 
-        accounting.transferBalance(pool.poolAddress, user, pool.tokenId, amount, nonce, signature);
+        accounting.transferBalance(pool.poolAddress, user, pool.tokenId, amount, poolNonce, poolSignature);
+    }
+
+    /// @dev Verify the user's EIP-712 ``Withdraw`` consent, bind it to the
+    /// current ``withdrawNonces[user]`` value, then bump the nonce. Replay
+    /// protection: any subsequent attempt to reuse the same signature will
+    /// fail recovery (the embedded nonce no longer matches the storage value).
+    function _consumeWithdrawConsent(
+        address user,
+        bytes32 poolId,
+        uint256 amount,
+        bytes calldata userSignature
+    ) internal {
+        uint256 expectedNonce = withdrawNonces[user];
+        bytes32 structHash = keccak256(
+            abi.encode(WITHDRAW_TYPEHASH, user, poolId, amount, expectedNonce)
+        );
+        bytes32 digest = _hashTypedDataV4(structHash);
+        address signer = digest.recover(userSignature);
+        if (signer != user) revert InvalidWithdrawSignature();
+        withdrawNonces[user] = expectedNonce + 1;
     }
 
     function harvest(bytes32 poolId, uint256 yieldAmount) external onlyOwner {

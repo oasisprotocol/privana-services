@@ -20,6 +20,15 @@ TRANSFER_TYPES = {
     ]
 }
 
+WITHDRAW_TYPES = {
+    "Withdraw": [
+        {"name": "user", "type": "address"},
+        {"name": "poolId", "type": "bytes32"},
+        {"name": "amount", "type": "uint256"},
+        {"name": "nonce", "type": "uint256"},
+    ]
+}
+
 
 def _to_bytes32(hex_str: str) -> bytes:
     raw = bytes.fromhex(hex_str.removeprefix("0x"))
@@ -57,6 +66,47 @@ def sign_transfer(
         private_key,
         domain_data=domain_data,
         message_types=TRANSFER_TYPES,
+        message_data=message_data,
+    )
+
+    return "0x" + signed.signature.hex()
+
+
+def sign_withdraw_consent(
+    private_key: str,
+    chain_id: int,
+    earn_manager_address: str,
+    user_address: str,
+    pool_id: str,
+    amount: int,
+    nonce: int,
+) -> str:
+    """Sign a user's EIP-712 ``Withdraw`` consent for ``EarnManager.withdraw``.
+
+    Domain is the EarnManager (not the AccountingModule) because the message
+    authorizes burning the user's pool shares; the accounting transfer that
+    follows uses a separate, pool-side signature. Domain separation prevents
+    the same signature from being valid against accounting if their schemas
+    ever overlap.
+    """
+    domain_data = {
+        "name": "EarnManager",
+        "version": "1",
+        "chainId": chain_id,
+        "verifyingContract": earn_manager_address,
+    }
+
+    message_data = {
+        "user": user_address,
+        "poolId": _to_bytes32(pool_id),
+        "amount": amount,
+        "nonce": nonce,
+    }
+
+    signed = Account.sign_typed_data(
+        private_key,
+        domain_data=domain_data,
+        message_types=WITHDRAW_TYPES,
         message_data=message_data,
     )
 

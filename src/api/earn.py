@@ -117,6 +117,8 @@ async def withdraw(payload: WithdrawRequest) -> WithdrawResponse:
             pool_id_hex=payload.pool_id,
             user_address=payload.user_address,
             amount=payload.amount,
+            nonce=payload.nonce,
+            signature=payload.signature,
         )
         return WithdrawResponse(
             withdraw_id=result.get("tx_hash", ""),
@@ -124,6 +126,21 @@ async def withdraw(payload: WithdrawRequest) -> WithdrawResponse:
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/withdraw/nonce")
+async def get_withdraw_nonce(
+    user_address: str = Query(..., description="User wallet address"),
+) -> dict:
+    try:
+        service = get_vault_service()
+        nonce = await asyncio.to_thread(service.get_withdraw_nonce, user_address)
+        return {"user_address": user_address, "nonce": nonce}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Failed to fetch withdraw nonce")
+        raise HTTPException(status_code=500, detail="Failed to fetch withdraw nonce") from exc
 
 
 @router.get("/balance", response_model=BalanceListResponse)

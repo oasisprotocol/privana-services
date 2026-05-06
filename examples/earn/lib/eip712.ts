@@ -13,6 +13,15 @@ const TRANSFER_TYPES = {
   ]
 } as const;
 
+const WITHDRAW_TYPES = {
+  Withdraw: [
+    { name: "user", type: "address" },
+    { name: "poolId", type: "bytes32" },
+    { name: "amount", type: "uint256" },
+    { name: "nonce", type: "uint256" }
+  ]
+} as const;
+
 export const signTransfer = async (params: {
   userAddress: Address;
   toAddress: Address;
@@ -37,6 +46,37 @@ export const signTransfer = async (params: {
       userAddress: params.userAddress,
       toAddress: params.toAddress,
       tokenId: params.tokenId,
+      amount: params.amount,
+      nonce: BigInt(params.nonce)
+    }
+  });
+};
+
+export const signWithdrawConsent = async (params: {
+  user: Address;
+  poolId: Hex;
+  amount: bigint;
+  nonce: number;
+}): Promise<Hex> => {
+  if (!env.testUserPrivateKey || env.testUserPrivateKey.length <= 2) {
+    throw new Error("TEST_USER_PRIVATE_KEY is not configured");
+  }
+  if (!env.earnManagerContract || env.earnManagerContract.length <= 2) {
+    throw new Error("EARN_MANAGER_CONTRACT_ADDRESS is not configured");
+  }
+  const account = privateKeyToAccount(env.testUserPrivateKey);
+  return account.signTypedData({
+    domain: {
+      name: "EarnManager",
+      version: "1",
+      chainId: env.accountingChainId,
+      verifyingContract: env.earnManagerContract
+    },
+    types: WITHDRAW_TYPES,
+    primaryType: "Withdraw",
+    message: {
+      user: params.user,
+      poolId: params.poolId,
       amount: params.amount,
       nonce: BigInt(params.nonce)
     }

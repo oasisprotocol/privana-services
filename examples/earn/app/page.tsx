@@ -50,6 +50,7 @@ type ConfigPayload = {
   lpAddress: string;
   accountingContract: string;
   accountingChainId: number;
+  earnManagerContract: string;
   sapphireRpc: string;
   baseSepoliaRpc: string;
   aavePool: string;

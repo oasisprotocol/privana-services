@@ -7,6 +7,7 @@ export const env = {
   lpAddress: (process.env.LP_ADDRESS ?? "0x0000000000000000000000000000000000000000") as Address,
   accountingContract: (process.env.ACCOUNTING_CONTRACT_ADDRESS ?? "0x0000000000000000000000000000000000000000") as Address,
   accountingChainId: Number(process.env.ACCOUNTING_CHAIN_ID ?? 23295),
+  earnManagerContract: (process.env.EARN_MANAGER_CONTRACT_ADDRESS ?? "0x0000000000000000000000000000000000000000") as Address,
   sapphireRpc: process.env.SAPPHIRE_RPC_URL ?? "https://testnet.sapphire.oasis.io",
   baseSepoliaRpc: process.env.BASE_SEPOLIA_RPC_URL ?? "https://sepolia.base.org",
   aavePool: (process.env.AAVE_POOL_ADDRESS ?? "0x0000000000000000000000000000000000000000") as Address,
@@ -21,6 +22,7 @@ export type PublicEnv = {
   lpAddress: Address;
   accountingContract: Address;
   accountingChainId: number;
+  earnManagerContract: Address;
   sapphireRpc: string;
   baseSepoliaRpc: string;
   aavePool: Address;
@@ -36,6 +38,7 @@ export const publicEnv = (): PublicEnv => ({
   lpAddress: env.lpAddress,
   accountingContract: env.accountingContract,
   accountingChainId: env.accountingChainId,
+  earnManagerContract: env.earnManagerContract,
   sapphireRpc: env.sapphireRpc,
   baseSepoliaRpc: env.baseSepoliaRpc,
   aavePool: env.aavePool,

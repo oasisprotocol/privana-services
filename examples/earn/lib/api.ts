@@ -107,7 +107,19 @@ export const api = {
       body: JSON.stringify(body)
     }).then(parse<DepositResult>),
 
-  withdraw: (body: { pool_id: string; user_address: string; amount: string }) =>
+  withdrawNonce: (userAddress: string) =>
+    fetch(
+      `${env.apiBaseUrl}/v1/earn/withdraw/nonce?user_address=${userAddress}`,
+      { cache: "no-store" }
+    ).then(parse<{ user_address: string; nonce: number }>),
+
+  withdraw: (body: {
+    pool_id: string;
+    user_address: string;
+    amount: string;
+    nonce: number;
+    signature: string;
+  }) =>
     fetch(`${env.apiBaseUrl}/v1/earn/withdraw`, {
       method: "POST",
       headers: { "content-type": "application/json" },

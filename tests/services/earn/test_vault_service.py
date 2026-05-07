@@ -491,6 +491,40 @@ class TestEffectiveTotalAssets:
         assert await service.effective_total_assets(POOL_ID_HEX, 500) == 500
 
 
+class TestStrategyApyBpsSafe:
+    async def test_manual_strategy_returns_zero(self):
+        service, _, _, _ = _make_service()
+
+        assert await service.strategy_apy_bps_safe(POOL_ID_HEX) == 0
+
+    async def test_aave_strategy_returns_real_bps(self):
+        from src.services.earn.registry import StrategyRegistry
+
+        registry = StrategyRegistry()
+        strategy = MagicMock()
+        strategy.name = "aave-v3"
+        strategy.get_apy_bps = AsyncMock(return_value=487)
+        registry.register(POOL_ID_HEX, strategy)
+
+        service, _, _, _ = _make_service(registry=registry)
+
+        assert await service.strategy_apy_bps_safe(POOL_ID_HEX) == 487
+
+    async def test_strategy_failure_degrades_to_zero(self):
+        from src.services.earn.registry import StrategyRegistry
+
+        registry = StrategyRegistry()
+        strategy = MagicMock()
+        strategy.name = "aave-v3"
+        strategy.get_apy_bps = AsyncMock(side_effect=RuntimeError("rpc down"))
+        registry.register(POOL_ID_HEX, strategy)
+
+        service, _, _, _ = _make_service(registry=registry)
+
+        # Failure must not crash the listing endpoint; surface 0 instead.
+        assert await service.strategy_apy_bps_safe(POOL_ID_HEX) == 0
+
+
 class TestSyncTotalAssets:
     async def test_manual_strategy_is_noop(self):
         service, _, sapphire, _ = _make_service()

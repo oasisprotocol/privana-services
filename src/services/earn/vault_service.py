@@ -192,6 +192,24 @@ class VaultService:
             )
             return None
 
+    async def strategy_apy_bps_safe(self, pool_id_hex: str) -> int:
+        """Best-effort APY read for the configured strategy.
+
+        Returns the strategy's current APY in basis points. Falls back to 0
+        on any failure (Aave RPC down, asset not listed, etc.) so a flaky
+        external read never 500s ``/v1/earn/pools``. Same protective shape as
+        ``_strategy_total_assets_safe``: log and degrade rather than crash.
+        """
+        strategy = self._registry.get(pool_id_hex)
+        try:
+            return await strategy.get_apy_bps()
+        except Exception:
+            logger.exception(
+                "strategy_apy_bps_safe failed pool=%s strategy=%s",
+                pool_id_hex, strategy.name,
+            )
+            return 0
+
     async def deposit(
         self,
         pool_id_hex: str,

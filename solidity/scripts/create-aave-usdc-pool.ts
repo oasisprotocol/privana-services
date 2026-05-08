@@ -33,7 +33,7 @@ async function main() {
   await tx.wait();
   console.log('Pool created.');
 
-  const pool = await earnManager.getPool(poolId);
+  const pool = await earnManager.pools(poolId);
   console.log('Pool state:', {
     tokenId: pool.tokenId,
     poolAddress: pool.poolAddress,

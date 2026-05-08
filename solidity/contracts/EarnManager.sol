@@ -21,7 +21,9 @@ contract EarnManager is
 {
     using ECDSA for bytes32;
 
-    IAccounting public accounting;
+    /// -----------------------------------------------------------------------
+    /// Type declarations
+    /// -----------------------------------------------------------------------
 
     struct Pool {
         bytes32 tokenId;
@@ -31,9 +33,23 @@ contract EarnManager is
         bool active;
     }
 
+    /// -----------------------------------------------------------------------
+    /// Constants
+    /// -----------------------------------------------------------------------
+
+    /// @dev EIP-712 typehash for the user's withdraw consent message.
+    bytes32 public constant WITHDRAW_TYPEHASH =
+        keccak256("Withdraw(address user,bytes32 poolId,uint256 amount,uint256 nonce)");
+
+    /// -----------------------------------------------------------------------
+    /// State variables
+    /// -----------------------------------------------------------------------
+
+    IAccounting public accounting;
+
     mapping(bytes32 => Pool) public pools;
-    mapping(bytes32 => mapping(address => uint256)) public userShares;
     bytes32[] public poolIds;
+    mapping(bytes32 => mapping(address => uint256)) public userShares;
 
     /// @notice Per-user monotonic nonce for `withdraw` consent signatures.
     /// @dev Mirrors the accounting transfer-nonce shape (per-user global, not
@@ -46,9 +62,9 @@ contract EarnManager is
     /// new variable to keep the total occupied storage size constant.
     uint256[50] private __gap;
 
-    /// @dev EIP-712 typehash for the user's withdraw consent message.
-    bytes32 public constant WITHDRAW_TYPEHASH =
-        keccak256("Withdraw(address user,bytes32 poolId,uint256 amount,uint256 nonce)");
+    /// -----------------------------------------------------------------------
+    /// Errors
+    /// -----------------------------------------------------------------------
 
     error ZeroAddress();
     error ZeroAmount();
@@ -57,6 +73,10 @@ contract EarnManager is
     error PoolAlreadyExists();
     error InsufficientShares();
     error InvalidWithdrawSignature();
+
+    /// -----------------------------------------------------------------------
+    /// Constructor / initializer
+    /// -----------------------------------------------------------------------
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
@@ -71,7 +91,14 @@ contract EarnManager is
         accounting = IAccounting(_accounting);
     }
 
-    function _authorizeUpgrade(address newImplementation) internal override onlyOwner {}
+    /// -----------------------------------------------------------------------
+    /// External: admin
+    /// -----------------------------------------------------------------------
+
+    function setAccounting(address _accounting) external onlyOwner {
+        if (_accounting == address(0)) revert ZeroAddress();
+        accounting = IAccounting(_accounting);
+    }
 
     function createPool(
         bytes32 poolId,
@@ -89,6 +116,31 @@ contract EarnManager is
         });
         poolIds.push(poolId);
     }
+
+    function setPoolActive(bytes32 poolId, bool active) external onlyOwner {
+        if (pools[poolId].poolAddress == address(0)) revert PoolNotFound();
+        pools[poolId].active = active;
+    }
+
+    function harvest(bytes32 poolId, uint256 yieldAmount) external onlyOwner {
+        Pool storage pool = pools[poolId];
+        if (pool.poolAddress == address(0)) revert PoolNotFound();
+        pool.totalAssets += yieldAmount;
+    }
+
+    /// @dev Replace totalAssets with an externally observed value. Used to
+    /// reflect accrued yield held in an off-chain strategy (e.g. Aave aToken
+    /// balance) before share math runs. Total shares are unchanged, so any
+    /// delta dilutes or boosts each share's claim proportionally.
+    function syncTotalAssets(bytes32 poolId, uint256 newTotalAssets) external onlyOwner {
+        Pool storage pool = pools[poolId];
+        if (pool.poolAddress == address(0)) revert PoolNotFound();
+        pool.totalAssets = newTotalAssets;
+    }
+
+    /// -----------------------------------------------------------------------
+    /// External: user flows
+    /// -----------------------------------------------------------------------
 
     function deposit(
         bytes32 poolId,
@@ -159,45 +211,9 @@ contract EarnManager is
         accounting.transferBalance(pool.poolAddress, user, pool.tokenId, amount, poolNonce, poolSignature);
     }
 
-    /// @dev Verify the user's EIP-712 ``Withdraw`` consent, bind it to the
-    /// current ``withdrawNonces[user]`` value, then bump the nonce. Replay
-    /// protection: any subsequent attempt to reuse the same signature will
-    /// fail recovery (the embedded nonce no longer matches the storage value).
-    function _consumeWithdrawConsent(
-        address user,
-        bytes32 poolId,
-        uint256 amount,
-        bytes calldata userSignature
-    ) internal {
-        uint256 expectedNonce = withdrawNonces[user];
-        bytes32 structHash = keccak256(
-            abi.encode(WITHDRAW_TYPEHASH, user, poolId, amount, expectedNonce)
-        );
-        bytes32 digest = _hashTypedDataV4(structHash);
-        address signer = digest.recover(userSignature);
-        if (signer != user) revert InvalidWithdrawSignature();
-        withdrawNonces[user] = expectedNonce + 1;
-    }
-
-    function harvest(bytes32 poolId, uint256 yieldAmount) external onlyOwner {
-        Pool storage pool = pools[poolId];
-        if (pool.poolAddress == address(0)) revert PoolNotFound();
-        pool.totalAssets += yieldAmount;
-    }
-
-    /// @dev Replace totalAssets with an externally observed value. Used to
-    /// reflect accrued yield held in an off-chain strategy (e.g. Aave aToken
-    /// balance) before share math runs. Total shares are unchanged, so any
-    /// delta dilutes or boosts each share's claim proportionally.
-    function syncTotalAssets(bytes32 poolId, uint256 newTotalAssets) external onlyOwner {
-        Pool storage pool = pools[poolId];
-        if (pool.poolAddress == address(0)) revert PoolNotFound();
-        pool.totalAssets = newTotalAssets;
-    }
-
-    function getPool(bytes32 poolId) external view returns (Pool memory) {
-        return pools[poolId];
-    }
+    /// -----------------------------------------------------------------------
+    /// External: views
+    /// -----------------------------------------------------------------------
 
     function getUserShares(address user, bytes32 poolId, bytes calldata token) external view returns (uint256) {
         accounting.balanceOf(user, bytes32(0), token);
@@ -224,13 +240,29 @@ contract EarnManager is
         return poolIds.length;
     }
 
-    function setPoolActive(bytes32 poolId, bool active) external onlyOwner {
-        if (pools[poolId].poolAddress == address(0)) revert PoolNotFound();
-        pools[poolId].active = active;
-    }
+    /// -----------------------------------------------------------------------
+    /// Internal
+    /// -----------------------------------------------------------------------
 
-    function setAccounting(address _accounting) external onlyOwner {
-        if (_accounting == address(0)) revert ZeroAddress();
-        accounting = IAccounting(_accounting);
+    function _authorizeUpgrade(address newImplementation) internal override onlyOwner {}
+
+    /// @dev Verify the user's EIP-712 ``Withdraw`` consent, bind it to the
+    /// current ``withdrawNonces[user]`` value, then bump the nonce. Replay
+    /// protection: any subsequent attempt to reuse the same signature will
+    /// fail recovery (the embedded nonce no longer matches the storage value).
+    function _consumeWithdrawConsent(
+        address user,
+        bytes32 poolId,
+        uint256 amount,
+        bytes calldata userSignature
+    ) internal {
+        uint256 expectedNonce = withdrawNonces[user];
+        bytes32 structHash = keccak256(
+            abi.encode(WITHDRAW_TYPEHASH, user, poolId, amount, expectedNonce)
+        );
+        bytes32 digest = _hashTypedDataV4(structHash);
+        address signer = digest.recover(userSignature);
+        if (signer != user) revert InvalidWithdrawSignature();
+        withdrawNonces[user] = expectedNonce + 1;
     }
 }

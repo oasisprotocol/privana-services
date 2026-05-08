@@ -91,7 +91,7 @@ describe('EarnManager', function () {
       const { earnManager, poolWallet } = await loadFixture(deployFixture);
       await earnManager.createPool(POOL_ID, TOKEN_ID, poolWallet.address);
 
-      const pool = await earnManager.getPool(POOL_ID);
+      const pool = await earnManager.pools(POOL_ID);
       expect(pool.tokenId).to.equal(TOKEN_ID);
       expect(pool.poolAddress).to.equal(poolWallet.address);
       expect(pool.totalShares).to.equal(0);
@@ -135,7 +135,7 @@ describe('EarnManager', function () {
 
       await earnManager.deposit(POOL_ID, user.address, amount, 0, DUMMY_SIG);
 
-      const pool = await earnManager.getPool(POOL_ID);
+      const pool = await earnManager.pools(POOL_ID);
       expect(pool.totalShares).to.equal(amount);
       expect(pool.totalAssets).to.equal(amount);
       expect(await earnManager.getUserShares(user.address, POOL_ID, '0x')).to.equal(amount);
@@ -297,7 +297,7 @@ describe('EarnManager', function () {
       const sharesBefore = await earnManager.getUserShares(user.address, POOL_ID, '0x');
       await earnManager.harvest(POOL_ID, ethers.parseUnits('50', 6));
 
-      const pool = await earnManager.getPool(POOL_ID);
+      const pool = await earnManager.pools(POOL_ID);
       expect(pool.totalAssets).to.equal(ethers.parseUnits('1050', 6));
       expect(pool.totalShares).to.equal(amount);
       expect(await earnManager.getUserShares(user.address, POOL_ID, '0x')).to.equal(sharesBefore);
@@ -330,7 +330,7 @@ describe('EarnManager', function () {
       const newTotal = ethers.parseUnits('1100', 6);
       await earnManager.syncTotalAssets(POOL_ID, newTotal);
 
-      const pool = await earnManager.getPool(POOL_ID);
+      const pool = await earnManager.pools(POOL_ID);
       expect(pool.totalAssets).to.equal(newTotal);
       expect(pool.totalShares).to.equal(amount);
       expect(await earnManager.getUserShares(user.address, POOL_ID, '0x')).to.equal(sharesBefore);
@@ -346,7 +346,7 @@ describe('EarnManager', function () {
       const newTotal = ethers.parseUnits('900', 6);
       await earnManager.syncTotalAssets(POOL_ID, newTotal);
 
-      const pool = await earnManager.getPool(POOL_ID);
+      const pool = await earnManager.pools(POOL_ID);
       expect(pool.totalAssets).to.equal(newTotal);
     });
 
@@ -378,7 +378,7 @@ describe('EarnManager', function () {
 
       await earnManager.harvest(POOL_ID, ethers.parseUnits('150', 6));
 
-      const pool = await earnManager.getPool(POOL_ID);
+      const pool = await earnManager.pools(POOL_ID);
       // totalAssets = 1000 + 50 + 2000 + 150 = 3200
       expect(pool.totalAssets).to.equal(ethers.parseUnits('3200', 6));
 
@@ -428,11 +428,11 @@ describe('EarnManager', function () {
       const { earnManager } = await deployWithPool();
 
       await earnManager.setPoolActive(POOL_ID, false);
-      let pool = await earnManager.getPool(POOL_ID);
+      let pool = await earnManager.pools(POOL_ID);
       expect(pool.active).to.equal(false);
 
       await earnManager.setPoolActive(POOL_ID, true);
-      pool = await earnManager.getPool(POOL_ID);
+      pool = await earnManager.pools(POOL_ID);
       expect(pool.active).to.equal(true);
     });
 

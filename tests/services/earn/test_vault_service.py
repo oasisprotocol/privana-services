@@ -54,7 +54,7 @@ def _make_service(registry=None):
 class TestGetPool:
     def test_returns_pool_data(self):
         service, contract, _, _ = _make_service()
-        contract.functions.getPool.return_value.call.return_value = (
+        contract.functions.pools.return_value.call.return_value = (
             bytes.fromhex(USDC_TOKEN_ID[2:]),
             POOL_ADDRESS,
             1000,
@@ -76,7 +76,7 @@ class TestListPools:
         pool_id_bytes = bytes.fromhex(POOL_ID_HEX[2:])
         contract.functions.getPoolCount.return_value.call.return_value = 1
         contract.functions.poolIds.return_value.call.return_value = pool_id_bytes
-        contract.functions.getPool.return_value.call.return_value = (
+        contract.functions.pools.return_value.call.return_value = (
             bytes.fromhex(USDC_TOKEN_ID[2:]),
             POOL_ADDRESS,
             1000,
@@ -112,7 +112,7 @@ class TestConvertFunctions:
 class TestDepositQuote:
     async def test_returns_quote(self):
         service, contract, _, acct = _make_service()
-        contract.functions.getPool.return_value.call.return_value = (
+        contract.functions.pools.return_value.call.return_value = (
             bytes.fromhex(USDC_TOKEN_ID[2:]),
             POOL_ADDRESS,
             1000,
@@ -130,7 +130,7 @@ class TestDepositQuote:
 
     async def test_rejects_missing_pool(self):
         service, contract, _, _ = _make_service()
-        contract.functions.getPool.return_value.call.return_value = (
+        contract.functions.pools.return_value.call.return_value = (
             b"\x00" * 32,
             "0x0000000000000000000000000000000000000000",
             0, 0, False,
@@ -140,7 +140,7 @@ class TestDepositQuote:
 
     async def test_rejects_inactive_pool(self):
         service, contract, _, _ = _make_service()
-        contract.functions.getPool.return_value.call.return_value = (
+        contract.functions.pools.return_value.call.return_value = (
             bytes.fromhex(USDC_TOKEN_ID[2:]),
             POOL_ADDRESS,
             1000, 1050, False,
@@ -152,7 +152,7 @@ class TestDepositQuote:
 class TestDeposit:
     async def test_successful_deposit(self, test_db):
         service, contract, saph, _ = _make_service()
-        contract.functions.getPool.return_value.call.return_value = (
+        contract.functions.pools.return_value.call.return_value = (
             bytes.fromhex(USDC_TOKEN_ID[2:]),
             POOL_ADDRESS,
             1000, 1050, True,
@@ -176,7 +176,7 @@ class TestDeposit:
 
     async def test_failed_deposit_returns_failed_status(self, test_db):
         service, contract, saph, _ = _make_service()
-        contract.functions.getPool.return_value.call.return_value = (
+        contract.functions.pools.return_value.call.return_value = (
             bytes.fromhex(USDC_TOKEN_ID[2:]),
             POOL_ADDRESS,
             1000, 1050, True,
@@ -198,7 +198,7 @@ class TestDeposit:
 class TestWithdraw:
     async def test_insufficient_shares_raises(self):
         service, contract, _, _ = _make_service()
-        contract.functions.getPool.return_value.call.return_value = (
+        contract.functions.pools.return_value.call.return_value = (
             bytes.fromhex(USDC_TOKEN_ID[2:]),
             POOL_ADDRESS,
             1000, 1050, True,
@@ -221,7 +221,7 @@ class TestWithdraw:
 
     async def test_successful_withdraw(self, test_db):
         service, contract, saph, acct = _make_service()
-        contract.functions.getPool.return_value.call.return_value = (
+        contract.functions.pools.return_value.call.return_value = (
             bytes.fromhex(USDC_TOKEN_ID[2:]),
             POOL_ADDRESS,
             1000, 1050, True,
@@ -244,7 +244,7 @@ class TestWithdraw:
 
     async def test_failed_withdraw_returns_failed_status(self, test_db):
         service, contract, saph, acct = _make_service()
-        contract.functions.getPool.return_value.call.return_value = (
+        contract.functions.pools.return_value.call.return_value = (
             bytes.fromhex(USDC_TOKEN_ID[2:]),
             POOL_ADDRESS,
             1000, 1050, True,
@@ -267,7 +267,7 @@ class TestWithdraw:
 class TestExchangeRateZeroShares:
     async def test_deposit_quote_with_zero_shares_pool(self):
         service, contract, _, acct = _make_service()
-        contract.functions.getPool.return_value.call.return_value = (
+        contract.functions.pools.return_value.call.return_value = (
             bytes.fromhex(USDC_TOKEN_ID[2:]),
             POOL_ADDRESS,
             0, 0, True,
@@ -283,7 +283,7 @@ class TestExchangeRateZeroShares:
         pool_id_bytes = bytes.fromhex(POOL_ID_HEX[2:])
         contract.functions.getPoolCount.return_value.call.return_value = 1
         contract.functions.poolIds.return_value.call.return_value = pool_id_bytes
-        contract.functions.getPool.return_value.call.return_value = (
+        contract.functions.pools.return_value.call.return_value = (
             bytes.fromhex(USDC_TOKEN_ID[2:]),
             POOL_ADDRESS,
             0, 0, True,
@@ -301,7 +301,7 @@ class TestGetAllBalances:
         pool_id_bytes = bytes.fromhex(POOL_ID_HEX[2:])
         contract.functions.getPoolCount.return_value.call.return_value = 1
         contract.functions.poolIds.return_value.call.return_value = pool_id_bytes
-        contract.functions.getPool.return_value.call.return_value = (
+        contract.functions.pools.return_value.call.return_value = (
             bytes.fromhex(USDC_TOKEN_ID[2:]),
             POOL_ADDRESS,
             1000, 1050, True,
@@ -320,7 +320,7 @@ class TestGetAllBalances:
         pool_id_bytes = bytes.fromhex(POOL_ID_HEX[2:])
         contract.functions.getPoolCount.return_value.call.return_value = 1
         contract.functions.poolIds.return_value.call.return_value = pool_id_bytes
-        contract.functions.getPool.return_value.call.return_value = (
+        contract.functions.pools.return_value.call.return_value = (
             bytes.fromhex(USDC_TOKEN_ID[2:]),
             POOL_ADDRESS,
             1000, 1050, True,
@@ -342,7 +342,7 @@ class TestStrategyRouting:
         registry.register(POOL_ID_HEX, strategy)
 
         service, contract, _, _ = _make_service(registry=registry)
-        contract.functions.getPool.return_value.call.return_value = (
+        contract.functions.pools.return_value.call.return_value = (
             bytes.fromhex(USDC_TOKEN_ID[2:]),
             POOL_ADDRESS,
             1000, 1050, True,
@@ -366,7 +366,7 @@ class TestStrategyRouting:
         registry.register(POOL_ID_HEX, strategy)
 
         service, contract, _, _ = _make_service(registry=registry)
-        contract.functions.getPool.return_value.call.return_value = (
+        contract.functions.pools.return_value.call.return_value = (
             bytes.fromhex(USDC_TOKEN_ID[2:]),
             POOL_ADDRESS,
             1000, 1050, True,
@@ -382,7 +382,7 @@ class TestStrategyRouting:
 
     async def test_deposit_manual_strategy_skips_routing(self, test_db):
         service, contract, _, _ = _make_service()
-        contract.functions.getPool.return_value.call.return_value = (
+        contract.functions.pools.return_value.call.return_value = (
             bytes.fromhex(USDC_TOKEN_ID[2:]),
             POOL_ADDRESS,
             1000, 1050, True,
@@ -405,7 +405,7 @@ class TestStrategyRouting:
         registry.register(POOL_ID_HEX, strategy)
 
         service, contract, _, _ = _make_service(registry=registry)
-        contract.functions.getPool.return_value.call.return_value = (
+        contract.functions.pools.return_value.call.return_value = (
             bytes.fromhex(USDC_TOKEN_ID[2:]),
             POOL_ADDRESS,
             1000, 1050, True,
@@ -429,7 +429,7 @@ class TestStrategyRouting:
         registry.register(POOL_ID_HEX, strategy)
 
         service, contract, sapphire, _ = _make_service(registry=registry)
-        contract.functions.getPool.return_value.call.return_value = (
+        contract.functions.pools.return_value.call.return_value = (
             bytes.fromhex(USDC_TOKEN_ID[2:]),
             POOL_ADDRESS,
             1000, 1050, True,
@@ -544,7 +544,7 @@ class TestSyncTotalAssets:
         registry.register(POOL_ID_HEX, strategy)
 
         service, contract, sapphire, _ = _make_service(registry=registry)
-        contract.functions.getPool.return_value.call.return_value = (
+        contract.functions.pools.return_value.call.return_value = (
             bytes.fromhex(USDC_TOKEN_ID[2:]),
             POOL_ADDRESS,
             1000, 1500, True,
@@ -565,7 +565,7 @@ class TestSyncTotalAssets:
         registry.register(POOL_ID_HEX, strategy)
 
         service, contract, sapphire, _ = _make_service(registry=registry)
-        contract.functions.getPool.return_value.call.return_value = (
+        contract.functions.pools.return_value.call.return_value = (
             bytes.fromhex(USDC_TOKEN_ID[2:]),
             POOL_ADDRESS,
             1000, 1500, True,
@@ -605,7 +605,7 @@ class TestSyncTotalAssets:
         registry.register(POOL_ID_HEX, strategy)
 
         service, contract, sapphire, _ = _make_service(registry=registry)
-        contract.functions.getPool.return_value.call.return_value = (
+        contract.functions.pools.return_value.call.return_value = (
             bytes.fromhex(USDC_TOKEN_ID[2:]),
             POOL_ADDRESS,
             1000, 1500, True,
@@ -644,7 +644,7 @@ class TestLiveAUMInResponses:
         registry.register(POOL_ID_HEX, strategy)
 
         service, contract, _, _ = _make_service(registry=registry)
-        contract.functions.getPool.return_value.call.return_value = (
+        contract.functions.pools.return_value.call.return_value = (
             bytes.fromhex(USDC_TOKEN_ID[2:]),
             POOL_ADDRESS,
             1000, 1000, True,
@@ -667,7 +667,7 @@ class TestLiveAUMInResponses:
         pool_id_bytes = bytes.fromhex(POOL_ID_HEX[2:])
         contract.functions.getPoolCount.return_value.call.return_value = 1
         contract.functions.poolIds.return_value.call.return_value = pool_id_bytes
-        contract.functions.getPool.return_value.call.return_value = (
+        contract.functions.pools.return_value.call.return_value = (
             bytes.fromhex(USDC_TOKEN_ID[2:]),
             POOL_ADDRESS,
             1000, 1000, True,

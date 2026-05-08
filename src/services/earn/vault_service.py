@@ -73,7 +73,7 @@ class VaultService:
         await strategy.withdraw_from_earn(amount)
 
     def get_pool(self, pool_id: bytes) -> dict:
-        pool = self.contract.functions.getPool(pool_id).call()
+        pool = self.contract.functions.pools(pool_id).call()
         return {
             "token_id": "0x" + pool[0].hex(),
             "pool_address": pool[1],

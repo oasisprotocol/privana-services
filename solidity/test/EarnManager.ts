@@ -46,7 +46,7 @@ describe('EarnManager', function () {
     const factory = await ethers.getContractFactory('EarnManager');
     const earnManager = await upgrades.deployProxy(
       factory,
-      [await mockAccounting.getAddress()],
+      [await mockAccounting.getAddress(), owner.address],
       { kind: 'uups', initializer: 'initialize' },
     );
     await earnManager.waitForDeployment();
@@ -72,10 +72,16 @@ describe('EarnManager', function () {
       expect(await earnManager.owner()).to.equal(owner.address);
     });
 
+    it('should set deployer as poolAdmin', async function () {
+      const { earnManager, owner } = await loadFixture(deployFixture);
+      expect(await earnManager.poolAdmin()).to.equal(owner.address);
+    });
+
     it('should reject zero accounting address', async function () {
+      const { owner } = await loadFixture(deployFixture);
       const factory = await ethers.getContractFactory('EarnManager');
       await expect(
-        upgrades.deployProxy(factory, [ethers.ZeroAddress], {
+        upgrades.deployProxy(factory, [ethers.ZeroAddress, owner.address], {
           kind: 'uups',
           initializer: 'initialize',
         }),
@@ -83,6 +89,41 @@ describe('EarnManager', function () {
         await loadFixture(deployFixture).then((f) => f.earnManager),
         'ZeroAddress',
       );
+    });
+
+    it('should reject zero pool admin address', async function () {
+      const { mockAccounting } = await loadFixture(deployFixture);
+      const factory = await ethers.getContractFactory('EarnManager');
+      await expect(
+        upgrades.deployProxy(
+          factory,
+          [await mockAccounting.getAddress(), ethers.ZeroAddress],
+          { kind: 'uups', initializer: 'initialize' },
+        ),
+      ).to.be.revertedWithCustomError(
+        await loadFixture(deployFixture).then((f) => f.earnManager),
+        'ZeroAddress',
+      );
+    });
+  });
+
+  describe('setPoolAdmin', function () {
+    it('should rotate the pool admin', async function () {
+      const { earnManager, otherUser } = await loadFixture(deployFixture);
+      await earnManager.setPoolAdmin(otherUser.address);
+      expect(await earnManager.poolAdmin()).to.equal(otherUser.address);
+    });
+
+    it('should reject zero address', async function () {
+      const { earnManager } = await loadFixture(deployFixture);
+      await expect(earnManager.setPoolAdmin(ethers.ZeroAddress))
+        .to.be.revertedWithCustomError(earnManager, 'ZeroAddress');
+    });
+
+    it('should reject non-owner', async function () {
+      const { earnManager, user, otherUser } = await loadFixture(deployFixture);
+      await expect(earnManager.connect(user).setPoolAdmin(otherUser.address))
+        .to.be.revertedWithCustomError(earnManager, 'OwnableUnauthorizedAccount');
     });
   });
 
@@ -119,10 +160,10 @@ describe('EarnManager', function () {
         .to.be.revertedWithCustomError(earnManager, 'ZeroAddress');
     });
 
-    it('should reject non-owner', async function () {
+    it('should reject non-pool-admin', async function () {
       const { earnManager, user, poolWallet } = await loadFixture(deployFixture);
       await expect(earnManager.connect(user).createPool(POOL_ID, TOKEN_ID, poolWallet.address))
-        .to.be.revertedWithCustomError(earnManager, 'OwnableUnauthorizedAccount');
+        .to.be.revertedWithCustomError(earnManager, 'NotPoolAdmin');
     });
   });
 
@@ -303,10 +344,10 @@ describe('EarnManager', function () {
       expect(await earnManager.getUserShares(user.address, POOL_ID, '0x')).to.equal(sharesBefore);
     });
 
-    it('should reject non-owner', async function () {
+    it('should reject non-pool-admin', async function () {
       const { earnManager, user } = await deployWithPool();
       await expect(earnManager.connect(user).harvest(POOL_ID, 1000))
-        .to.be.revertedWithCustomError(earnManager, 'OwnableUnauthorizedAccount');
+        .to.be.revertedWithCustomError(earnManager, 'NotPoolAdmin');
     });
 
     it('should reject nonexistent pool', async function () {
@@ -350,10 +391,10 @@ describe('EarnManager', function () {
       expect(pool.totalAssets).to.equal(newTotal);
     });
 
-    it('should reject non-owner', async function () {
+    it('should reject non-pool-admin', async function () {
       const { earnManager, user } = await deployWithPool();
       await expect(earnManager.connect(user).syncTotalAssets(POOL_ID, 1000))
-        .to.be.revertedWithCustomError(earnManager, 'OwnableUnauthorizedAccount');
+        .to.be.revertedWithCustomError(earnManager, 'NotPoolAdmin');
     });
 
     it('should reject nonexistent pool', async function () {
@@ -436,10 +477,10 @@ describe('EarnManager', function () {
       expect(pool.active).to.equal(true);
     });
 
-    it('should reject non-owner', async function () {
+    it('should reject non-pool-admin', async function () {
       const { earnManager, user } = await deployWithPool();
       await expect(earnManager.connect(user).setPoolActive(POOL_ID, false))
-        .to.be.revertedWithCustomError(earnManager, 'OwnableUnauthorizedAccount');
+        .to.be.revertedWithCustomError(earnManager, 'NotPoolAdmin');
     });
 
     it('should reject nonexistent pool', async function () {

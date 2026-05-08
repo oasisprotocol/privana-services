@@ -85,6 +85,11 @@
       "type": "error"
     },
     {
+      "inputs": [],
+      "name": "NotPoolAdmin",
+      "type": "error"
+    },
+    {
       "inputs": [
         {
           "internalType": "address",
@@ -317,7 +322,7 @@
         },
         {
           "internalType": "address",
-          "name": "user",
+          "name": "toUser",
           "type": "address"
         },
         {
@@ -379,52 +384,6 @@
           "internalType": "uint256[]",
           "name": "extensions",
           "type": "uint256[]"
-        }
-      ],
-      "stateMutability": "view",
-      "type": "function"
-    },
-    {
-      "inputs": [
-        {
-          "internalType": "bytes32",
-          "name": "poolId",
-          "type": "bytes32"
-        }
-      ],
-      "name": "getPool",
-      "outputs": [
-        {
-          "components": [
-            {
-              "internalType": "bytes32",
-              "name": "tokenId",
-              "type": "bytes32"
-            },
-            {
-              "internalType": "address",
-              "name": "poolAddress",
-              "type": "address"
-            },
-            {
-              "internalType": "uint256",
-              "name": "totalShares",
-              "type": "uint256"
-            },
-            {
-              "internalType": "uint256",
-              "name": "totalAssets",
-              "type": "uint256"
-            },
-            {
-              "internalType": "bool",
-              "name": "active",
-              "type": "bool"
-            }
-          ],
-          "internalType": "struct EarnManager.Pool",
-          "name": "",
-          "type": "tuple"
         }
       ],
       "stateMutability": "view",
@@ -496,6 +455,11 @@
           "internalType": "address",
           "name": "_accounting",
           "type": "address"
+        },
+        {
+          "internalType": "address",
+          "name": "_poolAdmin",
+          "type": "address"
         }
       ],
       "name": "initialize",
@@ -506,6 +470,19 @@
     {
       "inputs": [],
       "name": "owner",
+      "outputs": [
+        {
+          "internalType": "address",
+          "name": "",
+          "type": "address"
+        }
+      ],
+      "stateMutability": "view",
+      "type": "function"
+    },
+    {
+      "inputs": [],
+      "name": "poolAdmin",
       "outputs": [
         {
           "internalType": "address",
@@ -621,6 +598,19 @@
         }
       ],
       "name": "setPoolActive",
+      "outputs": [],
+      "stateMutability": "nonpayable",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "address",
+          "name": "newAdmin",
+          "type": "address"
+        }
+      ],
+      "name": "setPoolAdmin",
       "outputs": [],
       "stateMutability": "nonpayable",
       "type": "function"

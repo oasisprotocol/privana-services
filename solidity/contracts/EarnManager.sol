@@ -47,6 +47,11 @@ contract EarnManager is
 
     IAccounting public accounting;
 
+    /// @notice Account authorized to manage pools (create, pause, harvest,
+    /// sync). Separated from `owner` so day-to-day operations don't share a
+    /// key with proxy upgrades / accounting reconfiguration.
+    address public poolAdmin;
+
     mapping(bytes32 => Pool) public pools;
     bytes32[] public poolIds;
     mapping(bytes32 => mapping(address => uint256)) public userShares;
@@ -60,7 +65,7 @@ contract EarnManager is
     /// @dev Reserved slots for future state additions without disturbing the
     /// layout of any inheriting contract or proxy. Decrement when adding a
     /// new variable to keep the total occupied storage size constant.
-    uint256[50] private __gap;
+    uint256[49] private __gap;
 
     /// -----------------------------------------------------------------------
     /// Errors
@@ -73,6 +78,16 @@ contract EarnManager is
     error PoolAlreadyExists();
     error InsufficientShares();
     error InvalidWithdrawSignature();
+    error NotPoolAdmin();
+
+    /// -----------------------------------------------------------------------
+    /// Modifiers
+    /// -----------------------------------------------------------------------
+
+    modifier onlyPoolAdmin() {
+        if (msg.sender != poolAdmin) revert NotPoolAdmin();
+        _;
+    }
 
     /// -----------------------------------------------------------------------
     /// Constructor / initializer
@@ -83,12 +98,14 @@ contract EarnManager is
         _disableInitializers();
     }
 
-    function initialize(address _accounting) external initializer {
+    function initialize(address _accounting, address _poolAdmin) external initializer {
         if (_accounting == address(0)) revert ZeroAddress();
+        if (_poolAdmin == address(0)) revert ZeroAddress();
         __Ownable_init(msg.sender);
         __UUPSUpgradeable_init();
         __EIP712_init("EarnManager", "1");
         accounting = IAccounting(_accounting);
+        poolAdmin = _poolAdmin;
     }
 
     /// -----------------------------------------------------------------------
@@ -100,11 +117,16 @@ contract EarnManager is
         accounting = IAccounting(_accounting);
     }
 
+    function setPoolAdmin(address newAdmin) external onlyOwner {
+        if (newAdmin == address(0)) revert ZeroAddress();
+        poolAdmin = newAdmin;
+    }
+
     function createPool(
         bytes32 poolId,
         bytes32 tokenId,
         address poolAddress
-    ) external onlyOwner {
+    ) external onlyPoolAdmin {
         if (pools[poolId].poolAddress != address(0)) revert PoolAlreadyExists();
         if (poolAddress == address(0)) revert ZeroAddress();
         pools[poolId] = Pool({
@@ -117,12 +139,12 @@ contract EarnManager is
         poolIds.push(poolId);
     }
 
-    function setPoolActive(bytes32 poolId, bool active) external onlyOwner {
+    function setPoolActive(bytes32 poolId, bool active) external onlyPoolAdmin {
         if (pools[poolId].poolAddress == address(0)) revert PoolNotFound();
         pools[poolId].active = active;
     }
 
-    function harvest(bytes32 poolId, uint256 yieldAmount) external onlyOwner {
+    function harvest(bytes32 poolId, uint256 yieldAmount) external onlyPoolAdmin {
         Pool storage pool = pools[poolId];
         if (pool.poolAddress == address(0)) revert PoolNotFound();
         pool.totalAssets += yieldAmount;
@@ -132,7 +154,7 @@ contract EarnManager is
     /// reflect accrued yield held in an off-chain strategy (e.g. Aave aToken
     /// balance) before share math runs. Total shares are unchanged, so any
     /// delta dilutes or boosts each share's claim proportionally.
-    function syncTotalAssets(bytes32 poolId, uint256 newTotalAssets) external onlyOwner {
+    function syncTotalAssets(bytes32 poolId, uint256 newTotalAssets) external onlyPoolAdmin {
         Pool storage pool = pools[poolId];
         if (pool.poolAddress == address(0)) revert PoolNotFound();
         pool.totalAssets = newTotalAssets;

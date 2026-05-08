@@ -10,13 +10,16 @@ async function main() {
   console.log('Accounting proxy:', ACCOUNTING_PROXY);
 
   // UUPS proxy: implementation deployed first, then ERC1967Proxy points at it
-  // and runs `initialize(_accounting)` atomically. Returned address is the
-  // proxy. Future upgrades go through `upgrades.upgradeProxy(proxy, NewImpl)`.
+  // and runs `initialize(_accounting, _poolAdmin)` atomically. Returned
+  // address is the proxy. Future upgrades go through
+  // `upgrades.upgradeProxy(proxy, NewImpl)`.
+  // Pool admin defaults to the deployer; rotate later via `setPoolAdmin`.
   const factory = await ethers.getContractFactory('EarnManager');
-  const proxy = await upgrades.deployProxy(factory, [ACCOUNTING_PROXY], {
-    kind: 'uups',
-    initializer: 'initialize',
-  });
+  const proxy = await upgrades.deployProxy(
+    factory,
+    [ACCOUNTING_PROXY, deployer.address],
+    { kind: 'uups', initializer: 'initialize' },
+  );
   await proxy.waitForDeployment();
 
   const proxyAddress = await proxy.getAddress();

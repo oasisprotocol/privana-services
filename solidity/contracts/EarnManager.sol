@@ -144,7 +144,7 @@ contract EarnManager is
 
     function deposit(
         bytes32 poolId,
-        address user,
+        address toUser,
         uint256 amount,
         uint256 nonce,
         bytes calldata signature
@@ -153,7 +153,7 @@ contract EarnManager is
         if (!pool.active) revert PoolNotActive();
         if (amount == 0) revert ZeroAmount();
 
-        accounting.transferBalance(user, pool.poolAddress, pool.tokenId, amount, nonce, signature);
+        accounting.transferBalance(toUser, pool.poolAddress, pool.tokenId, amount, nonce, signature);
 
         /// @dev shares = amount * totalShares / totalAssets (round DOWN)
         /// First depositor gets 1:1. Example: pool has 1050 assets, 1000 shares.
@@ -167,7 +167,7 @@ contract EarnManager is
 
         pool.totalShares += shares;
         pool.totalAssets += amount;
-        userShares[poolId][user] += shares;
+        userShares[poolId][toUser] += shares;
     }
 
     /// @notice Burn the user's pool shares and transfer the underlying assets

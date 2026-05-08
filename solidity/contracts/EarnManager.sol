@@ -52,8 +52,18 @@ contract EarnManager is
     /// key with proxy upgrades / accounting reconfiguration.
     address public poolAdmin;
 
+    /// @notice Pool registry keyed by `poolId` (typically
+    /// `keccak256(strategy || tokenId)`). Empty `poolAddress` means the slot
+    /// is vacant.
     mapping(bytes32 => Pool) public pools;
+
+    /// @notice Iteration index over the keys of `pools` so off-chain callers
+    /// can enumerate without scanning storage. Append-only; entries are never
+    /// removed even if a pool is paused.
     bytes32[] public poolIds;
+
+    /// @notice Per-user share balance scoped to a pool. Indexed
+    /// `userShares[poolId][user]`; minted on `deposit`, burned on `withdraw`.
     mapping(bytes32 => mapping(address => uint256)) public userShares;
 
     /// @notice Per-user monotonic nonce for `withdraw` consent signatures.
@@ -122,6 +132,14 @@ contract EarnManager is
         poolAdmin = newAdmin;
     }
 
+    /// @notice Register a new earn pool. Idempotent: the same `poolId` cannot
+    /// be created twice. The pool's `totalShares` and `totalAssets` start at
+    /// zero, and the first depositor mints shares 1:1 against their deposit.
+    /// @param poolId Caller-chosen identifier for the pool, typically
+    /// `keccak256(strategy || tokenId)`.
+    /// @param tokenId Accounting token ID this pool holds.
+    /// @param poolAddress Internal accounting address that owns the pool's
+    /// underlying balance and signs outbound transfers on withdraw.
     function createPool(
         bytes32 poolId,
         bytes32 tokenId,
@@ -164,6 +182,16 @@ contract EarnManager is
     /// External: user flows
     /// -----------------------------------------------------------------------
 
+    /// @notice Mint pool shares for `toUser` against an accounting transfer
+    /// from `toUser` to the pool's internal address. Atomic: if accounting
+    /// rejects the transfer the share mint is reverted with it.
+    /// @param poolId Earn pool ID.
+    /// @param toUser Account whose accounting balance is debited and to whom
+    /// shares are minted.
+    /// @param amount Underlying asset amount being deposited.
+    /// @param nonce Accounting transfer nonce for `toUser`.
+    /// @param signature `toUser`'s EIP-712 ``Transfer(toUser, pool, ...)``
+    /// signed in the accounting domain. Verified on the accounting side.
     function deposit(
         bytes32 poolId,
         address toUser,

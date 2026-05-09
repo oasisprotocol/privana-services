@@ -11,6 +11,7 @@ POOL_ID_HEX = "0x" + "ab" * 32
 POOL_ADDRESS = "0x152E6a7125665764a4F1F1df80E8f5D49Bf0239c"
 USER_ADDRESS = "0xd8991364507FAfC256EafF950d28618735753476"
 USER_WITHDRAW_SIG = "0x" + "cc" * 65
+SIWE_TOKEN = "0x" + "ee" * 32
 
 
 def _make_service(registry=None):
@@ -157,12 +158,12 @@ class TestDeposit:
             POOL_ADDRESS,
             1000, 1050, True,
         )
-        contract.functions.userShares.return_value.call.side_effect = [0, 952]
-
         result = await service.deposit(
             POOL_ID_HEX, USER_ADDRESS, "1000", 5, "0x" + "aa" * 65
         )
-        assert result["shares_minted"] == "952"
+        # shares_minted is None now: per-user state is private on the contract,
+        # so the backend can't compute the delta. Clients read it themselves.
+        assert result["shares_minted"] is None
         assert result["tx_hash"] == "0x" + "ff" * 32
         assert result["status"] == "completed"
 
@@ -196,29 +197,6 @@ class TestDeposit:
 
 
 class TestWithdraw:
-    async def test_insufficient_shares_raises(self):
-        service, contract, _, _ = _make_service()
-        contract.functions.pools.return_value.call.return_value = (
-            bytes.fromhex(USDC_TOKEN_ID[2:]),
-            POOL_ADDRESS,
-            1000, 1050, True,
-        )
-        contract.functions.userShares.return_value.call.return_value = 100
-        contract.functions.convertToAssets.return_value.call.return_value = 105
-
-        with pytest.raises(ValueError, match="Insufficient shares"):
-            await service.withdraw(POOL_ID_HEX, USER_ADDRESS, "1000", 0, USER_WITHDRAW_SIG)
-
-    async def test_stale_nonce_is_rejected_before_onchain_call(self):
-        service, contract, saph, _ = _make_service()
-        contract.functions.withdrawNonces.return_value.call.return_value = 5
-
-        with pytest.raises(ValueError, match="Stale withdraw nonce"):
-            await service.withdraw(POOL_ID_HEX, USER_ADDRESS, "100", 4, USER_WITHDRAW_SIG)
-
-        # Pre-flight rejection must short-circuit before any chain call.
-        saph.execute_contract_call.assert_not_called()
-
     async def test_successful_withdraw(self, test_db):
         service, contract, saph, acct = _make_service()
         contract.functions.pools.return_value.call.return_value = (
@@ -226,15 +204,14 @@ class TestWithdraw:
             POOL_ADDRESS,
             1000, 1050, True,
         )
-        contract.functions.userShares.return_value.call.side_effect = [500, 500, 25]
-        contract.functions.convertToAssets.return_value.call.return_value = 525
 
         with patch("src.services.earn.vault_service.sign_transfer", return_value="0x" + "bb" * 65):
             result = await service.withdraw(POOL_ID_HEX, USER_ADDRESS, "500", 0, USER_WITHDRAW_SIG)
 
         assert result["status"] == "completed"
         assert result["tx_hash"] == "0x" + "ff" * 32
-        assert result["shares_burned"] == "475"
+        # shares_burned is None: per-user state is private on the contract.
+        assert result["shares_burned"] is None
 
         row = test_db.execute("SELECT * FROM earn_transactions").fetchone()
         assert row["operation"] == "withdraw"
@@ -249,8 +226,6 @@ class TestWithdraw:
             POOL_ADDRESS,
             1000, 1050, True,
         )
-        contract.functions.userShares.return_value.call.side_effect = [500, 500]
-        contract.functions.convertToAssets.return_value.call.return_value = 525
         saph.execute_contract_call.side_effect = RuntimeError("insufficient funds for gas")
 
         with patch("src.services.earn.vault_service.sign_transfer", return_value="0x" + "bb" * 65):
@@ -288,9 +263,9 @@ class TestExchangeRateZeroShares:
             POOL_ADDRESS,
             0, 0, True,
         )
-        contract.functions.userShares.return_value.call.return_value = 0
+        contract.functions.getUserShares.return_value.call.return_value = 0
 
-        balances = await service.get_all_balances(USER_ADDRESS)
+        balances = await service.get_all_balances(SIWE_TOKEN)
         assert balances == []
 
 
@@ -306,10 +281,10 @@ class TestGetAllBalances:
             POOL_ADDRESS,
             1000, 1050, True,
         )
-        contract.functions.userShares.return_value.call.return_value = 500
+        contract.functions.getUserShares.return_value.call.return_value = 500
         contract.functions.convertToAssets.return_value.call.return_value = 525
 
-        balances = await service.get_all_balances(USER_ADDRESS)
+        balances = await service.get_all_balances(SIWE_TOKEN)
         assert len(balances) == 1
         assert balances[0]["shares"] == "500"
         assert balances[0]["underlying_amount"] == "525"
@@ -325,9 +300,9 @@ class TestGetAllBalances:
             POOL_ADDRESS,
             1000, 1050, True,
         )
-        contract.functions.userShares.return_value.call.return_value = 0
+        contract.functions.getUserShares.return_value.call.return_value = 0
 
-        balances = await service.get_all_balances(USER_ADDRESS)
+        balances = await service.get_all_balances(SIWE_TOKEN)
         assert balances == []
 
 

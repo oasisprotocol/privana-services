@@ -34,6 +34,10 @@ describe('EarnManager', function () {
     return signer.signTypedData(domain, WITHDRAW_TYPES, value);
   }
 
+  function authToken(addr: string): string {
+    return ethers.AbiCoder.defaultAbiCoder().encode(['address'], [addr]);
+  }
+
   async function deployFixture() {
     const [owner, user, poolWallet, otherUser] = await ethers.getSigners();
 
@@ -178,7 +182,7 @@ describe('EarnManager', function () {
       const pool = await earnManager.pools(POOL_ID);
       expect(pool.totalShares).to.equal(amount);
       expect(pool.totalAssets).to.equal(amount);
-      expect(await earnManager.getUserShares(user.address, POOL_ID, '0x')).to.equal(amount);
+      expect(await earnManager.getUserShares(POOL_ID, authToken(user.address))).to.equal(amount);
     });
 
     it('should mint proportional shares for second depositor', async function () {
@@ -193,7 +197,7 @@ describe('EarnManager', function () {
       await earnManager.deposit(POOL_ID, otherUser.address, ethers.parseUnits('2000', 6), 0, DUMMY_SIG);
 
       // 2000 * 1000000000 / 1050000000 = 1904761904 shares (round DOWN)
-      const otherShares = await earnManager.getUserShares(otherUser.address, POOL_ID, '0x');
+      const otherShares = await earnManager.getUserShares(POOL_ID, authToken(otherUser.address));
       expect(otherShares).to.equal(1904761904n);
     });
 
@@ -239,10 +243,10 @@ describe('EarnManager', function () {
       const userSig = await signWithdraw(user, earnManager, POOL_ID, amount, 0n);
       await earnManager.withdraw(POOL_ID, amount, 0, userSig, 0, DUMMY_SIG);
 
-      expect(await earnManager.getUserShares(user.address, POOL_ID, '0x')).to.equal(0);
+      expect(await earnManager.getUserShares(POOL_ID, authToken(user.address))).to.equal(0);
       expect(await mockAccounting.balances(user.address, TOKEN_ID)).to.equal(amount);
       expect(await mockAccounting.balances(poolWallet.address, TOKEN_ID)).to.equal(0);
-      expect(await earnManager.withdrawNonces(user.address)).to.equal(1);
+      expect(await earnManager.getWithdrawNonce(authToken(user.address))).to.equal(1);
     });
 
     it('should withdraw with profit after harvest', async function () {
@@ -259,7 +263,7 @@ describe('EarnManager', function () {
       const userSig = await signWithdraw(user, earnManager, POOL_ID, withdrawAmount, 0n);
       await earnManager.withdraw(POOL_ID, withdrawAmount, 0, userSig, 0, DUMMY_SIG);
 
-      expect(await earnManager.getUserShares(user.address, POOL_ID, '0x')).to.equal(0);
+      expect(await earnManager.getUserShares(POOL_ID, authToken(user.address))).to.equal(0);
       expect(await mockAccounting.balances(user.address, TOKEN_ID)).to.equal(ethers.parseUnits('1100', 6));
     });
 
@@ -275,9 +279,9 @@ describe('EarnManager', function () {
       const userSig = await signWithdraw(user, earnManager, POOL_ID, amount, 0n);
       await earnManager.connect(otherUser).withdraw(POOL_ID, amount, 0, userSig, 0, DUMMY_SIG);
 
-      expect(await earnManager.getUserShares(user.address, POOL_ID, '0x')).to.equal(0);
+      expect(await earnManager.getUserShares(POOL_ID, authToken(user.address))).to.equal(0);
       expect(await mockAccounting.balances(user.address, TOKEN_ID)).to.equal(amount);
-      expect(await earnManager.withdrawNonces(user.address)).to.equal(1);
+      expect(await earnManager.getWithdrawNonce(authToken(user.address))).to.equal(1);
     });
 
     it('should reject insufficient shares', async function () {
@@ -323,8 +327,8 @@ describe('EarnManager', function () {
         earnManager.connect(otherUser).withdraw(POOL_ID, amount, 0, attackerSig, 0, DUMMY_SIG),
       ).to.be.revertedWithCustomError(earnManager, 'InsufficientShares');
 
-      expect(await earnManager.getUserShares(user.address, POOL_ID, '0x')).to.equal(amount);
-      expect(await earnManager.withdrawNonces(user.address)).to.equal(0);
+      expect(await earnManager.getUserShares(POOL_ID, authToken(user.address))).to.equal(amount);
+      expect(await earnManager.getWithdrawNonce(authToken(user.address))).to.equal(0);
     });
 
     it('should reject reused withdraw signature (nonce replay)', async function () {
@@ -366,13 +370,13 @@ describe('EarnManager', function () {
       await mockAccounting.setBalance(user.address, TOKEN_ID, amount);
       await earnManager.deposit(POOL_ID, user.address, amount, 0, DUMMY_SIG);
 
-      const sharesBefore = await earnManager.getUserShares(user.address, POOL_ID, '0x');
+      const sharesBefore = await earnManager.getUserShares(POOL_ID, authToken(user.address));
       await earnManager.harvest(POOL_ID, ethers.parseUnits('50', 6));
 
       const pool = await earnManager.pools(POOL_ID);
       expect(pool.totalAssets).to.equal(ethers.parseUnits('1050', 6));
       expect(pool.totalShares).to.equal(amount);
-      expect(await earnManager.getUserShares(user.address, POOL_ID, '0x')).to.equal(sharesBefore);
+      expect(await earnManager.getUserShares(POOL_ID, authToken(user.address))).to.equal(sharesBefore);
     });
 
     it('should reject non-pool-admin', async function () {
@@ -397,7 +401,7 @@ describe('EarnManager', function () {
       await mockAccounting.setBalance(user.address, TOKEN_ID, amount);
       await earnManager.deposit(POOL_ID, user.address, amount, 0, DUMMY_SIG);
 
-      const sharesBefore = await earnManager.getUserShares(user.address, POOL_ID, '0x');
+      const sharesBefore = await earnManager.getUserShares(POOL_ID, authToken(user.address));
 
       const newTotal = ethers.parseUnits('1100', 6);
       await earnManager.syncTotalAssets(POOL_ID, newTotal);
@@ -405,7 +409,7 @@ describe('EarnManager', function () {
       const pool = await earnManager.pools(POOL_ID);
       expect(pool.totalAssets).to.equal(newTotal);
       expect(pool.totalShares).to.equal(amount);
-      expect(await earnManager.getUserShares(user.address, POOL_ID, '0x')).to.equal(sharesBefore);
+      expect(await earnManager.getUserShares(POOL_ID, authToken(user.address))).to.equal(sharesBefore);
     });
 
     it('should accept lowering totalAssets (loss scenario)', async function () {
@@ -454,8 +458,8 @@ describe('EarnManager', function () {
       // totalAssets = 1000 + 50 + 2000 + 150 = 3200
       expect(pool.totalAssets).to.equal(ethers.parseUnits('3200', 6));
 
-      const userShares = await earnManager.getUserShares(user.address, POOL_ID, '0x');
-      const otherShares = await earnManager.getUserShares(otherUser.address, POOL_ID, '0x');
+      const userShares = await earnManager.getUserShares(POOL_ID, authToken(user.address));
+      const otherShares = await earnManager.getUserShares(POOL_ID, authToken(otherUser.address));
 
       // user owns 1000000000 / (1000000000 + 1904761904) = 34.4% of pool
       // other owns 1904761904 / (1000000000 + 1904761904) = 65.6% of pool

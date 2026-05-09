@@ -82,9 +82,9 @@ export const api = {
       parse<PoolDetail>
     ),
 
-  balance: (userAddress: string) =>
+  balance: (token: string) =>
     fetch(
-      `${env.apiBaseUrl}/v1/earn/balance?user_address=${userAddress}`,
+      `${env.apiBaseUrl}/v1/earn/balance?token=${encodeURIComponent(token)}`,
       { cache: "no-store" }
     ).then(parse<{ positions: Position[] }>),
 
@@ -107,11 +107,11 @@ export const api = {
       body: JSON.stringify(body)
     }).then(parse<DepositResult>),
 
-  withdrawNonce: (userAddress: string) =>
+  withdrawNonce: (token: string) =>
     fetch(
-      `${env.apiBaseUrl}/v1/earn/withdraw/nonce?user_address=${userAddress}`,
+      `${env.apiBaseUrl}/v1/earn/withdraw/nonce?token=${encodeURIComponent(token)}`,
       { cache: "no-store" }
-    ).then(parse<{ user_address: string; nonce: number }>),
+    ).then(parse<{ nonce: number }>),
 
   withdraw: (body: {
     pool_id: string;

@@ -142,12 +142,12 @@ async def withdraw(payload: WithdrawRequest) -> WithdrawResponse:
 
 @router.get("/withdraw/nonce")
 async def get_withdraw_nonce(
-    user_address: str = Query(..., description="User wallet address"),
+    token: str = Query(..., description="Encrypted SIWE auth token (hex)"),
 ) -> dict:
     try:
         service = get_vault_service()
-        nonce = await asyncio.to_thread(service.get_withdraw_nonce, user_address)
-        return {"user_address": user_address, "nonce": nonce}
+        nonce = await asyncio.to_thread(service.get_withdraw_nonce_via_token, token)
+        return {"nonce": nonce}
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
@@ -157,11 +157,11 @@ async def get_withdraw_nonce(
 
 @router.get("/balance", response_model=BalanceListResponse)
 async def get_balances(
-    user_address: str = Query(..., description="User wallet address"),
+    token: str = Query(..., description="Encrypted SIWE auth token (hex)"),
 ) -> BalanceListResponse:
     try:
         service = get_vault_service()
-        balances = await service.get_all_balances(user_address)
+        balances = await service.get_all_balances(token)
         return BalanceListResponse(
             positions=[BalanceResponse(**b) for b in balances]
         )

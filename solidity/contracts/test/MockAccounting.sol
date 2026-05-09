@@ -2,11 +2,18 @@
 pragma solidity ^0.8.24;
 
 import "../interfaces/IAccounting.sol";
+import "../interfaces/IAccountingSiweAuth.sol";
+import "./MockSiweAuth.sol";
 
 contract MockAccounting is IAccounting {
     mapping(address => mapping(bytes32 => uint256)) public balances;
+    IAccountingSiweAuth public override siweAuth;
 
     error InsufficientBalance();
+
+    constructor() {
+        siweAuth = new MockSiweAuth();
+    }
 
     function setBalance(address user, bytes32 tokenId, uint256 amount) external {
         balances[user][tokenId] = amount;

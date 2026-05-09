@@ -65,15 +65,20 @@ contract EarnManager is
     /// removed even if a pool is paused.
     bytes32[] public poolIds;
 
-    /// @notice Per-user share balance scoped to a pool. Indexed
+    /// @dev Per-user share balance scoped to a pool. Indexed
     /// `userShares[poolId][user]`; minted on `deposit`, burned on `withdraw`.
-    mapping(bytes32 => mapping(address => uint256)) public userShares;
+    /// Private so the auto-getter doesn't leak another user's balance to a
+    /// random caller; reads go through `getUserShares(poolId, token)` which
+    /// recovers the caller via SIWE auth.
+    mapping(bytes32 => mapping(address => uint256)) private userShares;
 
-    /// @notice Per-user monotonic nonce for `withdraw` consent signatures.
-    /// @dev Mirrors the accounting transfer-nonce shape (per-user global, not
+    /// @dev Per-user monotonic nonce for `withdraw` consent signatures.
+    /// Mirrors the accounting transfer-nonce shape (per-user global, not
     /// per-pool) so the system has one consistent replay-protection model.
-    /// Bumped after every successful withdraw consent verification.
-    mapping(address => uint256) public withdrawNonces;
+    /// Bumped after every successful withdraw consent verification. Private
+    /// to keep nonce values from leaking through an auto-generated getter;
+    /// reads go through `getWithdrawNonce(token)`.
+    mapping(address => uint256) private withdrawNonces;
 
     /// @dev Reserved slots for future state additions without disturbing the
     /// layout of any inheriting contract or proxy. Decrement when adding a
@@ -285,9 +290,23 @@ contract EarnManager is
     /// External: views
     /// -----------------------------------------------------------------------
 
-    function getUserShares(address user, bytes32 poolId, bytes calldata token) external view returns (uint256) {
-        accounting.balanceOf(user, bytes32(0), token);
+    /// @notice Pool share balance of the caller authenticated by `token`.
+    /// @param poolId Earn pool ID.
+    /// @param token Encrypted SIWE auth token issued by the accounting ROFL
+    /// service. The signer is recovered via the same SIWE helper accounting
+    /// uses, so a token only resolves to the user who originally signed the
+    /// underlying SIWE message.
+    function getUserShares(bytes32 poolId, bytes calldata token) external view returns (uint256) {
+        address user = accounting.siweAuth().authSender(token);
         return userShares[poolId][user];
+    }
+
+    /// @notice Current `withdrawNonces[user]` for the caller authenticated by
+    /// `token`. Off-chain clients fetch this before signing a `Withdraw`
+    /// consent so the supplied nonce matches storage at submission time.
+    function getWithdrawNonce(bytes calldata token) external view returns (uint256) {
+        address user = accounting.siweAuth().authSender(token);
+        return withdrawNonces[user];
     }
 
     /// @dev convertToShares(assets) = assets * totalShares / totalAssets (round DOWN)

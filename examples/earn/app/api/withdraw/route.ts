@@ -11,6 +11,11 @@ type Body = {
   pool_id: Hex;
   amount: string;
   user_address?: Address;
+  // Encrypted SIWE auth token for the withdrawing user. Required: the backend
+  // can no longer read withdrawNonces directly, the contract gates the read
+  // on a SIWE-recovered caller. Frontend obtains it from accounting's hosted
+  // auth via flexvaults-sdk before submitting.
+  auth_token: string;
 };
 
 export async function POST(req: Request) {
@@ -19,11 +24,12 @@ export async function POST(req: Request) {
     if (!body.pool_id || !body.amount) {
       return NextResponse.json({ error: "pool_id and amount are required" }, { status: 400 });
     }
+    if (!body.auth_token) {
+      return NextResponse.json({ error: "auth_token is required" }, { status: 400 });
+    }
     const userAddress = (body.user_address ?? env.testUserAddress) as Address;
 
-    // Fetch the user's current EarnManager.withdrawNonces[user] and bind it
-    // into the EIP-712 consent message. Server side then verifies on-chain.
-    const { nonce } = await api.withdrawNonce(userAddress);
+    const { nonce } = await api.withdrawNonce(body.auth_token);
 
     const signature = await signWithdrawConsent({
       poolId: body.pool_id,

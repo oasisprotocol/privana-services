@@ -5,13 +5,17 @@ import { api } from "@/lib/api";
 export const dynamic = "force-dynamic";
 
 export async function GET(req: Request) {
+  // The backend's /v1/earn/balance is SIWE-gated; the contract recovers the
+  // user from the encrypted token and returns only that user's positions.
+  // Frontend must obtain a token from accounting's hosted auth (flexvaults-sdk)
+  // and pass it through as `token`.
   const url = new URL(req.url);
-  const userAddress = url.searchParams.get("user_address");
-  if (!userAddress) {
-    return NextResponse.json({ error: "user_address is required" }, { status: 400 });
+  const token = url.searchParams.get("token");
+  if (!token) {
+    return NextResponse.json({ error: "token is required" }, { status: 400 });
   }
   try {
-    const data = await api.balance(userAddress);
+    const data = await api.balance(token);
     return NextResponse.json(data);
   } catch (err) {
     return NextResponse.json(

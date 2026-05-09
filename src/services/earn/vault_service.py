@@ -92,20 +92,25 @@ class VaultService:
             pools.append(pool)
         return pools
 
-    def get_user_shares(self, user_address: str, pool_id: bytes) -> int:
-        # Read the public mapping directly. EarnManager.getUserShares() runs
-        # an accounting.balanceOf auth gate that reverts when called from
-        # this service (no msg.sender attribution); the public storage
-        # getter skips the gate and returns the same value.
-        return self.contract.functions.userShares(
-            pool_id,
-            Web3.to_checksum_address(user_address),
-        ).call()
+    def get_user_shares_via_token(self, pool_id: bytes, token_hex: str) -> int:
+        """Read a user's pool share balance via the SIWE auth-gated view.
 
-    def get_withdraw_nonce(self, user_address: str) -> int:
-        return self.contract.functions.withdrawNonces(
-            Web3.to_checksum_address(user_address),
-        ).call()
+        The contract recovers the caller from ``token`` (issued by accounting's
+        ROFL service); the backend has no ambient privilege here, only the
+        token-bearer's. Anyone holding a valid token reads exactly that user's
+        balance and no one else's.
+        """
+        token_bytes = bytes.fromhex(token_hex.removeprefix("0x"))
+        return self.contract.functions.getUserShares(pool_id, token_bytes).call()
+
+    def get_withdraw_nonce_via_token(self, token_hex: str) -> int:
+        """Read the caller's withdraw nonce via the SIWE auth-gated view.
+
+        Frontend obtains this before signing a ``Withdraw`` consent so the
+        supplied nonce matches storage at submission time.
+        """
+        token_bytes = bytes.fromhex(token_hex.removeprefix("0x"))
+        return self.contract.functions.getWithdrawNonce(token_bytes).call()
 
     def convert_to_shares(self, pool_id: bytes, assets: int) -> int:
         return self.contract.functions.convertToShares(pool_id, assets).call()
@@ -113,8 +118,8 @@ class VaultService:
     def convert_to_assets(self, pool_id: bytes, shares: int) -> int:
         return self.contract.functions.convertToAssets(pool_id, shares).call()
 
-    def get_user_balance(self, user_address: str, pool_id: bytes) -> dict:
-        shares = self.get_user_shares(user_address, pool_id)
+    def get_user_balance_via_token(self, pool_id: bytes, token_hex: str) -> dict:
+        shares = self.get_user_shares_via_token(pool_id, token_hex)
         underlying = self.convert_to_assets(pool_id, shares) if shares > 0 else 0
         pool = self.get_pool(pool_id)
         return {
@@ -253,8 +258,6 @@ class VaultService:
             signature=signature,
         )
 
-        shares_before = self.get_user_shares(user_address, pool_id)
-
         try:
             tx_hash = await asyncio.to_thread(
                 self.sapphire.execute_contract_call,
@@ -286,14 +289,14 @@ class VaultService:
         await self._route_to_strategy(pool_id_hex, int(amount))
 
         try:
-            shares_after = self.get_user_shares(user_address, pool_id)
-            shares_minted = shares_after - shares_before
             pool_after = self.get_pool(pool_id)
             effective_assets = await self.effective_total_assets(pool_id_hex, pool_after["total_assets"])
             return {
                 "pool_id": pool_id_hex,
                 "amount": amount,
-                "shares_minted": str(shares_minted),
+                # shares_minted is None: per-user share state is private. Clients
+                # can compute it themselves via the SIWE-gated getUserShares.
+                "shares_minted": None,
                 "exchange_rate": _exchange_rate(effective_assets, pool_after["total_shares"]),
                 "tx_hash": tx_hash,
                 "status": "completed",
@@ -321,35 +324,23 @@ class VaultService:
 
         Two signatures are required, one from each side of the trust boundary:
 
-        - ``signature``: the user's EIP-712 ``Withdraw(user, poolId, amount, nonce)``
-          consent in the EarnManager's domain, where ``nonce`` matches
-          ``EarnManager.withdrawNonces[user]``. This is what authorizes the
-          burn of the user's shares; without it any caller could force-eject
-          any user from the pool.
+        - ``signature``: the user's EIP-712 ``Withdraw(poolId, amount, nonce)``
+          consent in the EarnManager's domain. The contract recovers the
+          signer and treats them as the effective user; without it any caller
+          could force-eject any user from the pool.
         - The pool's accounting ``Transfer(pool -> user, ...)`` signature, which
           the service signs locally with the LP key. This is what authorizes
           accounting to debit the pool's balance.
 
-        ``EarnManager.withdraw`` verifies the user signature first, then runs
-        the share-burn and the accounting transfer with the pool signature.
+        Per-user state (``withdrawNonces``, ``userShares``) is private on the
+        contract, so the backend can no longer pre-check the supplied nonce
+        or share balance: a stale nonce surfaces as ``InvalidWithdrawSignature``
+        and a too-large amount as ``InsufficientShares``, both via the on-chain
+        revert path.
         """
         validate_address(user_address, "user_address")
         validate_amount(amount, "amount")
         validate_signature(signature, "signature")
-
-        # Pre-flight nonce check. The contract reads ``withdrawNonces[user]``
-        # from storage and recovers the signer against that value, so a stale
-        # client nonce produces a generic ``InvalidWithdrawSignature`` revert
-        # only after we burn gas dispatching the tx. Comparing the client's
-        # claimed nonce against the live storage value here turns that into
-        # an immediate 400 with a clear message; the client refetches via
-        # ``GET /v1/earn/withdraw/nonce`` and re-signs.
-        current_nonce = self.get_withdraw_nonce(user_address)
-        if nonce != current_nonce:
-            raise ValueError(
-                f"Stale withdraw nonce: expected {current_nonce}, got {nonce}. "
-                "Refetch via /v1/earn/withdraw/nonce and re-sign."
-            )
 
         pool_id = bytes.fromhex(pool_id_hex.removeprefix("0x"))
         pool = self.get_pool(pool_id)
@@ -358,11 +349,6 @@ class VaultService:
         # No active check — users must always be able to exit paused pools.
 
         await self.sync_total_assets(pool_id_hex)
-
-        shares = self.get_user_shares(user_address, pool_id)
-        max_withdraw = self.convert_to_assets(pool_id, shares) if shares > 0 else 0
-        if int(amount) > max_withdraw:
-            raise ValueError("Insufficient shares for this withdrawal")
 
         await self._reclaim_from_strategy(pool_id_hex, int(amount))
 
@@ -394,8 +380,6 @@ class VaultService:
                 signature=pool_signature,
             )
 
-            shares_before = self.get_user_shares(user_address, pool_id)
-
             try:
                 tx_hash = await asyncio.to_thread(
                     self.sapphire.execute_contract_call,
@@ -426,14 +410,14 @@ class VaultService:
         self._update_transaction(tx_id, status=EARN_STATUS_COMPLETED, tx_hash=tx_hash)
 
         try:
-            shares_after = self.get_user_shares(user_address, pool_id)
-            shares_burned = shares_before - shares_after
             pool_after = self.get_pool(pool_id)
             effective_assets = await self.effective_total_assets(pool_id_hex, pool_after["total_assets"])
             return {
                 "pool_id": pool_id_hex,
                 "amount": amount,
-                "shares_burned": str(shares_burned),
+                # shares_burned is None: per-user share state is private. Clients
+                # can compute it themselves via the SIWE-gated getUserShares.
+                "shares_burned": None,
                 "exchange_rate": _exchange_rate(effective_assets, pool_after["total_shares"]),
                 "tx_hash": tx_hash,
                 "status": "completed",
@@ -563,13 +547,23 @@ class VaultService:
         values = list(fields.values()) + [tx_id]
         db_write(db, f"UPDATE earn_transactions SET {set_clause} WHERE id = ?", tuple(values))
 
-    async def get_all_balances(self, user_address: str) -> list[dict]:
-        validate_address(user_address, "user_address")
+    async def get_all_balances(self, token_hex: str) -> list[dict]:
+        """Return the token-bearer's positions across every pool.
+
+        Reads are SIWE-gated on the contract: the caller must obtain an
+        encrypted auth token from accounting's ROFL service and pass it
+        through. The backend never resolves the user address — that happens
+        on-chain inside ``getUserShares(poolId, token)``.
+        """
+        if not token_hex:
+            raise ValueError("token is required")
         pools = await asyncio.to_thread(self.list_pools)
 
         async def fetch_balance(pool: dict) -> Optional[dict]:
             pool_id = bytes.fromhex(pool["pool_id"].removeprefix("0x"))
-            shares = await asyncio.to_thread(self.get_user_shares, user_address, pool_id)
+            shares = await asyncio.to_thread(
+                self.get_user_shares_via_token, pool_id, token_hex
+            )
             if shares == 0:
                 return None
             underlying = await asyncio.to_thread(self.convert_to_assets, pool_id, shares)

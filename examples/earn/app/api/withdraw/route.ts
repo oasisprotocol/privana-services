@@ -26,7 +26,6 @@ export async function POST(req: Request) {
     const { nonce } = await api.withdrawNonce(userAddress);
 
     const signature = await signWithdrawConsent({
-      user: userAddress,
       poolId: body.pool_id,
       amount: BigInt(body.amount),
       nonce

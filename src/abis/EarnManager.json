@@ -696,14 +696,19 @@
           "type": "bytes32"
         },
         {
-          "internalType": "address",
-          "name": "user",
-          "type": "address"
-        },
-        {
           "internalType": "uint256",
           "name": "amount",
           "type": "uint256"
+        },
+        {
+          "internalType": "uint256",
+          "name": "withdrawNonce",
+          "type": "uint256"
+        },
+        {
+          "internalType": "bytes",
+          "name": "userSignature",
+          "type": "bytes"
         },
         {
           "internalType": "uint256",
@@ -713,11 +718,6 @@
         {
           "internalType": "bytes",
           "name": "poolSignature",
-          "type": "bytes"
-        },
-        {
-          "internalType": "bytes",
-          "name": "userSignature",
           "type": "bytes"
         }
       ],

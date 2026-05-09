@@ -38,8 +38,11 @@ contract EarnManager is
     /// -----------------------------------------------------------------------
 
     /// @dev EIP-712 typehash for the user's withdraw consent message.
+    /// The signer is recovered from the signature, so `user` is intentionally
+    /// not part of the typed data: encoding it would be redundant and would
+    /// also require relayers to know the user's address up front.
     bytes32 public constant WITHDRAW_TYPEHASH =
-        keccak256("Withdraw(address user,bytes32 poolId,uint256 amount,uint256 nonce)");
+        keccak256("Withdraw(bytes32 poolId,uint256 amount,uint256 nonce)");
 
     /// -----------------------------------------------------------------------
     /// State variables
@@ -220,33 +223,50 @@ contract EarnManager is
         userShares[poolId][toUser] += shares;
     }
 
-    /// @notice Burn the user's pool shares and transfer the underlying assets
-    /// back to the user via accounting. Requires both signatures: the user's
-    /// EIP-712 ``Withdraw`` consent (so only the user can authorize the burn)
-    /// and the pool's accounting ``Transfer`` signature (held by the off-chain
-    /// service so accounting can debit the pool).
+    /// @notice Burn the caller-signed user's pool shares and transfer the
+    /// underlying assets back to that user via accounting. Requires both
+    /// signatures: the user's EIP-712 ``Withdraw`` consent (so only the user
+    /// can authorize the burn) and the pool's accounting ``Transfer``
+    /// signature (held by the off-chain service so accounting can debit the
+    /// pool).
+    ///
+    /// The caller is unrelated to the user — anyone can submit a valid
+    /// user-signed withdraw on the user's behalf (relayer pattern).
     /// @param poolId Earn pool ID.
-    /// @param user Owner of the shares being burned.
     /// @param amount Underlying asset amount to receive.
+    /// @param withdrawNonce Expected value of ``withdrawNonces[recoveredUser]``
+    /// at submission time. The caller fetches this off-chain, the user binds
+    /// it into the signed message, and the contract verifies it matches
+    /// storage before bumping. A stale nonce reverts as
+    /// ``InvalidWithdrawSignature``.
+    /// @param userSignature User's EIP-712 ``Withdraw(poolId, amount, nonce)``
+    /// in this contract's domain. The signer is recovered and used as the
+    /// effective user.
     /// @param poolNonce Accounting transfer nonce for the pool's outbound transfer.
     /// @param poolSignature Pool's EIP-712 ``Transfer(pool, user, ...)`` signed
     /// by the LP key. Verified by the accounting contract.
-    /// @param userSignature User's EIP-712 ``Withdraw(user, poolId, amount, nonce)``
-    /// in this contract's domain. Recovered and matched against ``user``;
-    /// ``withdrawNonces[user]`` is used as the nonce and bumped on success.
     function withdraw(
         bytes32 poolId,
-        address user,
         uint256 amount,
+        uint256 withdrawNonce,
+        bytes calldata userSignature,
         uint256 poolNonce,
-        bytes calldata poolSignature,
-        bytes calldata userSignature
+        bytes calldata poolSignature
     ) external {
         Pool storage pool = pools[poolId];
         if (pool.poolAddress == address(0)) revert PoolNotFound();
         if (amount == 0) revert ZeroAmount();
 
-        _consumeWithdrawConsent(user, poolId, amount, userSignature);
+        /// @dev Recover the user from the consent signature, bind the supplied
+        /// nonce to storage, then bump. Inlined (not a helper) so the recovery
+        /// runs exactly once per call.
+        bytes32 structHash = keccak256(
+            abi.encode(WITHDRAW_TYPEHASH, poolId, amount, withdrawNonce)
+        );
+        bytes32 digest = _hashTypedDataV4(structHash);
+        address user = digest.recover(userSignature);
+        if (withdrawNonces[user] != withdrawNonce) revert InvalidWithdrawSignature();
+        withdrawNonces[user] = withdrawNonce + 1;
 
         /// @dev sharesToBurn = ceil(amount * totalShares / totalAssets)
         /// Round UP to protect pool. Example: pool has 1050 assets, 1000 shares.
@@ -295,24 +315,4 @@ contract EarnManager is
     /// -----------------------------------------------------------------------
 
     function _authorizeUpgrade(address newImplementation) internal override onlyOwner {}
-
-    /// @dev Verify the user's EIP-712 ``Withdraw`` consent, bind it to the
-    /// current ``withdrawNonces[user]`` value, then bump the nonce. Replay
-    /// protection: any subsequent attempt to reuse the same signature will
-    /// fail recovery (the embedded nonce no longer matches the storage value).
-    function _consumeWithdrawConsent(
-        address user,
-        bytes32 poolId,
-        uint256 amount,
-        bytes calldata userSignature
-    ) internal {
-        uint256 expectedNonce = withdrawNonces[user];
-        bytes32 structHash = keccak256(
-            abi.encode(WITHDRAW_TYPEHASH, user, poolId, amount, expectedNonce)
-        );
-        bytes32 digest = _hashTypedDataV4(structHash);
-        address signer = digest.recover(userSignature);
-        if (signer != user) revert InvalidWithdrawSignature();
-        withdrawNonces[user] = expectedNonce + 1;
-    }
 }

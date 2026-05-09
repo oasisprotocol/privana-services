@@ -22,7 +22,6 @@ TRANSFER_TYPES = {
 
 WITHDRAW_TYPES = {
     "Withdraw": [
-        {"name": "user", "type": "address"},
         {"name": "poolId", "type": "bytes32"},
         {"name": "amount", "type": "uint256"},
         {"name": "nonce", "type": "uint256"},
@@ -76,7 +75,6 @@ def sign_withdraw_consent(
     private_key: str,
     chain_id: int,
     earn_manager_address: str,
-    user_address: str,
     pool_id: str,
     amount: int,
     nonce: int,
@@ -88,6 +86,11 @@ def sign_withdraw_consent(
     follows uses a separate, pool-side signature. Domain separation prevents
     the same signature from being valid against accounting if their schemas
     ever overlap.
+
+    The user is recovered from the signature on-chain, so it's intentionally
+    not part of the typed data: a relayer can submit the signed message on
+    the user's behalf without the contract ever needing to be told who the
+    user is.
     """
     domain_data = {
         "name": "EarnManager",
@@ -97,7 +100,6 @@ def sign_withdraw_consent(
     }
 
     message_data = {
-        "user": user_address,
         "poolId": _to_bytes32(pool_id),
         "amount": amount,
         "nonce": nonce,

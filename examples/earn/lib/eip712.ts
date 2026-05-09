@@ -15,7 +15,6 @@ const TRANSFER_TYPES = {
 
 const WITHDRAW_TYPES = {
   Withdraw: [
-    { name: "user", type: "address" },
     { name: "poolId", type: "bytes32" },
     { name: "amount", type: "uint256" },
     { name: "nonce", type: "uint256" }
@@ -53,7 +52,6 @@ export const signTransfer = async (params: {
 };
 
 export const signWithdrawConsent = async (params: {
-  user: Address;
   poolId: Hex;
   amount: bigint;
   nonce: number;
@@ -75,7 +73,6 @@ export const signWithdrawConsent = async (params: {
     types: WITHDRAW_TYPES,
     primaryType: "Withdraw",
     message: {
-      user: params.user,
       poolId: params.poolId,
       amount: params.amount,
       nonce: BigInt(params.nonce)

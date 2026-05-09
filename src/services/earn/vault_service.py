@@ -404,11 +404,11 @@ class VaultService:
                     function_name="withdraw",
                     args=[
                         pool_id,
-                        Web3.to_checksum_address(user_address),
                         int(amount),
+                        nonce,
+                        user_sig_bytes,
                         pool_nonce,
                         pool_sig_bytes,
-                        user_sig_bytes,
                     ],
                 )
             except Exception as exc:

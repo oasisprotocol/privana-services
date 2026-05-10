@@ -1,5 +1,6 @@
 {
   "lockfileVersion": 1,
+  "configVersion": 0,
   "workspaces": {
     "": {
       "name": "flexvaults-swap-solidity",
@@ -15,7 +16,6 @@
         "@nomicfoundation/hardhat-network-helpers": "^1.0.0",
         "@nomicfoundation/hardhat-toolbox": "^4.0.0",
         "@nomicfoundation/hardhat-verify": "^2.0.2",
-        "@oasisprotocol/sapphire-contracts": "0.2.15",
         "@oasisprotocol/sapphire-hardhat": "^2.22.2",
         "@oasisprotocol/sapphire-paratime": "^2.3.0",
         "@openzeppelin/hardhat-upgrades": "^3.0.0",
@@ -238,8 +238,6 @@
     "@nomicfoundation/solidity-analyzer-win32-x64-msvc": ["@nomicfoundation/solidity-analyzer-win32-x64-msvc@0.1.2", "", {}, "sha512-Fdjli4DCcFHb4Zgsz0uEJXZ2K7VEO+w5KVv7HmT7WO10iODdU9csC2az4jrhEsRtiR9Gfd74FlG0NYlw1BMdyA=="],
 
     "@oasisprotocol/deoxysii": ["@oasisprotocol/deoxysii@0.0.6", "", {}, "sha512-TI51bIpChfsla9aRbjip6zvTbz6rpsqKgM7MqJvSfeFF6G5xLXQcbSC9u/1hOnOOazd7HaqA9NvaXQdeKCb3yw=="],
-
-    "@oasisprotocol/sapphire-contracts": ["@oasisprotocol/sapphire-contracts@0.2.15", "", { "dependencies": { "@openzeppelin/contracts": "^5.0.2" } }, "sha512-4R0G46TYljkdwXLxWqXEiPfRKab9QK1gXrzgx9wjJFxlWh1uyMNkSGdKmuBmD3cWMgUW0wRLI0wJfQYgZTv/Yg=="],
 
     "@oasisprotocol/sapphire-hardhat": ["@oasisprotocol/sapphire-hardhat@2.22.2", "", { "dependencies": { "@oasisprotocol/sapphire-paratime": "^2.0.1" }, "peerDependencies": { "hardhat": "2.x" } }, "sha512-43YYfsySrK/arbkurMd/AVOHpGwsZVvOrvQIS+TV8b56T0izLJuwe99Vou8U9GGiShBwFRuKl+J7pQWwvGWzPg=="],
 

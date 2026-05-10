@@ -5,9 +5,12 @@ async function main() {
   console.log('Deploying with:', deployer.address);
   console.log('Balance:', ethers.formatEther(await ethers.provider.getBalance(deployer.address)), 'ROSE');
 
-  const ACCOUNTING_PROXY = '0xFfB141bF8269E458b074A274bE6E8F971f08A401';
+  const ACCOUNTING_PROXY = process.env.ACCOUNTING_CONTRACT_ADDRESS;
   const LIQUIDITY_PROVIDER = process.env.LIQUIDITY_PROVIDER_ADDRESS;
 
+  if (!ACCOUNTING_PROXY) {
+    throw new Error('Set ACCOUNTING_CONTRACT_ADDRESS env var');
+  }
   if (!LIQUIDITY_PROVIDER) {
     throw new Error('Set LIQUIDITY_PROVIDER_ADDRESS env var');
   }

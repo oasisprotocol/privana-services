@@ -1,5 +1,15 @@
+export const safeBigInt = (value: unknown, fallback = 0n): bigint => {
+  if (typeof value === "bigint") return value;
+  if (typeof value !== "string" || value.length === 0) return fallback;
+  try {
+    return BigInt(value);
+  } catch {
+    return fallback;
+  }
+};
+
 export const fmtBaseUnits = (value: string | bigint, decimals: number): string => {
-  const v = typeof value === "string" ? BigInt(value) : value;
+  const v = typeof value === "string" ? safeBigInt(value) : value;
   if (decimals === 0) return v.toString();
   const negative = v < 0n;
   const abs = negative ? -v : v;

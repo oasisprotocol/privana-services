@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { isAddress } from "viem";
 import type { Address } from "viem";
 
 import { AAVE_POOL_ABI, ERC20_ABI } from "@/lib/abi";
@@ -11,8 +12,13 @@ const RAY_TO_BPS = 10n ** 23n;
 
 export async function GET(req: Request) {
   const url = new URL(req.url);
-  const holder = (url.searchParams.get("holder") ?? env.lpAddress) as Address;
-  const asset = (url.searchParams.get("asset") ?? env.aaveUsdc) as Address;
+  const holderRaw = url.searchParams.get("holder") ?? env.lpAddress;
+  const assetRaw = url.searchParams.get("asset") ?? env.aaveUsdc;
+  if (!isAddress(holderRaw) || !isAddress(assetRaw)) {
+    return NextResponse.json({ error: "holder and asset must be valid addresses" }, { status: 400 });
+  }
+  const holder = holderRaw as Address;
+  const asset = assetRaw as Address;
 
   try {
     const client = baseClient();

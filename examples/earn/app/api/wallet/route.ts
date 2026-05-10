@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { isAddress } from "viem";
 import type { Address } from "viem";
 
 import { ERC20_ABI } from "@/lib/abi";
@@ -9,7 +10,11 @@ export const dynamic = "force-dynamic";
 
 export async function GET(req: Request) {
   const url = new URL(req.url);
-  const address = (url.searchParams.get("address") ?? env.testUserAddress) as Address;
+  const addressRaw = url.searchParams.get("address") ?? env.testUserAddress;
+  if (!isAddress(addressRaw)) {
+    return NextResponse.json({ error: "address must be a valid address" }, { status: 400 });
+  }
+  const address = addressRaw as Address;
 
   try {
     const base = baseClient();

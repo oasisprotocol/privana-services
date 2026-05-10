@@ -1,7 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { FlexvaultsButton } from "@oasisprotocol/flexvaults-sdk";
+import { Component, useCallback, useEffect, useMemo, useState } from "react";
+import type { ReactNode } from "react";
+import { FlexvaultsButton, useFlexvaultsContext } from "@oasisprotocol/flexvaults-sdk";
 import { toast } from "sonner";
 import { useAccount, useConnect, useDisconnect } from "wagmi";
 
@@ -41,7 +42,7 @@ import {
 } from "@/components/ui/table";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { explorerAddr, explorerTx } from "@/lib/explorers";
-import { fmtBaseUnits, shortAddr, shortHash } from "@/lib/format";
+import { fmtBaseUnits, safeBigInt, shortAddr, shortHash } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
 type ConfigPayload = {
@@ -168,6 +169,15 @@ const fetchJSON = async <T,>(url: string, init?: RequestInit): Promise<T> => {
 };
 
 export default function Page() {
+  return (
+    <PageErrorBoundary>
+      <PageInner />
+    </PageErrorBoundary>
+  );
+}
+
+function PageInner() {
+  const { client } = useFlexvaultsContext();
   const [config, setConfig] = useState<ConfigPayload | null>(null);
   const [health, setHealth] = useState<{ ok: boolean; status: number; error?: string } | null>(null);
   const [pools, setPools] = useState<Pool[]>([]);
@@ -176,6 +186,7 @@ export default function Page() {
   const [aave, setAave] = useState<Aave | null>(null);
   const [userWallet, setUserWallet] = useState<Wallet | null>(null);
   const [lpWallet, setLpWallet] = useState<Wallet | null>(null);
+  const [siweToken, setSiweToken] = useState<string | null>(null);
 
   const [selectedPoolId, setSelectedPoolId] = useState<string>("");
   const [amountHuman, setAmountHuman] = useState<string>("1");
@@ -192,6 +203,16 @@ export default function Page() {
   }, []);
 
   useEffect(() => {
+    const sync = () => {
+      const token = client.getPrivateReadToken() ?? null;
+      setSiweToken((current) => (current === token ? current : token));
+    };
+    sync();
+    const id = window.setInterval(sync, 1000);
+    return () => window.clearInterval(id);
+  }, [client]);
+
+  useEffect(() => {
     if (config && !selectedPoolId && config.defaultPoolId) {
       setSelectedPoolId(config.defaultPoolId);
     }
@@ -201,10 +222,16 @@ export default function Page() {
     if (!config) return;
     setRefreshing(true);
     try {
+      const balancePromise = siweToken
+        ? fetchJSON<{ positions: Position[] }>(
+            `/api/balance?token=${encodeURIComponent(siweToken)}`,
+          ).catch(() => ({ positions: [] }))
+        : Promise.resolve({ positions: [] as Position[] });
+
       const [healthRes, poolsRes, balanceRes, aaveRes, userRes, lpRes] = await Promise.all([
         fetchJSON<{ ok: boolean; status: number; error?: string }>("/api/health"),
         fetchJSON<{ pools: Pool[] }>("/api/pools"),
-        fetchJSON<{ positions: Position[] }>(`/api/balance?user_address=${config.testUserAddress}`),
+        balancePromise,
         fetchJSON<Aave>(`/api/aave?holder=${config.lpAddress}&asset=${config.aaveUsdc}`),
         fetchJSON<Wallet>(`/api/wallet?address=${config.testUserAddress}`),
         fetchJSON<Wallet>(`/api/wallet?address=${config.lpAddress}`)
@@ -221,12 +248,22 @@ export default function Page() {
     } finally {
       setRefreshing(false);
     }
-  }, [config]);
+  }, [config, siweToken]);
 
   useEffect(() => {
     if (!config) return;
-    refreshAll();
-    const id = window.setInterval(refreshAll, POLL_MS);
+    let inFlight = false;
+    const tick = async () => {
+      if (inFlight) return;
+      inFlight = true;
+      try {
+        await refreshAll();
+      } finally {
+        inFlight = false;
+      }
+    };
+    tick();
+    const id = window.setInterval(tick, POLL_MS);
     return () => window.clearInterval(id);
   }, [config, refreshAll]);
 
@@ -235,7 +272,7 @@ export default function Page() {
     fetchJSON<PoolDetail>(`/api/pools/${selectedPoolId}`)
       .then(setPoolDetail)
       .catch(() => setPoolDetail(null));
-  }, [selectedPoolId, pools]);
+  }, [selectedPoolId]);
 
   const amountBaseUnits = useMemo(() => {
     if (!amountHuman) return "";
@@ -304,12 +341,16 @@ export default function Page() {
 
   const submitWithdraw = useCallback(async () => {
     if (!config || !selectedPoolId || !amountBaseUnits) return;
+    if (!siweToken) {
+      toast.error("Withdraw failed", { description: "Connect wallet and authenticate via Flexvaults to obtain a SIWE token." });
+      return;
+    }
     setPendingAction("withdraw");
     try {
       const { result } = await fetchJSON<{ result: WithdrawResult }>("/api/withdraw", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ pool_id: selectedPoolId, amount: amountBaseUnits })
+        body: JSON.stringify({ pool_id: selectedPoolId, amount: amountBaseUnits, auth_token: siweToken })
       });
       setActivity((prev) => [
         {
@@ -339,7 +380,7 @@ export default function Page() {
     } finally {
       setPendingAction(null);
     }
-  }, [config, selectedPoolId, amountBaseUnits, amountHuman, refreshAll]);
+  }, [config, selectedPoolId, amountBaseUnits, amountHuman, refreshAll, siweToken]);
 
   if (!config) {
     return (
@@ -398,6 +439,7 @@ export default function Page() {
           pendingAction={pendingAction}
           position={positionForSelected}
           hasUserKey={config.hasUserKey}
+          hasAuthToken={siweToken !== null}
         />
         <ActivityCard entries={activity} />
         <PositionsCard positions={positions} />
@@ -607,8 +649,8 @@ function PoolDetailCard({ pool, aave }: { pool: PoolDetail | null; aave: Aave | 
     );
   }
 
-  const onChainAssets = BigInt(pool.total_assets);
-  const liveAssets = aave ? BigInt(aave.aTokenBalance) : null;
+  const onChainAssets = safeBigInt(pool.total_assets);
+  const liveAssets = aave ? safeBigInt(aave.aTokenBalance) : null;
   const drift = liveAssets !== null ? liveAssets - onChainAssets : null;
   const driftClass =
     drift === null
@@ -747,7 +789,8 @@ function ActionCard({
   onWithdraw,
   pendingAction,
   position,
-  hasUserKey
+  hasUserKey,
+  hasAuthToken
 }: {
   poolId: string;
   amountHuman: string;
@@ -760,17 +803,22 @@ function ActionCard({
   pendingAction: null | "deposit" | "withdraw" | "quote";
   position: Position | undefined;
   hasUserKey: boolean;
+  hasAuthToken: boolean;
 }) {
   const disabled = !poolId || !amountBaseUnits || pendingAction !== null;
   const noKey = !hasUserKey;
+  const noAuth = !hasAuthToken;
   return (
     <Card>
       <CardHeader>
         <div className="flex items-center justify-between">
           <CardTitle>Actions</CardTitle>
-          {noKey && <Badge variant="destructive">user key missing</Badge>}
+          <div className="flex items-center gap-1.5">
+            {noKey && <Badge variant="destructive">user key missing</Badge>}
+            {noAuth && <Badge variant="secondary">siwe required</Badge>}
+          </div>
         </div>
-        <CardDescription>Deposit signs EIP-712 server-side. Withdraw uses the LP signer.</CardDescription>
+        <CardDescription>Deposit signs EIP-712 server-side. Withdraw uses the LP signer and a SIWE auth token.</CardDescription>
       </CardHeader>
       <CardContent className="flex flex-col gap-5">
         <FieldGroup>
@@ -811,7 +859,7 @@ function ActionCard({
             {pendingAction === "deposit" ? <Spinner data-icon="inline-start" /> : null}
             Deposit
           </Button>
-          <Button variant="outline" onClick={onWithdraw} disabled={disabled}>
+          <Button variant="outline" onClick={onWithdraw} disabled={disabled || noKey || noAuth}>
             {pendingAction === "withdraw" ? <Spinner data-icon="inline-start" /> : null}
             Withdraw
           </Button>
@@ -1008,4 +1056,38 @@ function FlexvaultsLauncher() {
       Flexvaults wallet
     </FlexvaultsButton>
   );
+}
+
+class PageErrorBoundary extends Component<
+  { children: ReactNode },
+  { error: Error | null }
+> {
+  state = { error: null as Error | null };
+
+  static getDerivedStateFromError(error: Error) {
+    return { error };
+  }
+
+  componentDidCatch(error: Error) {
+    console.error("PageErrorBoundary caught:", error);
+  }
+
+  render() {
+    if (this.state.error) {
+      return (
+        <main className="mx-auto flex min-h-screen w-full max-w-3xl flex-col gap-4 px-6 py-10">
+          <Alert variant="destructive">
+            <AlertTitle>Render failed</AlertTitle>
+            <AlertDescription>
+              {this.state.error.message || String(this.state.error)}
+            </AlertDescription>
+          </Alert>
+          <Button variant="outline" onClick={() => this.setState({ error: null })}>
+            Retry
+          </Button>
+        </main>
+      );
+    }
+    return this.props.children;
+  }
 }

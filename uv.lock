@@ -797,41 +797,19 @@ wheels = [
 ]
 
 [[package]]
-name = "flexvaults-sdk"
-version = "0.1.13"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "eth-account" },
-    { name = "eth-typing" },
-    { name = "httpx" },
-    { name = "pydantic" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/12/df/a7ec88cf5ba719c301fab1d6820b1b30bd88021ced17d3cb5962544f9de1/flexvaults_sdk-0.1.13.tar.gz", hash = "sha256:fc3ad5f39c9eff0f2288fc26e254d93da745520ee0a6eb20581403837f4ed271", size = 100859, upload-time = "2026-04-22T14:43:49.788Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/e2/18/48bc8d372e7a625169ae7a16c7a7861d20a41b12de015633643064d03055/flexvaults_sdk-0.1.13-py3-none-any.whl", hash = "sha256:ec8e6ad300eafe53eb0a93dec05140221b41f0b9ef3821028ace747ac32bf409", size = 20797, upload-time = "2026-04-22T14:43:48.178Z" },
-]
-
-[[package]]
 name = "flexvaults-swap"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "eth-account" },
     { name = "fastapi" },
-    { name = "flexvaults-sdk" },
     { name = "httpx" },
+    { name = "oasis-privana" },
     { name = "oasis-sapphire-py" },
     { name = "pydantic" },
     { name = "python-dotenv" },
     { name = "uvicorn", extra = ["standard"] },
     { name = "web3" },
-]
-
-[package.optional-dependencies]
-dev = [
-    { name = "pytest" },
-    { name = "pytest-asyncio" },
-    { name = "ruff" },
 ]
 
 [package.dev-dependencies]
@@ -843,20 +821,16 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "eth-account", specifier = ">=0.11.0" },
-    { name = "fastapi", specifier = ">=0.104.0" },
-    { name = "flexvaults-sdk", specifier = ">=0.1.13" },
-    { name = "httpx", specifier = ">=0.25.0" },
-    { name = "oasis-sapphire-py", specifier = ">=0.4.2" },
-    { name = "pydantic", specifier = ">=2.0.0" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0.0" },
-    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.21.0" },
-    { name = "python-dotenv", specifier = ">=1.0.0" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.1.0" },
-    { name = "uvicorn", extras = ["standard"], specifier = ">=0.24.0" },
-    { name = "web3", specifier = ">=6.0.0" },
+    { name = "eth-account", specifier = ">=0.13,<0.14" },
+    { name = "fastapi", specifier = ">=0.135,<0.137" },
+    { name = "httpx", specifier = ">=0.28,<0.30" },
+    { name = "oasis-privana", specifier = ">=0.1.16,<0.2" },
+    { name = "oasis-sapphire-py", specifier = ">=0.4.2,<0.5" },
+    { name = "pydantic", specifier = ">=2.12,<3" },
+    { name = "python-dotenv", specifier = ">=1.0,<2" },
+    { name = "uvicorn", extras = ["standard"], specifier = ">=0.42,<0.44" },
+    { name = "web3", specifier = ">=7.14,<8" },
 ]
-provides-extras = ["dev"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -1185,6 +1159,21 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/0c/f7/addf1087b860ac60e6f382240f64fb99f8bfb532bb06f7c542b83c29ca61/multidict-6.7.1-cp314-cp314t-win_amd64.whl", hash = "sha256:497bde6223c212ba11d462853cfa4f0ae6ef97465033e7dc9940cdb3ab5b48e5", size = 53542, upload-time = "2026-01-26T02:46:08.809Z" },
     { url = "https://files.pythonhosted.org/packages/4c/81/4629d0aa32302ef7b2ec65c75a728cc5ff4fa410c50096174c1632e70b3e/multidict-6.7.1-cp314-cp314t-win_arm64.whl", hash = "sha256:2bbd113e0d4af5db41d5ebfe9ccaff89de2120578164f86a5d17d5a576d1e5b2", size = 44719, upload-time = "2026-01-26T02:46:11.146Z" },
     { url = "https://files.pythonhosted.org/packages/81/08/7036c080d7117f28a4af526d794aab6a84463126db031b007717c1a6676e/multidict-6.7.1-py3-none-any.whl", hash = "sha256:55d97cc6dae627efa6a6e548885712d4864b81110ac76fa4e534c03819fa4a56", size = 12319, upload-time = "2026-01-26T02:46:44.004Z" },
+]
+
+[[package]]
+name = "oasis-privana"
+version = "0.1.16"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "eth-account" },
+    { name = "eth-typing" },
+    { name = "httpx" },
+    { name = "pydantic" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/7c/ad/54219eb8d1dbb69bc8add4b908675096ea99b9601802d0bce4adaf4266c3/oasis_privana-0.1.16.tar.gz", hash = "sha256:d6a1263340f5b33bcf3312f2b9947b4d1cf28597013c6b0195ee8ca02e8155af", size = 108402, upload-time = "2026-05-09T22:20:39.99Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/73/98/92bedcadbe7782c355411dd575fa14ce13044b895b27fef8f56ff54280fc/oasis_privana-0.1.16-py3-none-any.whl", hash = "sha256:3e8836e1690f93413143a9e86e5175f23a41c25f1e63ee5c722b2726e8c4d2bc", size = 27579, upload-time = "2026-05-09T22:20:38.544Z" },
 ]
 
 [[package]]

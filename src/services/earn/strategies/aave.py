@@ -6,9 +6,9 @@ from typing import Awaitable, Callable, Optional, TypeVar
 
 from eth_account import Account
 from flexvaults import (
-    DepositQuoteRequest,
+    DepositAddressRequest,
+    DepositCheckRequest,
     FlexvaultsClient,
-    IncludeDepositRequest,
     SignWithdrawParams,
     WithdrawalRequest,
     WithdrawMessage,
@@ -162,11 +162,16 @@ class AaveStrategy(BaseStrategy):
         Steps:
           1. `aave.withdraw(asset, amount, to=pool_address)`: aTokens burn,
              USDC lands at `pool_address` on Base.
-          2. `get_deposit_quote(...)`: ask accounting where on Base to send
-             the funds so they get credited to `pool_address`.
+          2. `get_deposit_address(...)`: ask accounting for the pool's
+             per-account deposit address on Base. Requires the SDK client
+             to be SIWE-authenticated as the pool, since the new privana
+             API derives the user from the auth context (no per-call
+             user_address parameter).
           3. ERC20.transfer USDC from `pool_address` to that deposit address.
-          4. `include_deposit(...)`: nudge accounting to ingest the transfer
-             (idempotent, fine if the relay already saw it).
+          4. `check_deposit(...)`: tell accounting "this tx_hash on chain_id
+             X transferred amount Y" so the relay credits the pool. The
+             response carries a status (`credited` | `pending` | `error`);
+             pending is fine because step 5 polls until the credit lands.
           5. Poll `get_balance(pool_address, token_id)` until it has
              increased by `amount` vs the pre-call snapshot. State-based,
              no timer; the call only returns when the credit is observed.
@@ -174,7 +179,7 @@ class AaveStrategy(BaseStrategy):
         if amount <= 0:
             raise ValueError(f"withdraw_from_earn requires a positive amount, got {amount}")
 
-        client = self._get_flexvaults()
+        client = await self._get_authed_flexvaults()
         pre_balance = await self._read_pool_balance()
 
         redeem_tx = self._client.withdraw(self._asset_address, amount, to=self._pool_address)
@@ -183,35 +188,37 @@ class AaveStrategy(BaseStrategy):
             self._asset_address, amount, redeem_tx,
         )
 
-        quote = await client.get_deposit_quote(
-            DepositQuoteRequest(
-                user_address=self._pool_address,
-                token_id=self._token_id,
-                amount=amount,
-            )
+        deposit = await client.get_deposit_address(
+            DepositAddressRequest(chain_type="evm")
         )
 
         transfer_tx = self._client.transfer_erc20(
             self._asset_address,
-            quote.deposit_address,
+            deposit.deposit_address,
             amount,
         )
         logger.info(
             "AaveStrategy.withdraw_from_earn: forwarded to deposit_address=%s amount=%d tx=%s",
-            quote.deposit_address, amount, transfer_tx,
+            deposit.deposit_address, amount, transfer_tx,
         )
 
         try:
-            await client.include_deposit(
-                IncludeDepositRequest(
-                    user_address=self._pool_address,
-                    token_id=self._token_id,
-                    evm_transaction_data=transfer_tx,
+            check = await client.check_deposit(
+                DepositCheckRequest(
+                    chain_id=self._client.w3.eth.chain_id,
+                    tx_hash=transfer_tx,
+                    amount=amount,
                 )
             )
+            if check.status == "error":
+                logger.warning(
+                    "AaveStrategy.withdraw_from_earn: check_deposit reported error: %s; "
+                    "relying on relay auto-pickup",
+                    check.detail,
+                )
         except Exception as exc:
             logger.warning(
-                "AaveStrategy.withdraw_from_earn: include_deposit nudge failed (%s); "
+                "AaveStrategy.withdraw_from_earn: check_deposit nudge failed (%s); "
                 "relying on relay auto-pickup",
                 exc,
             )
@@ -288,7 +295,6 @@ class AaveStrategy(BaseStrategy):
                 network=self._network,
                 verifying_contract=self._accounting_contract,
                 message=WithdrawMessage(
-                    user_address=self._pool_address,
                     token_id=self._token_id,
                     amount=amount,
                     nonce=nonce,
@@ -297,7 +303,6 @@ class AaveStrategy(BaseStrategy):
         )
         submission = await client.request_withdrawal(
             WithdrawalRequest(
-                user_address=self._pool_address,
                 token_id=self._token_id,
                 amount=amount,
                 nonce=nonce,

@@ -10,7 +10,7 @@ from src.models.settings import Settings
 ASSET_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
 TOKEN_ID = "0xc719650e9f4b0f27d956638c54518932ef9d15e720a1a2b2850250bcd0816514"
 POOL_ADDRESS = "0xd8991364507FAfC256EafF950d28618735753476"
-LP_PRIVATE_KEY = "0x7b07a59f24f1900ec4e6ac3e521c1acd2cca3518f717abda1dc8bbcbbc344c4e"
+LP_PRIVATE_KEY = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
 ACCOUNTING_CONTRACT = "0xFfB141bF8269E458b074A274bE6E8F971f08A401"
 DEPOSIT_ADDRESS_BASE = "0x1d5D19e0e68001624323f63c60479BD3AeE7E029"
 
@@ -74,19 +74,19 @@ class _TransactionData:
 
 
 @dataclass
-class _DepositQuote:
-    user_address: str
-    token_id: str
-    amount: int
+class _DepositAddressResponse:
     deposit_address: str
-    transaction: _TransactionData
-    instructions: str = ""
+    chain_type: str = "evm"
+    version: int = 0
 
 
 @dataclass
-class _IncludeDepositResponse:
-    submission_id: str
+class _DepositCheckResponse:
     status: str = "pending"
+    deposit_id: str | None = None
+    amount: str | None = None
+    token_address: str | None = None
+    detail: str | None = None
 
 
 def _strategy_settings() -> Settings:
@@ -118,17 +118,11 @@ def flexvaults():
     client.get_withdrawal_info = AsyncMock(
         return_value=_WithdrawalInfo(index=1, resolved=True, tx_identifier="0xabc"),
     )
-    client.get_deposit_quote = AsyncMock(
-        return_value=_DepositQuote(
-            user_address=POOL_ADDRESS,
-            token_id=TOKEN_ID,
-            amount=1_000_000,
-            deposit_address=DEPOSIT_ADDRESS_BASE,
-            transaction=_TransactionData(),
-        ),
+    client.get_deposit_address = AsyncMock(
+        return_value=_DepositAddressResponse(deposit_address=DEPOSIT_ADDRESS_BASE),
     )
-    client.include_deposit = AsyncMock(
-        return_value=_IncludeDepositResponse(submission_id="dep-1"),
+    client.check_deposit = AsyncMock(
+        return_value=_DepositCheckResponse(status="pending", deposit_id="dep-1"),
     )
     client.get_balance = AsyncMock(
         return_value=_Balance(user_address=POOL_ADDRESS, token_id=TOKEN_ID, balance=0),
@@ -213,7 +207,6 @@ async def test_deposit_to_earn_bridges_then_supplies(strategy, aave_client, flex
     flexvaults.get_withdrawal_nonce.assert_awaited_once_with(POOL_ADDRESS)
     flexvaults.request_withdrawal.assert_awaited_once()
     sent_request = flexvaults.request_withdrawal.await_args.args[0]
-    assert sent_request.user_address == POOL_ADDRESS
     assert sent_request.token_id == TOKEN_ID
     assert sent_request.amount == 1_000_000
     assert sent_request.nonce == 7
@@ -310,21 +303,19 @@ async def test_withdraw_from_earn_redeems_transfers_and_polls_until_credited(
 
     aave_client.withdraw.assert_called_once_with(ASSET_ADDRESS, 1_000_000, to=POOL_ADDRESS)
 
-    flexvaults.get_deposit_quote.assert_awaited_once()
-    quote_request = flexvaults.get_deposit_quote.await_args.args[0]
-    assert quote_request.user_address == POOL_ADDRESS
-    assert quote_request.token_id == TOKEN_ID
-    assert quote_request.amount == 1_000_000
+    flexvaults.get_deposit_address.assert_awaited_once()
+    address_request = flexvaults.get_deposit_address.await_args.args[0]
+    assert address_request.chain_type == "evm"
 
     aave_client.transfer_erc20.assert_called_once_with(
         ASSET_ADDRESS, DEPOSIT_ADDRESS_BASE, 1_000_000,
     )
 
-    flexvaults.include_deposit.assert_awaited_once()
-    include_request = flexvaults.include_deposit.await_args.args[0]
-    assert include_request.user_address == POOL_ADDRESS
-    assert include_request.token_id == TOKEN_ID
-    assert include_request.evm_transaction_data == "0xtransfer"
+    flexvaults.check_deposit.assert_awaited_once()
+    check_request = flexvaults.check_deposit.await_args.args[0]
+    assert check_request.chain_id == aave_client.w3.eth.chain_id
+    assert check_request.tx_hash == "0xtransfer"
+    assert check_request.amount == 1_000_000
 
     assert flexvaults.get_balance.await_count >= 3
 
@@ -368,7 +359,7 @@ async def test_withdraw_from_earn_propagates_aave_failure(
         await strategy.withdraw_from_earn(1_000_000)
 
     aave_client.transfer_erc20.assert_not_called()
-    flexvaults.include_deposit.assert_not_called()
+    flexvaults.check_deposit.assert_not_called()
 
 
 @pytest.mark.asyncio

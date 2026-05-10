@@ -39,6 +39,7 @@ class VaultService:
         self.sapphire = get_sapphire_client()
         self.accounting = get_accounting_client()
         self._withdraw_lock = asyncio.Lock()
+        self._deposit_lock = asyncio.Lock()
         self._registry = registry if registry is not None else get_strategy_registry()
         self.contract_address = Web3.to_checksum_address(
             self.settings.earn_manager_contract_address
@@ -247,46 +248,47 @@ class VaultService:
 
         sig_bytes = bytes.fromhex(signature.removeprefix("0x"))
 
-        tx_id = self._record_transaction(
-            operation=EARN_OP_DEPOSIT,
-            pool_id_hex=pool_id_hex,
-            user_address=user_address,
-            token_id=pool["token_id"],
-            amount=amount,
-            signer_address=user_address,
-            nonce=nonce,
-            signature=signature,
-        )
-
-        try:
-            tx_hash = await asyncio.to_thread(
-                self.sapphire.execute_contract_call,
-                contract_address=self.contract_address,
-                abi=EARN_MANAGER_ABI,
-                function_name="deposit",
-                args=[
-                    pool_id,
-                    Web3.to_checksum_address(user_address),
-                    int(amount),
-                    nonce,
-                    sig_bytes,
-                ],
+        async with self._deposit_lock:
+            tx_id = self._record_transaction(
+                operation=EARN_OP_DEPOSIT,
+                pool_id_hex=pool_id_hex,
+                user_address=user_address,
+                token_id=pool["token_id"],
+                amount=amount,
+                signer_address=user_address,
+                nonce=nonce,
+                signature=signature,
             )
-        except Exception as exc:
-            logger.exception("Earn deposit %s failed", tx_id)
-            self._update_transaction(tx_id, status=EARN_STATUS_FAILED, error=sanitize_error(str(exc)))
-            return {
-                "pool_id": pool_id_hex,
-                "amount": amount,
-                "shares_minted": None,
-                "exchange_rate": None,
-                "tx_hash": None,
-                "status": "failed",
-            }
 
-        self._update_transaction(tx_id, status=EARN_STATUS_COMPLETED, tx_hash=tx_hash)
+            try:
+                tx_hash = await asyncio.to_thread(
+                    self.sapphire.execute_contract_call,
+                    contract_address=self.contract_address,
+                    abi=EARN_MANAGER_ABI,
+                    function_name="deposit",
+                    args=[
+                        pool_id,
+                        Web3.to_checksum_address(user_address),
+                        int(amount),
+                        nonce,
+                        sig_bytes,
+                    ],
+                )
+            except Exception as exc:
+                logger.exception("Earn deposit %s failed", tx_id)
+                self._update_transaction(tx_id, status=EARN_STATUS_FAILED, error=sanitize_error(str(exc)))
+                return {
+                    "pool_id": pool_id_hex,
+                    "amount": amount,
+                    "shares_minted": None,
+                    "exchange_rate": None,
+                    "tx_hash": None,
+                    "status": "failed",
+                }
 
-        await self._route_to_strategy(pool_id_hex, int(amount))
+            self._update_transaction(tx_id, status=EARN_STATUS_COMPLETED, tx_hash=tx_hash)
+
+            await self._route_to_strategy(pool_id_hex, int(amount))
 
         try:
             pool_after = self.get_pool(pool_id)
@@ -350,9 +352,9 @@ class VaultService:
 
         await self.sync_total_assets(pool_id_hex)
 
-        await self._reclaim_from_strategy(pool_id_hex, int(amount))
-
         async with self._withdraw_lock:
+            await self._reclaim_from_strategy(pool_id_hex, int(amount))
+
             pool_nonce = await self.accounting.get_transfer_nonce(pool["pool_address"])
 
             pool_signature = sign_transfer(

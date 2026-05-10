@@ -12,7 +12,7 @@ from src.clients.flexvaults import (
 from src.models.settings import Settings
 
 
-LP_PRIVATE_KEY = "0x7b07a59f24f1900ec4e6ac3e521c1acd2cca3518f717abda1dc8bbcbbc344c4e"
+LP_PRIVATE_KEY = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
 LP_ADDRESS = "0xd8991364507FAfC256EafF950d28618735753476"
 
 

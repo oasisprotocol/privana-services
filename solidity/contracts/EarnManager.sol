@@ -44,6 +44,18 @@ contract EarnManager is
     bytes32 public constant WITHDRAW_TYPEHASH =
         keccak256("Withdraw(bytes32 poolId,uint256 amount,uint256 nonce)");
 
+    /// @dev Virtual offset applied to share/asset math to neutralize
+    /// first-depositor inflation across `totalShares==0` boundary, including
+    /// the case where an admin pre-seeds `totalAssets` (e.g. via
+    /// `syncTotalAssets` to recognize an off-chain strategy balance) before
+    /// any user has deposited. Mirrors the OZ ERC-4626 ``_decimalsOffset``
+    /// pattern: every calculation behaves as if the contract itself owns
+    /// `VIRTUAL_SHARES` shares against `VIRTUAL_ASSETS` of assets, so a
+    /// 1-wei attacker cannot capture an outsized fraction of pre-existing
+    /// strategy capital.
+    uint256 public constant VIRTUAL_SHARES = 1_000_000;
+    uint256 public constant VIRTUAL_ASSETS = 1;
+
     /// -----------------------------------------------------------------------
     /// State variables
     /// -----------------------------------------------------------------------
@@ -213,15 +225,13 @@ contract EarnManager is
 
         accounting.transferBalance(toUser, pool.poolAddress, pool.tokenId, amount, nonce, signature);
 
-        /// @dev shares = amount * totalShares / totalAssets (round DOWN)
-        /// First depositor gets 1:1. Example: pool has 1050 assets, 1000 shares.
-        /// Depositing 2000 → 2000 * 1000 / 1050 = 1904 shares (not 2000).
-        uint256 shares;
-        if (pool.totalShares == 0) {
-            shares = amount;
-        } else {
-            shares = (amount * pool.totalShares) / pool.totalAssets;
-        }
+        /// @dev shares = amount * (totalShares + VIRTUAL_SHARES) / (totalAssets + VIRTUAL_ASSETS) (round DOWN)
+        /// Virtual offset prevents first-depositor capture: if admin syncs
+        /// totalAssets up before any user deposits, the offset bounds the
+        /// share count of a 1-wei attacker so they cannot claim a meaningful
+        /// fraction of pre-existing strategy capital.
+        uint256 shares = (amount * (pool.totalShares + VIRTUAL_SHARES)) /
+            (pool.totalAssets + VIRTUAL_ASSETS);
 
         pool.totalShares += shares;
         pool.totalAssets += amount;
@@ -273,10 +283,12 @@ contract EarnManager is
         if (withdrawNonces[user] != withdrawNonce) revert InvalidWithdrawSignature();
         withdrawNonces[user] = withdrawNonce + 1;
 
-        /// @dev sharesToBurn = ceil(amount * totalShares / totalAssets)
-        /// Round UP to protect pool. Example: pool has 1050 assets, 1000 shares.
-        /// Withdrawing 100 → ceil(100 * 1000 / 1050) = ceil(95.23) = 96 shares burned.
-        uint256 sharesToBurn = (amount * pool.totalShares + pool.totalAssets - 1) / pool.totalAssets;
+        /// @dev sharesToBurn = ceil(amount * (totalShares + VIRTUAL_SHARES) / (totalAssets + VIRTUAL_ASSETS))
+        /// Round UP to protect pool. Virtual offset matches deposit's math
+        /// so deposit/withdraw round-trips converge.
+        uint256 virtualAssets = pool.totalAssets + VIRTUAL_ASSETS;
+        uint256 sharesToBurn =
+            (amount * (pool.totalShares + VIRTUAL_SHARES) + virtualAssets - 1) / virtualAssets;
         if (userShares[poolId][user] < sharesToBurn) revert InsufficientShares();
 
         pool.totalShares -= sharesToBurn;
@@ -309,20 +321,23 @@ contract EarnManager is
         return withdrawNonces[user];
     }
 
-    /// @dev convertToShares(assets) = assets * totalShares / totalAssets (round DOWN)
-    /// Returns 1:1 if pool is empty. Mimics EIP-4626 convertToShares.
+    /// @dev convertToShares(assets) = assets * (totalShares + VIRTUAL_SHARES) / (totalAssets + VIRTUAL_ASSETS) (round DOWN)
+    /// Mirrors deposit's math, including the virtual offset against
+    /// first-depositor capture. Always defined (no division-by-zero edge
+    /// case from totalAssets==0).
     function convertToShares(bytes32 poolId, uint256 assets) external view returns (uint256) {
         Pool memory pool = pools[poolId];
-        if (pool.totalShares == 0) return assets;
-        return (assets * pool.totalShares) / pool.totalAssets;
+        return (assets * (pool.totalShares + VIRTUAL_SHARES)) /
+            (pool.totalAssets + VIRTUAL_ASSETS);
     }
 
-    /// @dev convertToAssets(shares) = shares * totalAssets / totalShares (round DOWN)
-    /// Returns 1:1 if pool is empty. Mimics EIP-4626 convertToAssets.
+    /// @dev convertToAssets(shares) = shares * (totalAssets + VIRTUAL_ASSETS) / (totalShares + VIRTUAL_SHARES) (round DOWN)
+    /// Always defined: VIRTUAL_SHARES > 0 guarantees the denominator is
+    /// nonzero even on a fresh pool.
     function convertToAssets(bytes32 poolId, uint256 shares) external view returns (uint256) {
         Pool memory pool = pools[poolId];
-        if (pool.totalShares == 0) return shares;
-        return (shares * pool.totalAssets) / pool.totalShares;
+        return (shares * (pool.totalAssets + VIRTUAL_ASSETS)) /
+            (pool.totalShares + VIRTUAL_SHARES);
     }
 
     function getPoolCount() external view returns (uint256) {

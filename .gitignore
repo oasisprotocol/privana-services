@@ -107,10 +107,6 @@ solidity/cache/
 solidity/typechain-types/
 solidity/.env
 
-# OpenZeppelin Upgrades manifests are local to each environment (the Sapphire
-# testnet manifest lives at solidity/.openzeppelin/unknown-23295.json). Commit
-# manifests for any chain you intend to upgrade later, ignore the rest. The
-# entry below is intentionally narrow so you do not accidentally lose an
-# upgrade-safety manifest.
-solidity/.openzeppelin/unknown-*.json
-!solidity/.openzeppelin/unknown-23295.json
+# OpenZeppelin Upgrades manifests are per-developer state and are never
+# committed to this repo by team convention.
+solidity/.openzeppelin/

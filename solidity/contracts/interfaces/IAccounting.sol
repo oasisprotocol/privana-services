@@ -18,8 +18,11 @@ interface IAccounting {
         bytes calldata signature
     ) external;
 
+    /// @notice Balance of the SIWE-authenticated caller for ``tokenId``.
+    /// The user is recovered on-chain from ``token`` via the SIWE auth
+    /// helper; there is no separate ``user`` parameter, only the bearer of
+    /// a valid token can read their own balance.
     function balanceOf(
-        address user,
         bytes32 tokenId,
         bytes calldata token
     ) external view returns (uint256);

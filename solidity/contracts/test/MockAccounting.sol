@@ -39,11 +39,16 @@ contract MockAccounting is IAccounting {
         balances[toAddress][tokenId] += amount;
     }
 
+    /// @dev Mock parity with the real ``balanceOf``: recover the caller from
+    /// the encrypted ``token`` (via the same sentinel-address convention
+    /// MockSiweAuth uses) and return their balance. Production accounting
+    /// resolves the caller via Sapphire-encrypted SIWE; the mock just
+    /// abi-decodes the token bytes.
     function balanceOf(
-        address user,
         bytes32 tokenId,
-        bytes calldata
+        bytes calldata token
     ) external view override returns (uint256) {
+        address user = siweAuth.authSender(token);
         return balances[user][tokenId];
     }
 }

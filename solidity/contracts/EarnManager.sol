@@ -59,7 +59,7 @@ contract EarnManager is Ownable {
         if (!pool.active) revert PoolNotActive();
         if (amount == 0) revert ZeroAmount();
 
-        accounting.transferBalance(user, pool.poolAddress, pool.tokenId, amount, nonce, signature);
+        accounting.transferBalance(pool.poolAddress, pool.tokenId, amount, nonce, signature);
 
         /// @dev shares = amount * totalShares / totalAssets (round DOWN)
         /// First depositor gets 1:1. Example: pool has 1050 assets, 1000 shares.
@@ -97,7 +97,7 @@ contract EarnManager is Ownable {
         pool.totalAssets -= amount;
         userShares[poolId][user] -= sharesToBurn;
 
-        accounting.transferBalance(pool.poolAddress, user, pool.tokenId, amount, nonce, signature);
+        accounting.transferBalance(user, pool.tokenId, amount, nonce, signature);
     }
 
     function harvest(bytes32 poolId, uint256 yieldAmount) external onlyOwner {
@@ -111,7 +111,7 @@ contract EarnManager is Ownable {
     }
 
     function getUserShares(address user, bytes32 poolId, bytes calldata token) external view returns (uint256) {
-        accounting.balanceOf(user, bytes32(0), token);
+        accounting.balanceOf(bytes32(0), token);
         return userShares[poolId][user];
     }
 

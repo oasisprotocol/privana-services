@@ -13,23 +13,23 @@ contract MockAccounting is IAccounting {
     }
 
     function transferBalance(
-        address userAddress,
         address toAddress,
         bytes32 tokenId,
         uint256 amount,
         uint256,
-        bytes calldata
-    ) external override {
+        bytes calldata token
+    ) public override {
+        address userAddress = abi.decode(token, (address));
         if (balances[userAddress][tokenId] < amount) revert InsufficientBalance();
         balances[userAddress][tokenId] -= amount;
         balances[toAddress][tokenId] += amount;
     }
 
     function balanceOf(
-        address user,
         bytes32 tokenId,
-        bytes calldata
-    ) external view override returns (uint256) {
-        return balances[user][tokenId];
+        bytes calldata token
+    ) public view override returns (uint256) {
+        address userAddress = abi.decode(token, (address));
+        return balances[userAddress][tokenId];
     }
 }

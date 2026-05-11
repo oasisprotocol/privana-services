@@ -1,6 +1,7 @@
 import { expect } from 'chai';
 import { ethers } from 'hardhat';
 import { loadFixture } from '@nomicfoundation/hardhat-network-helpers';
+import {mockSig} from "./utils";
 
 describe('SwapManager', function () {
   const INPUT_TOKEN_ID = ethers.keccak256(ethers.toUtf8Bytes('ETH'));
@@ -65,8 +66,8 @@ describe('SwapManager', function () {
 
       await swapManager.swap(
         user.address,
-        INPUT_TOKEN_ID, inputAmount, 0, DUMMY_SIG,
-        OUTPUT_TOKEN_ID, outputAmount, 0, DUMMY_SIG
+        INPUT_TOKEN_ID, inputAmount, 0, mockSig(user.address),
+        OUTPUT_TOKEN_ID, outputAmount, 0, mockSig(liquidityProvider.address),
       );
 
       expect(await mockAccounting.balances(user.address, INPUT_TOKEN_ID)).to.equal(0);
@@ -85,8 +86,8 @@ describe('SwapManager', function () {
 
       const tx = await swapManager.swap(
         user.address,
-        INPUT_TOKEN_ID, inputAmount, 0, DUMMY_SIG,
-        OUTPUT_TOKEN_ID, outputAmount, 0, DUMMY_SIG
+        INPUT_TOKEN_ID, inputAmount, 0, mockSig(user.address),
+        OUTPUT_TOKEN_ID, outputAmount, 0, mockSig(liquidityProvider.address)
       );
       const receipt = await tx.wait();
       expect(receipt!.logs.length).to.equal(0);
@@ -102,8 +103,8 @@ describe('SwapManager', function () {
 
       await swapManager.connect(relayer).swap(
         user.address,
-        INPUT_TOKEN_ID, inputAmount, 0, DUMMY_SIG,
-        OUTPUT_TOKEN_ID, outputAmount, 0, DUMMY_SIG
+        INPUT_TOKEN_ID, inputAmount, 0, mockSig(user.address),
+        OUTPUT_TOKEN_ID, outputAmount, 0, mockSig(liquidityProvider.address)
       );
 
       expect(await mockAccounting.balances(user.address, OUTPUT_TOKEN_ID)).to.equal(outputAmount);
@@ -119,8 +120,8 @@ describe('SwapManager', function () {
 
       await swapManager.swap(
         user.address,
-        INPUT_TOKEN_ID, inputAmount, 0, DUMMY_SIG,
-        INPUT_TOKEN_ID, outputAmount, 0, DUMMY_SIG
+        INPUT_TOKEN_ID, inputAmount, 0, mockSig(user.address),
+        INPUT_TOKEN_ID, outputAmount, 0, mockSig(liquidityProvider.address)
       );
 
       expect(await mockAccounting.balances(user.address, INPUT_TOKEN_ID)).to.equal(outputAmount);
@@ -136,8 +137,8 @@ describe('SwapManager', function () {
       for (let i = 0; i < 3; i++) {
         await swapManager.swap(
           user.address,
-          INPUT_TOKEN_ID, ethers.parseEther('1'), i, DUMMY_SIG,
-          OUTPUT_TOKEN_ID, ethers.parseUnits('2000', 6), i, DUMMY_SIG
+          INPUT_TOKEN_ID, ethers.parseEther('1'), i, mockSig(user.address),
+          OUTPUT_TOKEN_ID, ethers.parseUnits('2000', 6), i, mockSig(liquidityProvider.address)
         );
       }
 
@@ -155,8 +156,8 @@ describe('SwapManager', function () {
 
       await swapManager.swap(
         user.address,
-        INPUT_TOKEN_ID, ethers.parseEther('2'), 0, DUMMY_SIG,
-        OUTPUT_TOKEN_ID, ethers.parseUnits('4000', 6), 0, DUMMY_SIG
+        INPUT_TOKEN_ID, ethers.parseEther('2'), 0, mockSig(user.address),
+        OUTPUT_TOKEN_ID, ethers.parseUnits('4000', 6), 0, mockSig(liquidityProvider.address)
       );
 
       expect(await mockAccounting.balances(user.address, INPUT_TOKEN_ID)).to.equal(ethers.parseEther('3'));
@@ -172,8 +173,8 @@ describe('SwapManager', function () {
       await expect(
         swapManager.swap(
           user.address,
-          INPUT_TOKEN_ID, ethers.parseEther('1'), 42, DUMMY_SIG,
-          OUTPUT_TOKEN_ID, ethers.parseUnits('2000', 6), 99, DUMMY_SIG
+          INPUT_TOKEN_ID, ethers.parseEther('1'), 42, mockSig(user.address),
+          OUTPUT_TOKEN_ID, ethers.parseUnits('2000', 6), 99, mockSig(liquidityProvider.address)
         )
       ).to.not.be.reverted;
     });
@@ -271,16 +272,16 @@ describe('SwapManager', function () {
       for (let i = 0; i < 3; i++) {
         await swapManager.swap(
           user.address,
-          INPUT_TOKEN_ID, ethers.parseEther('1'), i, DUMMY_SIG,
-          OUTPUT_TOKEN_ID, ethers.parseUnits('2000', 6), i, DUMMY_SIG
+          INPUT_TOKEN_ID, ethers.parseEther('1'), i, mockSig(user.address),
+          OUTPUT_TOKEN_ID, ethers.parseUnits('2000', 6), i, mockSig(liquidityProvider.address)
         );
       }
 
       await expect(
         swapManager.swap(
           user.address,
-          INPUT_TOKEN_ID, ethers.parseEther('1'), 3, DUMMY_SIG,
-          OUTPUT_TOKEN_ID, ethers.parseUnits('2000', 6), 3, DUMMY_SIG
+          INPUT_TOKEN_ID, ethers.parseEther('1'), 3, mockSig(user.address),
+          OUTPUT_TOKEN_ID, ethers.parseUnits('2000', 6), 3, mockSig(liquidityProvider.address)
         )
       ).to.be.revertedWithCustomError(mockAccounting, 'InsufficientBalance');
     });

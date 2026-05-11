@@ -21,7 +21,7 @@ contract SwapManager is Ownable {
     }
 
     function swap(
-        address user,
+        address user, // TODO: Should be derived from inputSignature.
         bytes32 inputTokenId,
         uint256 inputAmount,
         uint256 inputNonce,
@@ -34,7 +34,6 @@ contract SwapManager is Ownable {
         if (inputAmount == 0 || outputAmount == 0) revert ZeroAmount();
 
         accounting.transferBalance(
-            user,
             liquidityProvider,
             inputTokenId,
             inputAmount,
@@ -43,7 +42,6 @@ contract SwapManager is Ownable {
         );
 
         accounting.transferBalance(
-            liquidityProvider,
             user,
             outputTokenId,
             outputAmount,

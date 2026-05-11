@@ -53,9 +53,9 @@ cp .env.testnet .env
 
 | Contract | Address |
 |----------|---------|
-| SwapManager | `0x8eEDCff0b07609Cfb5e2775dFf21EDbACc30D0df` |
-| EarnManager | `0xCDea2449E4401591006917Fc8D769a46C49D4Ad3` |
-| Accounting (proxy) | `0xFfB141bF8269E458b074A274bE6E8F971f08A401` |
+| SwapManager | `0x6a0a11Aa78c575e6C9CFD295104F36b3964991BC` |
+| EarnManager | `0x96e8fFdb9432f2A56CDeF0F9834E10A47ea029F9` |
+| Accounting (proxy) | `0xad3C76e4E621C0cfF7540479Ee9B0A945723A642` |
 
 ### Earn Pools
 

@@ -19,7 +19,7 @@ def _make_service(registry=None):
         earn_manager_contract_address="0x1111111111111111111111111111111111111111",
         liquidity_provider_secret_key="0x4c0883a69102937d6231471b5dbb6204fe512961708279f69e0f0fcbf24b5830",
         liquidity_provider_address=POOL_ADDRESS,
-        accounting_contract_address="0xFfB141bF8269E458b074A274bE6E8F971f08A401",
+        accounting_contract_address="0xad3C76e4E621C0cfF7540479Ee9B0A945723A642",
         accounting_chain_id=23295,
     )
 

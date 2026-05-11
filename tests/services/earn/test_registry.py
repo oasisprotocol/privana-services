@@ -41,7 +41,7 @@ def _settings() -> Settings:
             "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
         ),
         liquidity_provider_address="0xd8991364507FAfC256EafF950d28618735753476",
-        accounting_contract_address="0xFfB141bF8269E458b074A274bE6E8F971f08A401",
+        accounting_contract_address="0xad3C76e4E621C0cfF7540479Ee9B0A945723A642",
         accounting_chain_id=23295,
     )
 

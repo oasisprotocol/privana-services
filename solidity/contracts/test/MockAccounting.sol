@@ -10,6 +10,7 @@ contract MockAccounting is IAccounting {
     IAccountingSiweAuth public override siweAuth;
 
     error InsufficientBalance();
+    error InvalidMockSignature();
 
     constructor() {
         siweAuth = new MockSiweAuth();
@@ -19,14 +20,20 @@ contract MockAccounting is IAccounting {
         balances[user][tokenId] = amount;
     }
 
+    /// @notice Mirrors Accounting.transferBalance but recovers the sender by
+    /// abi-decoding the `signature` as a packed sentinel address. This keeps
+    /// tests deterministic without bringing the full EIP-712 + ECDSA
+    /// machinery into the mock. Production accounting recovers the sender
+    /// from a real Transfer signature via ECDSA.
     function transferBalance(
-        address userAddress,
         address toAddress,
         bytes32 tokenId,
         uint256 amount,
         uint256,
-        bytes calldata
+        bytes calldata signature
     ) external override {
+        if (signature.length != 32) revert InvalidMockSignature();
+        address userAddress = abi.decode(signature, (address));
         if (balances[userAddress][tokenId] < amount) revert InsufficientBalance();
         balances[userAddress][tokenId] -= amount;
         balances[toAddress][tokenId] += amount;

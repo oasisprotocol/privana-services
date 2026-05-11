@@ -361,7 +361,6 @@ class VaultService:
                 private_key=self.settings.liquidity_provider_secret_key,
                 chain_id=self.settings.accounting_chain_id,
                 verifying_contract=self.settings.accounting_contract_address,
-                user_address=pool["pool_address"],
                 to_address=user_address,
                 token_id=pool["token_id"],
                 amount=int(amount),

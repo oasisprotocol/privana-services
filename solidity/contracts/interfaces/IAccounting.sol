@@ -5,8 +5,12 @@ pragma solidity ^0.8.24;
 import "./IAccountingSiweAuth.sol";
 
 interface IAccounting {
+    /// @notice Move `amount` of `tokenId` to `toAddress`. The sender is
+    /// derived on-chain via ECDSA recovery from the EIP-712 ``Transfer``
+    /// signature (no separate from-address parameter). Accounting's
+    /// ``EIP712SignatureVerifier`` checks ``nonce`` against the recovered
+    /// signer's ``transferNonces[user]`` and reverts on mismatch.
     function transferBalance(
-        address userAddress,
         address toAddress,
         bytes32 tokenId,
         uint256 amount,

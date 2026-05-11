@@ -20,6 +20,12 @@ contract SwapManager is Ownable {
         liquidityProvider = _liquidityProvider;
     }
 
+    /// @notice Atomically swap `inputAmount` of `inputTokenId` from the
+    /// signed-by user into the LP's balance, and `outputAmount` of
+    /// `outputTokenId` from the LP's balance to `user`. Accounting recovers
+    /// each transfer's sender from the corresponding EIP-712 signature, so
+    /// no explicit from-address is forwarded; the explicit `user` here is
+    /// the LP-signed destination of the output leg.
     function swap(
         address user,
         bytes32 inputTokenId,
@@ -34,7 +40,6 @@ contract SwapManager is Ownable {
         if (inputAmount == 0 || outputAmount == 0) revert ZeroAmount();
 
         accounting.transferBalance(
-            user,
             liquidityProvider,
             inputTokenId,
             inputAmount,
@@ -43,7 +48,6 @@ contract SwapManager is Ownable {
         );
 
         accounting.transferBalance(
-            liquidityProvider,
             user,
             outputTokenId,
             outputAmount,

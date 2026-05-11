@@ -5,7 +5,6 @@ import { env } from "./env";
 
 const TRANSFER_TYPES = {
   Transfer: [
-    { name: "userAddress", type: "address" },
     { name: "toAddress", type: "address" },
     { name: "tokenId", type: "bytes32" },
     { name: "amount", type: "uint256" },
@@ -22,7 +21,6 @@ const WITHDRAW_TYPES = {
 } as const;
 
 export const signTransfer = async (params: {
-  userAddress: Address;
   toAddress: Address;
   tokenId: Hex;
   amount: bigint;
@@ -42,7 +40,6 @@ export const signTransfer = async (params: {
     types: TRANSFER_TYPES,
     primaryType: "Transfer",
     message: {
-      userAddress: params.userAddress,
       toAddress: params.toAddress,
       tokenId: params.tokenId,
       amount: params.amount,

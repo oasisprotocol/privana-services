@@ -10,7 +10,14 @@ describe('EarnManager', function () {
   const TOKEN_DATA = ethers.solidityPacked(['uint256', 'address'], [CHAIN_ID, USDC_ADDRESS]);
   const TOKEN_ID = ethers.keccak256(ethers.AbiCoder.defaultAbiCoder().encode(['uint8', 'bytes'], [1, TOKEN_DATA]));
   const POOL_ID = ethers.keccak256(ethers.toUtf8Bytes('usdc-aave-v3'));
-  const DUMMY_SIG = '0x' + '00'.repeat(65);
+
+  // MockAccounting recovers the sender by abi-decoding the signature as
+  // a packed address sentinel. Production accounting recovers via ECDSA
+  // over the new ``Transfer(address,bytes32,uint256,uint256)`` typehash;
+  // mock keeps tests light-weight while preserving "transfer authority
+  // comes from the signature" semantics.
+  const mockSig = (sender: string): string =>
+    ethers.AbiCoder.defaultAbiCoder().encode(['address'], [sender]);
 
   // Mirror EarnManager.sol's virtual offset so test arithmetic matches the
   // contract. Bumping VS in the contract must keep these in lockstep.
@@ -87,17 +94,17 @@ describe('EarnManager', function () {
 
   describe('deployment', function () {
     it('should set accounting address', async function () {
-      const { earnManager, mockAccounting } = await loadFixture(deployFixture);
+      const { earnManager, mockAccounting, poolWallet } = await loadFixture(deployFixture);
       expect(await earnManager.accounting()).to.equal(await mockAccounting.getAddress());
     });
 
     it('should set deployer as owner', async function () {
-      const { earnManager, owner } = await loadFixture(deployFixture);
+      const { earnManager, owner, poolWallet } = await loadFixture(deployFixture);
       expect(await earnManager.owner()).to.equal(owner.address);
     });
 
     it('should set deployer as poolAdmin', async function () {
-      const { earnManager, owner } = await loadFixture(deployFixture);
+      const { earnManager, owner, poolWallet } = await loadFixture(deployFixture);
       expect(await earnManager.poolAdmin()).to.equal(owner.address);
     });
 
@@ -116,7 +123,7 @@ describe('EarnManager', function () {
     });
 
     it('should reject zero pool admin address', async function () {
-      const { mockAccounting } = await loadFixture(deployFixture);
+      const { mockAccounting, poolWallet } = await loadFixture(deployFixture);
       const factory = await ethers.getContractFactory('EarnManager');
       await expect(
         upgrades.deployProxy(
@@ -133,19 +140,19 @@ describe('EarnManager', function () {
 
   describe('setPoolAdmin', function () {
     it('should rotate the pool admin', async function () {
-      const { earnManager, otherUser } = await loadFixture(deployFixture);
+      const { earnManager, otherUser, poolWallet } = await loadFixture(deployFixture);
       await earnManager.setPoolAdmin(otherUser.address);
       expect(await earnManager.poolAdmin()).to.equal(otherUser.address);
     });
 
     it('should reject zero address', async function () {
-      const { earnManager } = await loadFixture(deployFixture);
+      const { earnManager, poolWallet } = await loadFixture(deployFixture);
       await expect(earnManager.setPoolAdmin(ethers.ZeroAddress))
         .to.be.revertedWithCustomError(earnManager, 'ZeroAddress');
     });
 
     it('should reject non-owner', async function () {
-      const { earnManager, user, otherUser } = await loadFixture(deployFixture);
+      const { earnManager, user, otherUser, poolWallet } = await loadFixture(deployFixture);
       await expect(earnManager.connect(user).setPoolAdmin(otherUser.address))
         .to.be.revertedWithCustomError(earnManager, 'OwnableUnauthorizedAccount');
     });
@@ -179,7 +186,7 @@ describe('EarnManager', function () {
     });
 
     it('should reject zero pool address', async function () {
-      const { earnManager } = await loadFixture(deployFixture);
+      const { earnManager, poolWallet } = await loadFixture(deployFixture);
       await expect(earnManager.createPool(POOL_ID, TOKEN_ID, ethers.ZeroAddress))
         .to.be.revertedWithCustomError(earnManager, 'ZeroAddress');
     });
@@ -198,7 +205,7 @@ describe('EarnManager', function () {
 
       await mockAccounting.setBalance(user.address, TOKEN_ID, amount);
 
-      await earnManager.deposit(POOL_ID, user.address, amount, 0, DUMMY_SIG);
+      await earnManager.deposit(POOL_ID, user.address, amount, 0, mockSig(user.address));
 
       const expectedShares = expectedDepositShares(0n, 0n, amount);
       const pool = await earnManager.pools(POOL_ID);
@@ -214,7 +221,7 @@ describe('EarnManager', function () {
       const secondAmount = ethers.parseUnits('2000', 6);
 
       await mockAccounting.setBalance(user.address, TOKEN_ID, firstAmount);
-      await earnManager.deposit(POOL_ID, user.address, firstAmount, 0, DUMMY_SIG);
+      await earnManager.deposit(POOL_ID, user.address, firstAmount, 0, mockSig(user.address));
 
       await earnManager.harvest(POOL_ID, harvestAmount);
 
@@ -222,7 +229,7 @@ describe('EarnManager', function () {
       const secondShares = expectedDepositShares(firstShares, firstAmount + harvestAmount, secondAmount);
 
       await mockAccounting.setBalance(otherUser.address, TOKEN_ID, secondAmount);
-      await earnManager.deposit(POOL_ID, otherUser.address, secondAmount, 0, DUMMY_SIG);
+      await earnManager.deposit(POOL_ID, otherUser.address, secondAmount, 0, mockSig(otherUser.address));
 
       const otherShares = await earnManager.getUserShares(POOL_ID, authToken(otherUser.address));
       expect(otherShares).to.equal(secondShares);
@@ -233,28 +240,28 @@ describe('EarnManager', function () {
       const amount = ethers.parseUnits('1000', 6);
 
       await mockAccounting.setBalance(user.address, TOKEN_ID, amount);
-      await earnManager.deposit(POOL_ID, user.address, amount, 0, DUMMY_SIG);
+      await earnManager.deposit(POOL_ID, user.address, amount, 0, mockSig(user.address));
 
       expect(await mockAccounting.balances(user.address, TOKEN_ID)).to.equal(0);
       expect(await mockAccounting.balances(poolWallet.address, TOKEN_ID)).to.equal(amount);
     });
 
     it('should reject zero amount', async function () {
-      const { earnManager, user } = await deployWithPool();
-      await expect(earnManager.deposit(POOL_ID, user.address, 0, 0, DUMMY_SIG))
+      const { earnManager, user, poolWallet } = await deployWithPool();
+      await expect(earnManager.deposit(POOL_ID, user.address, 0, 0, mockSig(user.address)))
         .to.be.revertedWithCustomError(earnManager, 'ZeroAmount');
     });
 
     it('should reject inactive pool', async function () {
-      const { earnManager, user } = await deployWithPool();
+      const { earnManager, user, poolWallet } = await deployWithPool();
       await earnManager.setPoolActive(POOL_ID, false);
-      await expect(earnManager.deposit(POOL_ID, user.address, 1000, 0, DUMMY_SIG))
+      await expect(earnManager.deposit(POOL_ID, user.address, 1000, 0, mockSig(user.address)))
         .to.be.revertedWithCustomError(earnManager, 'PoolNotActive');
     });
 
     it('should revert if user has insufficient balance', async function () {
-      const { earnManager, mockAccounting, user } = await deployWithPool();
-      await expect(earnManager.deposit(POOL_ID, user.address, 1000, 0, DUMMY_SIG))
+      const { earnManager, mockAccounting, user, poolWallet } = await deployWithPool();
+      await expect(earnManager.deposit(POOL_ID, user.address, 1000, 0, mockSig(user.address)))
         .to.be.revertedWithCustomError(mockAccounting, 'InsufficientBalance');
     });
   });
@@ -265,10 +272,10 @@ describe('EarnManager', function () {
       const amount = ethers.parseUnits('1000', 6);
 
       await mockAccounting.setBalance(user.address, TOKEN_ID, amount);
-      await earnManager.deposit(POOL_ID, user.address, amount, 0, DUMMY_SIG);
+      await earnManager.deposit(POOL_ID, user.address, amount, 0, mockSig(user.address));
 
       const userSig = await signWithdraw(user, earnManager, POOL_ID, amount, 0n);
-      await earnManager.withdraw(POOL_ID, amount, 0, userSig, 0, DUMMY_SIG);
+      await earnManager.withdraw(POOL_ID, amount, 0, userSig, 0, mockSig(poolWallet.address));
 
       expect(await earnManager.getUserShares(POOL_ID, authToken(user.address))).to.equal(0);
       expect(await mockAccounting.balances(user.address, TOKEN_ID)).to.equal(amount);
@@ -282,7 +289,7 @@ describe('EarnManager', function () {
       const yieldAmount = ethers.parseUnits('100', 6);
 
       await mockAccounting.setBalance(user.address, TOKEN_ID, deposit);
-      await earnManager.deposit(POOL_ID, user.address, deposit, 0, DUMMY_SIG);
+      await earnManager.deposit(POOL_ID, user.address, deposit, 0, mockSig(user.address));
 
       await earnManager.harvest(POOL_ID, yieldAmount);
       await mockAccounting.setBalance(poolWallet.address, TOKEN_ID, deposit + yieldAmount);
@@ -295,23 +302,23 @@ describe('EarnManager', function () {
       const userShares = await earnManager.getUserShares(POOL_ID, authToken(user.address));
       const withdrawAmount = deposit + yieldAmount - 1n;
       const userSig = await signWithdraw(user, earnManager, POOL_ID, withdrawAmount, 0n);
-      await earnManager.withdraw(POOL_ID, withdrawAmount, 0, userSig, 0, DUMMY_SIG);
+      await earnManager.withdraw(POOL_ID, withdrawAmount, 0, userSig, 0, mockSig(poolWallet.address));
 
       expect(await earnManager.getUserShares(POOL_ID, authToken(user.address))).to.be.lt(userShares);
       expect(await mockAccounting.balances(user.address, TOKEN_ID)).to.equal(withdrawAmount);
     });
 
     it('should accept relayer-submitted withdraw with valid user signature', async function () {
-      const { earnManager, mockAccounting, user, otherUser } = await deployWithPool();
+      const { earnManager, mockAccounting, user, otherUser, poolWallet } = await deployWithPool();
       const amount = ethers.parseUnits('500', 6);
 
       await mockAccounting.setBalance(user.address, TOKEN_ID, amount);
-      await earnManager.deposit(POOL_ID, user.address, amount, 0, DUMMY_SIG);
+      await earnManager.deposit(POOL_ID, user.address, amount, 0, mockSig(user.address));
 
       // Anyone can submit the user's signed withdraw on their behalf — the
       // contract derives the effective user from the signature, not msg.sender.
       const userSig = await signWithdraw(user, earnManager, POOL_ID, amount, 0n);
-      await earnManager.connect(otherUser).withdraw(POOL_ID, amount, 0, userSig, 0, DUMMY_SIG);
+      await earnManager.connect(otherUser).withdraw(POOL_ID, amount, 0, userSig, 0, mockSig(poolWallet.address));
 
       expect(await earnManager.getUserShares(POOL_ID, authToken(user.address))).to.equal(0);
       expect(await mockAccounting.balances(user.address, TOKEN_ID)).to.equal(amount);
@@ -319,39 +326,39 @@ describe('EarnManager', function () {
     });
 
     it('should reject insufficient shares', async function () {
-      const { earnManager, mockAccounting, user } = await deployWithPool();
+      const { earnManager, mockAccounting, user, poolWallet } = await deployWithPool();
       const amount = ethers.parseUnits('1000', 6);
 
       await mockAccounting.setBalance(user.address, TOKEN_ID, amount);
-      await earnManager.deposit(POOL_ID, user.address, amount, 0, DUMMY_SIG);
+      await earnManager.deposit(POOL_ID, user.address, amount, 0, mockSig(user.address));
 
       const overdrawAmount = amount + 1n;
       const userSig = await signWithdraw(user, earnManager, POOL_ID, overdrawAmount, 0n);
-      await expect(earnManager.withdraw(POOL_ID, overdrawAmount, 0, userSig, 0, DUMMY_SIG))
+      await expect(earnManager.withdraw(POOL_ID, overdrawAmount, 0, userSig, 0, mockSig(poolWallet.address)))
         .to.be.revertedWithCustomError(earnManager, 'InsufficientShares');
     });
 
     it('should reject zero amount', async function () {
-      const { earnManager, user } = await deployWithPool();
+      const { earnManager, user, poolWallet } = await deployWithPool();
       const userSig = await signWithdraw(user, earnManager, POOL_ID, 0n, 0n);
-      await expect(earnManager.withdraw(POOL_ID, 0, 0, userSig, 0, DUMMY_SIG))
+      await expect(earnManager.withdraw(POOL_ID, 0, 0, userSig, 0, mockSig(poolWallet.address)))
         .to.be.revertedWithCustomError(earnManager, 'ZeroAmount');
     });
 
     it('should reject nonexistent pool', async function () {
-      const { earnManager, user } = await loadFixture(deployFixture);
+      const { earnManager, user, poolWallet } = await loadFixture(deployFixture);
       const fakePool = ethers.keccak256(ethers.toUtf8Bytes('fake'));
       const userSig = await signWithdraw(user, earnManager, fakePool, 1000n, 0n);
-      await expect(earnManager.withdraw(fakePool, 1000, 0, userSig, 0, DUMMY_SIG))
+      await expect(earnManager.withdraw(fakePool, 1000, 0, userSig, 0, mockSig(poolWallet.address)))
         .to.be.revertedWithCustomError(earnManager, 'PoolNotFound');
     });
 
     it('should not let a third party drain another user with their own key', async function () {
-      const { earnManager, mockAccounting, user, otherUser } = await deployWithPool();
+      const { earnManager, mockAccounting, user, otherUser, poolWallet } = await deployWithPool();
       const amount = ethers.parseUnits('1000', 6);
 
       await mockAccounting.setBalance(user.address, TOKEN_ID, amount);
-      await earnManager.deposit(POOL_ID, user.address, amount, 0, DUMMY_SIG);
+      await earnManager.deposit(POOL_ID, user.address, amount, 0, mockSig(user.address));
 
       const expectedShares = expectedDepositShares(0n, 0n, amount);
       // Attacker signs with their own key. Recovery yields the attacker, not
@@ -359,7 +366,7 @@ describe('EarnManager', function () {
       // InsufficientShares — victim's balance is untouched.
       const attackerSig = await signWithdraw(otherUser, earnManager, POOL_ID, amount, 0n);
       await expect(
-        earnManager.connect(otherUser).withdraw(POOL_ID, amount, 0, attackerSig, 0, DUMMY_SIG),
+        earnManager.connect(otherUser).withdraw(POOL_ID, amount, 0, attackerSig, 0, mockSig(poolWallet.address)),
       ).to.be.revertedWithCustomError(earnManager, 'InsufficientShares');
 
       expect(await earnManager.getUserShares(POOL_ID, authToken(user.address))).to.equal(expectedShares);
@@ -367,43 +374,43 @@ describe('EarnManager', function () {
     });
 
     it('should reject reused withdraw signature (nonce replay)', async function () {
-      const { earnManager, mockAccounting, user } = await deployWithPool();
+      const { earnManager, mockAccounting, user, poolWallet } = await deployWithPool();
       const amount = ethers.parseUnits('400', 6);
 
       await mockAccounting.setBalance(user.address, TOKEN_ID, ethers.parseUnits('1000', 6));
-      await earnManager.deposit(POOL_ID, user.address, ethers.parseUnits('1000', 6), 0, DUMMY_SIG);
+      await earnManager.deposit(POOL_ID, user.address, ethers.parseUnits('1000', 6), 0, mockSig(user.address));
 
       const userSig = await signWithdraw(user, earnManager, POOL_ID, amount, 0n);
-      await earnManager.withdraw(POOL_ID, amount, 0, userSig, 0, DUMMY_SIG);
+      await earnManager.withdraw(POOL_ID, amount, 0, userSig, 0, mockSig(poolWallet.address));
 
       // Same signature, supplied nonce no longer matches storage (which is
       // now 1), so the contract rejects before any state change.
-      await expect(earnManager.withdraw(POOL_ID, amount, 0, userSig, 0, DUMMY_SIG))
+      await expect(earnManager.withdraw(POOL_ID, amount, 0, userSig, 0, mockSig(poolWallet.address)))
         .to.be.revertedWithCustomError(earnManager, 'InvalidWithdrawSignature');
     });
 
     it('should reject mismatched supplied nonce', async function () {
-      const { earnManager, mockAccounting, user } = await deployWithPool();
+      const { earnManager, mockAccounting, user, poolWallet } = await deployWithPool();
       const amount = ethers.parseUnits('100', 6);
 
       await mockAccounting.setBalance(user.address, TOKEN_ID, amount);
-      await earnManager.deposit(POOL_ID, user.address, amount, 0, DUMMY_SIG);
+      await earnManager.deposit(POOL_ID, user.address, amount, 0, mockSig(user.address));
 
       // User signs with nonce=0 (the live storage value), but submits with
       // nonce=5. Storage check fails before any state change.
       const userSig = await signWithdraw(user, earnManager, POOL_ID, amount, 0n);
-      await expect(earnManager.withdraw(POOL_ID, amount, 5, userSig, 0, DUMMY_SIG))
+      await expect(earnManager.withdraw(POOL_ID, amount, 5, userSig, 0, mockSig(poolWallet.address)))
         .to.be.revertedWithCustomError(earnManager, 'InvalidWithdrawSignature');
     });
   });
 
   describe('harvest', function () {
     it('should increase totalAssets without changing shares', async function () {
-      const { earnManager, mockAccounting, user } = await deployWithPool();
+      const { earnManager, mockAccounting, user, poolWallet } = await deployWithPool();
       const amount = ethers.parseUnits('1000', 6);
 
       await mockAccounting.setBalance(user.address, TOKEN_ID, amount);
-      await earnManager.deposit(POOL_ID, user.address, amount, 0, DUMMY_SIG);
+      await earnManager.deposit(POOL_ID, user.address, amount, 0, mockSig(user.address));
 
       const sharesBefore = await earnManager.getUserShares(POOL_ID, authToken(user.address));
       await earnManager.harvest(POOL_ID, ethers.parseUnits('50', 6));
@@ -415,13 +422,13 @@ describe('EarnManager', function () {
     });
 
     it('should reject non-pool-admin', async function () {
-      const { earnManager, user } = await deployWithPool();
+      const { earnManager, user, poolWallet } = await deployWithPool();
       await expect(earnManager.connect(user).harvest(POOL_ID, 1000))
         .to.be.revertedWithCustomError(earnManager, 'NotPoolAdmin');
     });
 
     it('should reject nonexistent pool', async function () {
-      const { earnManager } = await loadFixture(deployFixture);
+      const { earnManager, poolWallet } = await loadFixture(deployFixture);
       const fakePool = ethers.keccak256(ethers.toUtf8Bytes('fake'));
       await expect(earnManager.harvest(fakePool, 1000))
         .to.be.revertedWithCustomError(earnManager, 'PoolNotFound');
@@ -430,11 +437,11 @@ describe('EarnManager', function () {
 
   describe('syncTotalAssets', function () {
     it('should overwrite totalAssets without changing shares', async function () {
-      const { earnManager, mockAccounting, user } = await deployWithPool();
+      const { earnManager, mockAccounting, user, poolWallet } = await deployWithPool();
       const amount = ethers.parseUnits('1000', 6);
 
       await mockAccounting.setBalance(user.address, TOKEN_ID, amount);
-      await earnManager.deposit(POOL_ID, user.address, amount, 0, DUMMY_SIG);
+      await earnManager.deposit(POOL_ID, user.address, amount, 0, mockSig(user.address));
 
       const sharesBefore = await earnManager.getUserShares(POOL_ID, authToken(user.address));
 
@@ -448,11 +455,11 @@ describe('EarnManager', function () {
     });
 
     it('should accept lowering totalAssets (loss scenario)', async function () {
-      const { earnManager, mockAccounting, user } = await deployWithPool();
+      const { earnManager, mockAccounting, user, poolWallet } = await deployWithPool();
       const amount = ethers.parseUnits('1000', 6);
 
       await mockAccounting.setBalance(user.address, TOKEN_ID, amount);
-      await earnManager.deposit(POOL_ID, user.address, amount, 0, DUMMY_SIG);
+      await earnManager.deposit(POOL_ID, user.address, amount, 0, mockSig(user.address));
 
       const newTotal = ethers.parseUnits('900', 6);
       await earnManager.syncTotalAssets(POOL_ID, newTotal);
@@ -462,13 +469,13 @@ describe('EarnManager', function () {
     });
 
     it('should reject non-pool-admin', async function () {
-      const { earnManager, user } = await deployWithPool();
+      const { earnManager, user, poolWallet } = await deployWithPool();
       await expect(earnManager.connect(user).syncTotalAssets(POOL_ID, 1000))
         .to.be.revertedWithCustomError(earnManager, 'NotPoolAdmin');
     });
 
     it('should reject nonexistent pool', async function () {
-      const { earnManager } = await loadFixture(deployFixture);
+      const { earnManager, poolWallet } = await loadFixture(deployFixture);
       const fakePool = ethers.keccak256(ethers.toUtf8Bytes('fake'));
       await expect(earnManager.syncTotalAssets(fakePool, 1000))
         .to.be.revertedWithCustomError(earnManager, 'PoolNotFound');
@@ -480,12 +487,12 @@ describe('EarnManager', function () {
       const { earnManager, mockAccounting, user, poolWallet, otherUser } = await deployWithPool();
 
       await mockAccounting.setBalance(user.address, TOKEN_ID, ethers.parseUnits('1000', 6));
-      await earnManager.deposit(POOL_ID, user.address, ethers.parseUnits('1000', 6), 0, DUMMY_SIG);
+      await earnManager.deposit(POOL_ID, user.address, ethers.parseUnits('1000', 6), 0, mockSig(user.address));
 
       await earnManager.harvest(POOL_ID, ethers.parseUnits('50', 6));
 
       await mockAccounting.setBalance(otherUser.address, TOKEN_ID, ethers.parseUnits('2000', 6));
-      await earnManager.deposit(POOL_ID, otherUser.address, ethers.parseUnits('2000', 6), 0, DUMMY_SIG);
+      await earnManager.deposit(POOL_ID, otherUser.address, ethers.parseUnits('2000', 6), 0, mockSig(otherUser.address));
 
       await earnManager.harvest(POOL_ID, ethers.parseUnits('150', 6));
 
@@ -513,7 +520,7 @@ describe('EarnManager', function () {
 
   describe('convertToShares and convertToAssets', function () {
     it('should apply virtual offset for empty pool', async function () {
-      const { earnManager } = await deployWithPool();
+      const { earnManager, poolWallet } = await deployWithPool();
       // Empty pool: shares = assets * VIRTUAL_SHARES / VIRTUAL_ASSETS, and the
       // inverse converts shares back through the same offset.
       expect(await earnManager.convertToShares(POOL_ID, 1000)).to.equal(1000n * VIRTUAL_SHARES);
@@ -521,12 +528,12 @@ describe('EarnManager', function () {
     });
 
     it('should reflect exchange rate after harvest', async function () {
-      const { earnManager, mockAccounting, user } = await deployWithPool();
+      const { earnManager, mockAccounting, user, poolWallet } = await deployWithPool();
       const amount = ethers.parseUnits('1000', 6);
       const yieldAmount = ethers.parseUnits('50', 6);
 
       await mockAccounting.setBalance(user.address, TOKEN_ID, amount);
-      await earnManager.deposit(POOL_ID, user.address, amount, 0, DUMMY_SIG);
+      await earnManager.deposit(POOL_ID, user.address, amount, 0, mockSig(user.address));
       await earnManager.harvest(POOL_ID, yieldAmount);
 
       const totalShares = expectedDepositShares(0n, 0n, amount);
@@ -543,7 +550,7 @@ describe('EarnManager', function () {
 
   describe('setPoolActive', function () {
     it('should pause and unpause pool', async function () {
-      const { earnManager } = await deployWithPool();
+      const { earnManager, poolWallet } = await deployWithPool();
 
       await earnManager.setPoolActive(POOL_ID, false);
       let pool = await earnManager.pools(POOL_ID);
@@ -555,13 +562,13 @@ describe('EarnManager', function () {
     });
 
     it('should reject non-pool-admin', async function () {
-      const { earnManager, user } = await deployWithPool();
+      const { earnManager, user, poolWallet } = await deployWithPool();
       await expect(earnManager.connect(user).setPoolActive(POOL_ID, false))
         .to.be.revertedWithCustomError(earnManager, 'NotPoolAdmin');
     });
 
     it('should reject nonexistent pool', async function () {
-      const { earnManager } = await loadFixture(deployFixture);
+      const { earnManager, poolWallet } = await loadFixture(deployFixture);
       const fakePool = ethers.keccak256(ethers.toUtf8Bytes('fake'));
       await expect(earnManager.setPoolActive(fakePool, false))
         .to.be.revertedWithCustomError(earnManager, 'PoolNotFound');

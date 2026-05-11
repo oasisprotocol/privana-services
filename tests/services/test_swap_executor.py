@@ -259,7 +259,6 @@ class TestExecuteSwap:
                 private_key=settings.liquidity_provider_secret_key,
                 chain_id=settings.accounting_chain_id,
                 verifying_contract=settings.accounting_contract_address,
-                user_address=settings.liquidity_provider_address,
                 to_address=user_address,
                 token_id="0xbbbb",
                 amount=44000000000000000,

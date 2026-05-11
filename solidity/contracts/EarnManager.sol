@@ -223,7 +223,10 @@ contract EarnManager is
         if (!pool.active) revert PoolNotActive();
         if (amount == 0) revert ZeroAmount();
 
-        accounting.transferBalance(toUser, pool.poolAddress, pool.tokenId, amount, nonce, signature);
+        // Accounting recovers the sender (here: ``toUser``) from the EIP-712
+        // Transfer signature. Passing only the destination keeps the
+        // signature the single source of truth for who's spending.
+        accounting.transferBalance(pool.poolAddress, pool.tokenId, amount, nonce, signature);
 
         /// @dev shares = amount * (totalShares + VIRTUAL_SHARES) / (totalAssets + VIRTUAL_ASSETS) (round DOWN)
         /// Virtual offset prevents first-depositor capture: if admin syncs
@@ -295,7 +298,9 @@ contract EarnManager is
         pool.totalAssets -= amount;
         userShares[poolId][user] -= sharesToBurn;
 
-        accounting.transferBalance(pool.poolAddress, user, pool.tokenId, amount, poolNonce, poolSignature);
+        // Accounting recovers the sender (here: ``pool.poolAddress``) from
+        // the pool's EIP-712 Transfer signature.
+        accounting.transferBalance(user, pool.tokenId, amount, poolNonce, poolSignature);
     }
 
     /// -----------------------------------------------------------------------

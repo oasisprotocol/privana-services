@@ -29,7 +29,6 @@ export async function POST(req: Request) {
     const tokenId = ensureHex(quote.token_id, "quote.token_id", 32);
 
     const signature = await signTransfer({
-      userAddress,
       toAddress: poolAddress,
       tokenId: tokenId as Hex,
       amount: BigInt(amount),

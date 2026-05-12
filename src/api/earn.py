@@ -1,7 +1,7 @@
 import asyncio
 import logging
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Header, HTTPException, Query
 
 from src.models.earn import (
     BalanceListResponse,
@@ -142,11 +142,17 @@ async def withdraw(payload: WithdrawRequest) -> WithdrawResponse:
 
 @router.get("/withdraw/nonce")
 async def get_withdraw_nonce(
-    token: str = Query(..., description="Encrypted SIWE auth token (hex)"),
+    x_siwe_token: str = Header(
+        ..., description="Encrypted SIWE auth token (hex). Sent as an HTTP "
+        "header rather than a URL parameter so the token does not end up in "
+        "server access logs, browser history, or referer chains."
+    ),
 ) -> dict:
     try:
         service = get_vault_service()
-        nonce = await asyncio.to_thread(service.get_withdraw_nonce_via_token, token)
+        nonce = await asyncio.to_thread(
+            service.get_withdraw_nonce_via_token, x_siwe_token
+        )
         return {"nonce": nonce}
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -157,11 +163,15 @@ async def get_withdraw_nonce(
 
 @router.get("/balance", response_model=BalanceListResponse)
 async def get_balances(
-    token: str = Query(..., description="Encrypted SIWE auth token (hex)"),
+    x_siwe_token: str = Header(
+        ..., description="Encrypted SIWE auth token (hex). Sent as an HTTP "
+        "header rather than a URL parameter so the token does not end up in "
+        "server access logs, browser history, or referer chains."
+    ),
 ) -> BalanceListResponse:
     try:
         service = get_vault_service()
-        balances = await service.get_all_balances(token)
+        balances = await service.get_all_balances(x_siwe_token)
         return BalanceListResponse(
             positions=[BalanceResponse(**b) for b in balances]
         )

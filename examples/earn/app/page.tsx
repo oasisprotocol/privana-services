@@ -223,9 +223,11 @@ function PageInner() {
     setRefreshing(true);
     try {
       const balancePromise = siweToken
-        ? fetchJSON<{ positions: Position[] }>(
-            `/api/balance?token=${encodeURIComponent(siweToken)}`,
-          ).catch(() => ({ positions: [] }))
+        ? fetchJSON<{ positions: Position[] }>("/api/balance", {
+            // Token in a header, not a URL param — query strings get
+            // captured by access logs, browser history, and referer chains.
+            headers: { "X-SIWE-Token": siweToken },
+          }).catch(() => ({ positions: [] }))
         : Promise.resolve({ positions: [] as Position[] });
 
       const [healthRes, poolsRes, balanceRes, aaveRes, userRes, lpRes] = await Promise.all([

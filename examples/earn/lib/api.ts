@@ -83,10 +83,12 @@ export const api = {
     ),
 
   balance: (token: string) =>
-    fetch(
-      `${env.apiBaseUrl}/v1/earn/balance?token=${encodeURIComponent(token)}`,
-      { cache: "no-store" }
-    ).then(parse<{ positions: Position[] }>),
+    fetch(`${env.apiBaseUrl}/v1/earn/balance`, {
+      cache: "no-store",
+      // SIWE token rides in a header, not the URL: query params end up in
+      // server logs, browser history, referer chains, and CDN access logs.
+      headers: { "X-SIWE-Token": token }
+    }).then(parse<{ positions: Position[] }>),
 
   quote: (poolId: string, amount: string, userAddress: string) =>
     fetch(
@@ -108,10 +110,10 @@ export const api = {
     }).then(parse<DepositResult>),
 
   withdrawNonce: (token: string) =>
-    fetch(
-      `${env.apiBaseUrl}/v1/earn/withdraw/nonce?token=${encodeURIComponent(token)}`,
-      { cache: "no-store" }
-    ).then(parse<{ nonce: number }>),
+    fetch(`${env.apiBaseUrl}/v1/earn/withdraw/nonce`, {
+      cache: "no-store",
+      headers: { "X-SIWE-Token": token }
+    }).then(parse<{ nonce: number }>),
 
   withdraw: (body: {
     pool_id: string;

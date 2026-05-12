@@ -262,7 +262,10 @@ class TestBalanceRoute:
             }])
             mock_svc.return_value = svc
 
-            r = await api_client.get("/v1/earn/balance", params={"token": "0x" + "ee" * 32})
+            r = await api_client.get(
+                "/v1/earn/balance",
+                headers={"X-SIWE-Token": "0x" + "ee" * 32},
+            )
             assert r.status_code == 200
             data = r.json()
             assert len(data["positions"]) == 1
@@ -274,6 +277,9 @@ class TestBalanceRoute:
             svc.get_all_balances = AsyncMock(return_value=[])
             mock_svc.return_value = svc
 
-            r = await api_client.get("/v1/earn/balance", params={"token": "0x" + "ee" * 32})
+            r = await api_client.get(
+                "/v1/earn/balance",
+                headers={"X-SIWE-Token": "0x" + "ee" * 32},
+            )
             assert r.status_code == 200
             assert r.json()["positions"] == []

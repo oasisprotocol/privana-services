@@ -3,25 +3,26 @@ import os
 import httpx
 import pytest
 from dotenv import load_dotenv
+from eth_account import Account
 
 load_dotenv()
 
 from src.core.eip712 import sign_transfer
 
-LP_ADDRESS = os.getenv("LIQUIDITY_PROVIDER_ADDRESS")
-LP_PK = os.getenv("LIQUIDITY_PROVIDER_PRIVATE_KEY")
+LP_SK = os.getenv("LIQUIDITY_PROVIDER_SECRET_KEY") or os.getenv("LIQUIDITY_PROVIDER_PRIVATE_KEY")
+LP_ADDRESS = Account.from_key(LP_SK).address if LP_SK else None
 ACCOUNTING_CONTRACT = os.getenv("ACCOUNTING_CONTRACT_ADDRESS")
 CHAIN_ID = int(os.getenv("ACCOUNTING_CHAIN_ID", "23295"))
 
 TEST_USER_ADDRESS = "0xd8991364507FAfC256EafF950d28618735753476"
-TEST_USER_PK = "0x7b07a59f24f1900ec4e6ac3e521c1acd2cca3518f717abda1dc8bbcbbc344c4e"
+TEST_USER_PK = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
 
 USDC_TOKEN_ID = "0x330ba47d00c7ce3018deee017b319fd7cc6473a2ddc9e6eba6ebb4207be15279"
 WETH_TOKEN_ID = "0x335b5cccd1e63b2fe79863a0db73fce430e4e66902e2b78424f8662621e29fb7"
 
 pytestmark = [
     pytest.mark.skipif(
-        not LP_PK or not LP_ADDRESS,
+        not LP_SK,
         reason="Integration tests require .env with LP credentials",
     ),
     pytest.mark.integration,

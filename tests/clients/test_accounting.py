@@ -90,7 +90,7 @@ class TestAccountingClient:
             from src.models.settings import Settings
             mock_settings.return_value = Settings(
                 accounting_api_base_url="http://test:8000",
-                liquidity_provider_private_key="0x4c0883a69102937d6231471b5dbb6204fe512961708279f69e0f0fcbf24b5830",
+                liquidity_provider_secret_key="0x4c0883a69102937d6231471b5dbb6204fe512961708279f69e0f0fcbf24b5830",
                 liquidity_provider_address="0x2c7536E3605D9C16a7a3D7b1898e529396a65c23",
             )
             from src.clients.accounting import AccountingClient
@@ -115,15 +115,25 @@ class TestAccountingClient:
             "GET", "http://test:8000/v1/accounting/tokens/0xabc123"
         )
 
-    async def test_get_transfer_nonce_returns_int(self, client, mock_http_client):
-        mock_http_client.request.return_value = self._mock_response({"nonce": 42})
+    async def test_get_transfer_nonce_reads_on_chain(self, client):
+        """get_transfer_nonce must read transferNonces(user) from the
+        Accounting contract on Sapphire, not from the staging REST endpoint
+        (which has been observed returning 0 for users with non-zero on-chain
+        nonces — signing a Transfer with a stale nonce reverts on submission).
+        Mocks the contract at the instance level so the test exercises the
+        ABI call path without touching network or web3 construction."""
+        user_address = "0x2c7536E3605D9C16a7a3D7b1898e529396a65c23"
 
-        result = await client.get_transfer_nonce("0xuser")
+        nonce_call = MagicMock(return_value=42)
+        contract = MagicMock()
+        contract.functions.transferNonces.return_value.call = nonce_call
+        client._accounting_contract = contract
+
+        result = await client.get_transfer_nonce(user_address)
+
         assert result == 42
         assert isinstance(result, int)
-        mock_http_client.request.assert_called_once_with(
-            "GET", "http://test:8000/v1/accounting/funds/transfer/nonce/0xuser"
-        )
+        contract.functions.transferNonces.assert_called_once_with(user_address)
 
     async def test_get_lp_balance_returns_balance(self, client, mock_http_client):
         import asyncio

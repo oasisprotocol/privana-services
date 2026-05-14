@@ -5,7 +5,14 @@ import { loadFixture } from '@nomicfoundation/hardhat-network-helpers';
 describe('SwapManager', function () {
   const INPUT_TOKEN_ID = ethers.keccak256(ethers.toUtf8Bytes('ETH'));
   const OUTPUT_TOKEN_ID = ethers.keccak256(ethers.toUtf8Bytes('USDC'));
-  const DUMMY_SIG = '0x' + '00'.repeat(65);
+
+  // MockAccounting recovers the sender by abi-decoding the signature as
+  // a packed address sentinel. Production accounting recovers via ECDSA
+  // over the new ``Transfer(address,bytes32,uint256,uint256)`` typehash;
+  // we keep mock signatures cheap so tests don't have to sign full EIP-712
+  // messages just to assert flow.
+  const mockSig = (sender: string): string =>
+    ethers.AbiCoder.defaultAbiCoder().encode(['address'], [sender]);
 
   async function deployFixture() {
     const [owner, user, liquidityProvider, relayer] = await ethers.getSigners();
@@ -25,7 +32,7 @@ describe('SwapManager', function () {
 
   describe('deployment', function () {
     it('should set accounting address', async function () {
-      const { swapManager, mockAccounting } = await loadFixture(deployFixture);
+      const { swapManager, mockAccounting, liquidityProvider } = await loadFixture(deployFixture);
       expect(await swapManager.accounting()).to.equal(await mockAccounting.getAddress());
     });
 
@@ -35,7 +42,7 @@ describe('SwapManager', function () {
     });
 
     it('should set deployer as owner', async function () {
-      const { swapManager, owner } = await loadFixture(deployFixture);
+      const { swapManager, owner, liquidityProvider } = await loadFixture(deployFixture);
       expect(await swapManager.owner()).to.equal(owner.address);
     });
 
@@ -47,7 +54,7 @@ describe('SwapManager', function () {
     });
 
     it('should reject zero liquidityProvider address', async function () {
-      const { swapManager, mockAccounting } = await loadFixture(deployFixture);
+      const { swapManager, mockAccounting, liquidityProvider } = await loadFixture(deployFixture);
       const factory = await ethers.getContractFactory('SwapManager');
       await expect(factory.deploy(await mockAccounting.getAddress(), ethers.ZeroAddress))
         .to.be.revertedWithCustomError(swapManager, 'ZeroAddress');
@@ -65,8 +72,8 @@ describe('SwapManager', function () {
 
       await swapManager.swap(
         user.address,
-        INPUT_TOKEN_ID, inputAmount, 0, DUMMY_SIG,
-        OUTPUT_TOKEN_ID, outputAmount, 0, DUMMY_SIG
+        INPUT_TOKEN_ID, inputAmount, 0, mockSig(user.address),
+        OUTPUT_TOKEN_ID, outputAmount, 0, mockSig(liquidityProvider.address)
       );
 
       expect(await mockAccounting.balances(user.address, INPUT_TOKEN_ID)).to.equal(0);
@@ -85,8 +92,8 @@ describe('SwapManager', function () {
 
       const tx = await swapManager.swap(
         user.address,
-        INPUT_TOKEN_ID, inputAmount, 0, DUMMY_SIG,
-        OUTPUT_TOKEN_ID, outputAmount, 0, DUMMY_SIG
+        INPUT_TOKEN_ID, inputAmount, 0, mockSig(user.address),
+        OUTPUT_TOKEN_ID, outputAmount, 0, mockSig(liquidityProvider.address)
       );
       const receipt = await tx.wait();
       expect(receipt!.logs.length).to.equal(0);
@@ -102,8 +109,8 @@ describe('SwapManager', function () {
 
       await swapManager.connect(relayer).swap(
         user.address,
-        INPUT_TOKEN_ID, inputAmount, 0, DUMMY_SIG,
-        OUTPUT_TOKEN_ID, outputAmount, 0, DUMMY_SIG
+        INPUT_TOKEN_ID, inputAmount, 0, mockSig(user.address),
+        OUTPUT_TOKEN_ID, outputAmount, 0, mockSig(liquidityProvider.address)
       );
 
       expect(await mockAccounting.balances(user.address, OUTPUT_TOKEN_ID)).to.equal(outputAmount);
@@ -119,8 +126,8 @@ describe('SwapManager', function () {
 
       await swapManager.swap(
         user.address,
-        INPUT_TOKEN_ID, inputAmount, 0, DUMMY_SIG,
-        INPUT_TOKEN_ID, outputAmount, 0, DUMMY_SIG
+        INPUT_TOKEN_ID, inputAmount, 0, mockSig(user.address),
+        INPUT_TOKEN_ID, outputAmount, 0, mockSig(liquidityProvider.address)
       );
 
       expect(await mockAccounting.balances(user.address, INPUT_TOKEN_ID)).to.equal(outputAmount);
@@ -136,8 +143,8 @@ describe('SwapManager', function () {
       for (let i = 0; i < 3; i++) {
         await swapManager.swap(
           user.address,
-          INPUT_TOKEN_ID, ethers.parseEther('1'), i, DUMMY_SIG,
-          OUTPUT_TOKEN_ID, ethers.parseUnits('2000', 6), i, DUMMY_SIG
+          INPUT_TOKEN_ID, ethers.parseEther('1'), i, mockSig(user.address),
+          OUTPUT_TOKEN_ID, ethers.parseUnits('2000', 6), i, mockSig(liquidityProvider.address)
         );
       }
 
@@ -155,8 +162,8 @@ describe('SwapManager', function () {
 
       await swapManager.swap(
         user.address,
-        INPUT_TOKEN_ID, ethers.parseEther('2'), 0, DUMMY_SIG,
-        OUTPUT_TOKEN_ID, ethers.parseUnits('4000', 6), 0, DUMMY_SIG
+        INPUT_TOKEN_ID, ethers.parseEther('2'), 0, mockSig(user.address),
+        OUTPUT_TOKEN_ID, ethers.parseUnits('4000', 6), 0, mockSig(liquidityProvider.address)
       );
 
       expect(await mockAccounting.balances(user.address, INPUT_TOKEN_ID)).to.equal(ethers.parseEther('3'));
@@ -172,8 +179,8 @@ describe('SwapManager', function () {
       await expect(
         swapManager.swap(
           user.address,
-          INPUT_TOKEN_ID, ethers.parseEther('1'), 42, DUMMY_SIG,
-          OUTPUT_TOKEN_ID, ethers.parseUnits('2000', 6), 99, DUMMY_SIG
+          INPUT_TOKEN_ID, ethers.parseEther('1'), 42, mockSig(user.address),
+          OUTPUT_TOKEN_ID, ethers.parseUnits('2000', 6), 99, mockSig(liquidityProvider.address)
         )
       ).to.not.be.reverted;
     });
@@ -181,37 +188,37 @@ describe('SwapManager', function () {
 
   describe('swap reverts', function () {
     it('should revert if input amount is zero', async function () {
-      const { swapManager, user } = await loadFixture(deployFixture);
+      const { swapManager, user, liquidityProvider } = await loadFixture(deployFixture);
 
       await expect(
         swapManager.swap(
           user.address,
-          INPUT_TOKEN_ID, 0, 0, DUMMY_SIG,
-          OUTPUT_TOKEN_ID, ethers.parseUnits('2000', 6), 0, DUMMY_SIG
+          INPUT_TOKEN_ID, 0, 0, mockSig(user.address),
+          OUTPUT_TOKEN_ID, ethers.parseUnits('2000', 6), 0, mockSig(liquidityProvider.address)
         )
       ).to.be.revertedWithCustomError(swapManager, 'ZeroAmount');
     });
 
     it('should revert if output amount is zero', async function () {
-      const { swapManager, user } = await loadFixture(deployFixture);
+      const { swapManager, user, liquidityProvider } = await loadFixture(deployFixture);
 
       await expect(
         swapManager.swap(
           user.address,
-          INPUT_TOKEN_ID, ethers.parseEther('1'), 0, DUMMY_SIG,
-          OUTPUT_TOKEN_ID, 0, 0, DUMMY_SIG
+          INPUT_TOKEN_ID, ethers.parseEther('1'), 0, mockSig(user.address),
+          OUTPUT_TOKEN_ID, 0, 0, mockSig(liquidityProvider.address)
         )
       ).to.be.revertedWithCustomError(swapManager, 'ZeroAmount');
     });
 
     it('should revert if both amounts are zero', async function () {
-      const { swapManager, user } = await loadFixture(deployFixture);
+      const { swapManager, user, liquidityProvider } = await loadFixture(deployFixture);
 
       await expect(
         swapManager.swap(
           user.address,
-          INPUT_TOKEN_ID, 0, 0, DUMMY_SIG,
-          OUTPUT_TOKEN_ID, 0, 0, DUMMY_SIG
+          INPUT_TOKEN_ID, 0, 0, mockSig(user.address),
+          OUTPUT_TOKEN_ID, 0, 0, mockSig(liquidityProvider.address)
         )
       ).to.be.revertedWithCustomError(swapManager, 'ZeroAmount');
     });
@@ -224,22 +231,22 @@ describe('SwapManager', function () {
       await expect(
         swapManager.swap(
           user.address,
-          INPUT_TOKEN_ID, ethers.parseEther('1'), 0, DUMMY_SIG,
-          OUTPUT_TOKEN_ID, ethers.parseUnits('2000', 6), 0, DUMMY_SIG
+          INPUT_TOKEN_ID, ethers.parseEther('1'), 0, mockSig(user.address),
+          OUTPUT_TOKEN_ID, ethers.parseUnits('2000', 6), 0, mockSig(liquidityProvider.address)
         )
       ).to.be.revertedWithCustomError(mockAccounting, 'InsufficientBalance');
     });
 
     it('should revert if liquidityProvider has insufficient output balance', async function () {
-      const { swapManager, mockAccounting, user } = await loadFixture(deployFixture);
+      const { swapManager, mockAccounting, user, liquidityProvider } = await loadFixture(deployFixture);
 
       await mockAccounting.setBalance(user.address, INPUT_TOKEN_ID, ethers.parseEther('1'));
 
       await expect(
         swapManager.swap(
           user.address,
-          INPUT_TOKEN_ID, ethers.parseEther('1'), 0, DUMMY_SIG,
-          OUTPUT_TOKEN_ID, ethers.parseUnits('2000', 6), 0, DUMMY_SIG
+          INPUT_TOKEN_ID, ethers.parseEther('1'), 0, mockSig(user.address),
+          OUTPUT_TOKEN_ID, ethers.parseUnits('2000', 6), 0, mockSig(liquidityProvider.address)
         )
       ).to.be.revertedWithCustomError(mockAccounting, 'InsufficientBalance');
     });
@@ -253,8 +260,8 @@ describe('SwapManager', function () {
       await expect(
         swapManager.swap(
           user.address,
-          INPUT_TOKEN_ID, inputAmount, 0, DUMMY_SIG,
-          OUTPUT_TOKEN_ID, ethers.parseUnits('2000', 6), 0, DUMMY_SIG
+          INPUT_TOKEN_ID, inputAmount, 0, mockSig(user.address),
+          OUTPUT_TOKEN_ID, ethers.parseUnits('2000', 6), 0, mockSig(liquidityProvider.address)
         )
       ).to.be.reverted;
 
@@ -271,16 +278,16 @@ describe('SwapManager', function () {
       for (let i = 0; i < 3; i++) {
         await swapManager.swap(
           user.address,
-          INPUT_TOKEN_ID, ethers.parseEther('1'), i, DUMMY_SIG,
-          OUTPUT_TOKEN_ID, ethers.parseUnits('2000', 6), i, DUMMY_SIG
+          INPUT_TOKEN_ID, ethers.parseEther('1'), i, mockSig(user.address),
+          OUTPUT_TOKEN_ID, ethers.parseUnits('2000', 6), i, mockSig(liquidityProvider.address)
         );
       }
 
       await expect(
         swapManager.swap(
           user.address,
-          INPUT_TOKEN_ID, ethers.parseEther('1'), 3, DUMMY_SIG,
-          OUTPUT_TOKEN_ID, ethers.parseUnits('2000', 6), 3, DUMMY_SIG
+          INPUT_TOKEN_ID, ethers.parseEther('1'), 3, mockSig(user.address),
+          OUTPUT_TOKEN_ID, ethers.parseUnits('2000', 6), 3, mockSig(liquidityProvider.address)
         )
       ).to.be.revertedWithCustomError(mockAccounting, 'InsufficientBalance');
     });
@@ -288,7 +295,7 @@ describe('SwapManager', function () {
 
   describe('setAccounting', function () {
     it('should allow owner to update', async function () {
-      const { swapManager, owner } = await loadFixture(deployFixture);
+      const { swapManager, owner, liquidityProvider } = await loadFixture(deployFixture);
       const newAddr = ethers.Wallet.createRandom().address;
 
       await expect(swapManager.connect(owner).setAccounting(newAddr))
@@ -299,7 +306,7 @@ describe('SwapManager', function () {
     });
 
     it('should reject zero address', async function () {
-      const { swapManager, owner } = await loadFixture(deployFixture);
+      const { swapManager, owner, liquidityProvider } = await loadFixture(deployFixture);
 
       await expect(
         swapManager.connect(owner).setAccounting(ethers.ZeroAddress)
@@ -307,7 +314,7 @@ describe('SwapManager', function () {
     });
 
     it('should reject non-owner', async function () {
-      const { swapManager, user } = await loadFixture(deployFixture);
+      const { swapManager, user, liquidityProvider } = await loadFixture(deployFixture);
 
       await expect(
         swapManager.connect(user).setAccounting(ethers.Wallet.createRandom().address)
@@ -317,7 +324,7 @@ describe('SwapManager', function () {
 
   describe('setLiquidityProvider', function () {
     it('should allow owner to update', async function () {
-      const { swapManager, owner } = await loadFixture(deployFixture);
+      const { swapManager, owner, liquidityProvider } = await loadFixture(deployFixture);
       const newAddr = ethers.Wallet.createRandom().address;
 
       await expect(swapManager.connect(owner).setLiquidityProvider(newAddr))
@@ -328,7 +335,7 @@ describe('SwapManager', function () {
     });
 
     it('should reject zero address', async function () {
-      const { swapManager, owner } = await loadFixture(deployFixture);
+      const { swapManager, owner, liquidityProvider } = await loadFixture(deployFixture);
 
       await expect(
         swapManager.connect(owner).setLiquidityProvider(ethers.ZeroAddress)
@@ -336,7 +343,7 @@ describe('SwapManager', function () {
     });
 
     it('should reject non-owner', async function () {
-      const { swapManager, user } = await loadFixture(deployFixture);
+      const { swapManager, user, liquidityProvider } = await loadFixture(deployFixture);
 
       await expect(
         swapManager.connect(user).setLiquidityProvider(ethers.Wallet.createRandom().address)

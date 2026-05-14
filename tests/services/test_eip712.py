@@ -45,7 +45,6 @@ class TestSignTransfer:
             private_key=PRIVATE_KEY_1,
             chain_id=settings.accounting_chain_id,
             verifying_contract=settings.accounting_contract_address,
-            user_address=settings.liquidity_provider_address,
             to_address=Account.from_key(PRIVATE_KEY_2).address,
             token_id=TOKEN_ID,
             amount=AMOUNT,
@@ -58,7 +57,6 @@ class TestSignTransfer:
             private_key=PRIVATE_KEY_1,
             chain_id=settings.accounting_chain_id,
             verifying_contract=settings.accounting_contract_address,
-            user_address=settings.liquidity_provider_address,
             to_address=Account.from_key(PRIVATE_KEY_2).address,
             token_id=TOKEN_ID,
             amount=AMOUNT,
@@ -71,7 +69,6 @@ class TestSignTransfer:
             private_key=PRIVATE_KEY_1,
             chain_id=settings.accounting_chain_id,
             verifying_contract=settings.accounting_contract_address,
-            user_address=Account.from_key(PRIVATE_KEY_1).address,
             to_address=Account.from_key(PRIVATE_KEY_2).address,
             token_id=TOKEN_ID,
             amount=AMOUNT,
@@ -87,7 +84,6 @@ class TestSignTransfer:
         }
         message_types = {
             "Transfer": [
-                {"name": "userAddress", "type": "address"},
                 {"name": "toAddress", "type": "address"},
                 {"name": "tokenId", "type": "bytes32"},
                 {"name": "amount", "type": "uint256"},
@@ -95,7 +91,6 @@ class TestSignTransfer:
             ]
         }
         message_data = {
-            "userAddress": Account.from_key(PRIVATE_KEY_1).address,
             "toAddress": Account.from_key(PRIVATE_KEY_2).address,
             "tokenId": _to_bytes32(TOKEN_ID),
             "amount": AMOUNT,
@@ -122,7 +117,6 @@ class TestSignTransfer:
         common = dict(
             chain_id=settings.accounting_chain_id,
             verifying_contract=settings.accounting_contract_address,
-            user_address=settings.liquidity_provider_address,
             to_address=Account.from_key(PRIVATE_KEY_2).address,
             token_id=TOKEN_ID,
             amount=AMOUNT,
@@ -137,7 +131,6 @@ class TestSignTransfer:
             private_key=PRIVATE_KEY_1,
             chain_id=settings.accounting_chain_id,
             verifying_contract=settings.accounting_contract_address,
-            user_address=settings.liquidity_provider_address,
             to_address=Account.from_key(PRIVATE_KEY_2).address,
             token_id=TOKEN_ID,
             amount=AMOUNT,
@@ -151,7 +144,6 @@ class TestSignTransfer:
             private_key=PRIVATE_KEY_1,
             chain_id=settings.accounting_chain_id,
             verifying_contract=settings.accounting_contract_address,
-            user_address=settings.liquidity_provider_address,
             to_address=Account.from_key(PRIVATE_KEY_2).address,
             token_id=TOKEN_ID,
             nonce=NONCE,

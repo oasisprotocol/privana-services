@@ -1,17 +1,14 @@
 import asyncio
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Header, HTTPException, Query
 
-from src.api.admin_auth import require_admin
 from src.models.earn import (
     BalanceListResponse,
     BalanceResponse,
     DepositQuoteResponse,
     DepositRequest,
     DepositResponse,
-    HarvestRequest,
-    HarvestResponse,
     PoolDetailResponse,
     PoolListResponse,
     PoolResponse,
@@ -30,19 +27,29 @@ async def list_pools() -> PoolListResponse:
     try:
         service = get_vault_service()
         pools = await asyncio.to_thread(service.list_pools)
-        return PoolListResponse(
-            pools=[
-                PoolResponse(
-                    pool_id=p["pool_id"],
-                    token_id=p["token_id"],
-                    strategy="aave-v3",
-                    total_assets=str(p["total_assets"]),
-                    apy_bps=0,
-                    status="active" if p["active"] else "paused",
+        # AUM and APY reads are independent per pool, so fan them out together
+        # to keep tail latency at max(slowest read) instead of sum-of-reads.
+        results = await asyncio.gather(
+            *[
+                asyncio.gather(
+                    service.effective_total_assets(p["pool_id"], p["total_assets"]),
+                    service.strategy_apy_bps_safe(p["pool_id"]),
                 )
                 for p in pools
             ]
         )
+        responses = [
+            PoolResponse(
+                pool_id=p["pool_id"],
+                token_id=p["token_id"],
+                strategy="aave-v3",
+                total_assets=str(effective),
+                apy_bps=apy_bps,
+                status="active" if p["active"] else "paused",
+            )
+            for p, (effective, apy_bps) in zip(pools, results)
+        ]
+        return PoolListResponse(pools=responses)
     except Exception as exc:
         logger.exception("Failed to list earn pools")
         raise HTTPException(status_code=500, detail="Failed to list pools") from exc
@@ -56,16 +63,19 @@ async def get_pool(pool_id: str) -> PoolDetailResponse:
         p = await asyncio.to_thread(service.get_pool, pool_id_bytes)
         if p["pool_address"] == "0x0000000000000000000000000000000000000000":
             raise ValueError("Pool not found")
+        effective, apy_bps = await asyncio.gather(
+            service.effective_total_assets(pool_id, p["total_assets"]),
+            service.strategy_apy_bps_safe(pool_id),
+        )
         return PoolDetailResponse(
             pool_id=pool_id,
             token_id=p["token_id"],
             strategy="aave-v3",
             total_shares=str(p["total_shares"]),
-            total_assets=str(p["total_assets"]),
+            total_assets=str(effective),
             pool_address=p["pool_address"],
-            apy_bps=0,
+            apy_bps=apy_bps,
             status="active" if p["active"] else "paused",
-            last_harvest_at=None,
             created_at=0,
         )
     except ValueError as exc:
@@ -119,6 +129,8 @@ async def withdraw(payload: WithdrawRequest) -> WithdrawResponse:
             pool_id_hex=payload.pool_id,
             user_address=payload.user_address,
             amount=payload.amount,
+            nonce=payload.nonce,
+            signature=payload.signature,
         )
         return WithdrawResponse(
             withdraw_id=result.get("tx_hash", ""),
@@ -128,13 +140,38 @@ async def withdraw(payload: WithdrawRequest) -> WithdrawResponse:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@router.get("/withdraw/nonce")
+async def get_withdraw_nonce(
+    x_siwe_token: str = Header(
+        ..., description="Encrypted SIWE auth token (hex). Sent as an HTTP "
+        "header rather than a URL parameter so the token does not end up in "
+        "server access logs, browser history, or referer chains."
+    ),
+) -> dict:
+    try:
+        service = get_vault_service()
+        nonce = await asyncio.to_thread(
+            service.get_withdraw_nonce_via_token, x_siwe_token
+        )
+        return {"nonce": nonce}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Failed to fetch withdraw nonce")
+        raise HTTPException(status_code=500, detail="Failed to fetch withdraw nonce") from exc
+
+
 @router.get("/balance", response_model=BalanceListResponse)
 async def get_balances(
-    user_address: str = Query(..., description="User wallet address"),
+    x_siwe_token: str = Header(
+        ..., description="Encrypted SIWE auth token (hex). Sent as an HTTP "
+        "header rather than a URL parameter so the token does not end up in "
+        "server access logs, browser history, or referer chains."
+    ),
 ) -> BalanceListResponse:
     try:
         service = get_vault_service()
-        balances = await service.get_all_balances(user_address)
+        balances = await service.get_all_balances(x_siwe_token)
         return BalanceListResponse(
             positions=[BalanceResponse(**b) for b in balances]
         )
@@ -145,18 +182,3 @@ async def get_balances(
         raise HTTPException(status_code=500, detail="Failed to get balances") from exc
 
 
-@router.post(
-    "/harvest",
-    response_model=HarvestResponse,
-    dependencies=[Depends(require_admin)],
-)
-async def harvest(payload: HarvestRequest) -> HarvestResponse:
-    try:
-        service = get_vault_service()
-        result = await service.harvest(
-            pool_id_hex=payload.pool_id,
-            yield_amount=payload.yield_amount,
-        )
-        return HarvestResponse(**result)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc

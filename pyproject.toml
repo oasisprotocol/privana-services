@@ -7,21 +7,15 @@ requires-python = ">=3.11"
 license = { text = "Apache-2.0" }
 
 dependencies = [
-    "fastapi>=0.104.0",
-    "uvicorn[standard]>=0.24.0",
-    "python-dotenv>=1.0.0",
-    "pydantic>=2.0.0",
-    "httpx>=0.25.0",
-    "web3>=6.0.0",
-    "eth-account>=0.11.0",
-    "sapphire.py>=0.2.3",
-]
-
-[project.optional-dependencies]
-dev = [
-    "pytest>=7.0.0",
-    "pytest-asyncio>=0.21.0",
-    "ruff>=0.1.0",
+    "fastapi>=0.135,<0.137",
+    "uvicorn[standard]>=0.42,<0.44",
+    "python-dotenv>=1.0,<2",
+    "pydantic>=2.12,<3",
+    "httpx>=0.28,<0.30",
+    "web3>=7.14,<8",
+    "eth-account>=0.13,<0.14",
+    "oasis-sapphire-py>=0.4.2,<0.5",
+    "oasis-privana>=0.1.16,<0.2",
 ]
 
 [project.scripts]

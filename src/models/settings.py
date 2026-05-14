@@ -14,7 +14,7 @@ class Settings:
     lifi_api_url: str = "https://li.quest/v1"
     lifi_integrator: str = "flexvaults"
 
-    liquidity_provider_private_key: str = ""
+    liquidity_provider_secret_key: str = ""
     liquidity_provider_address: str = "0x0000000000000000000000000000000000000000"
     accounting_contract_address: str = "0x0000000000000000000000000000000000000000"
     accounting_chain_id: int = 23295
@@ -31,3 +31,4 @@ class Settings:
 
     base_sepolia_rpc_url: str = "https://sepolia.base.org"
     aave_pool_address: str = "0x8bAB6d1b75f19e9eD9fCe8b9BD338844fF79aE27"
+    aave_pool_assets: str = ""

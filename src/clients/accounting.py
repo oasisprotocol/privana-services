@@ -6,7 +6,9 @@ from typing import Optional
 import httpx
 from eth_account import Account
 from eth_account.messages import encode_defunct
+from web3 import Web3
 
+from src.core.abi import load_abi
 from src.core.config import load_settings
 from src.models.common import (
     Balance,
@@ -38,11 +40,12 @@ class AccountingClient:
         self.base_url = settings.accounting_api_base_url
         self.client = httpx.AsyncClient(timeout=30.0)
         self._lp_address = settings.liquidity_provider_address
-        self._lp_private_key = settings.liquidity_provider_private_key
+        self._lp_secret_key = settings.liquidity_provider_secret_key
         self._chain_id = settings.accounting_chain_id
         self._siwe_token: Optional[str] = None
         self._jwt_token: Optional[str] = None
         self._auth_timestamp: Optional[float] = None
+        self._accounting_contract = None
 
     async def _ensure_authenticated(self) -> None:
         if self._siwe_token and self._jwt_token and self._auth_timestamp:
@@ -50,7 +53,7 @@ class AccountingClient:
             if elapsed < 3600:
                 return
 
-        account = Account.from_key(self._lp_private_key)
+        account = Account.from_key(self._lp_secret_key)
         r = await self.client.get(
             f"{self.base_url}/v1/accounting/auth/nonce?address={self._lp_address}"
         )
@@ -111,11 +114,27 @@ class AccountingClient:
         return TokenInfo(**response.json())
 
     async def get_transfer_nonce(self, user_address: str) -> int:
-        response = await _request_with_retry(
-            self.client, "GET",
-            f"{self.base_url}/v1/accounting/funds/transfer/nonce/{user_address}",
+        """Read ``transferNonces[user]`` directly from the Accounting contract.
+
+        Bypasses the ROFL REST endpoint because the staged service has been
+        observed returning 0 even when the on-chain value is non-zero (e.g.
+        after swap activity). The chain is the source of truth — signing a
+        Transfer with the wrong nonce reverts as ``InvalidNonce``, so we read
+        from where the verifier reads.
+        """
+        if self._accounting_contract is None:
+            settings = load_settings()
+            w3 = Web3(Web3.HTTPProvider(settings.sapphire_rpc_url))
+            self._accounting_contract = w3.eth.contract(
+                address=Web3.to_checksum_address(settings.accounting_contract_address),
+                abi=load_abi("Accounting"),
+            )
+
+        return await asyncio.to_thread(
+            self._accounting_contract.functions.transferNonces(
+                Web3.to_checksum_address(user_address)
+            ).call
         )
-        return response.json()["nonce"]
 
     async def close(self) -> None:
         await self.client.aclose()

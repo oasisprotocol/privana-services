@@ -18,10 +18,19 @@ def _mock_pool():
     }
 
 
+def _mock_service(**overrides) -> MagicMock:
+    svc = MagicMock()
+    svc.effective_total_assets = AsyncMock(side_effect=lambda _pool_id, on_chain: on_chain)
+    svc.strategy_apy_bps_safe = AsyncMock(return_value=0)
+    for k, v in overrides.items():
+        setattr(svc, k, v)
+    return svc
+
+
 class TestListPoolsRoute:
     async def test_returns_200_with_pools(self, api_client):
         with patch("src.api.earn.get_vault_service") as mock_svc:
-            svc = MagicMock()
+            svc = _mock_service()
             svc.list_pools.return_value = [_mock_pool()]
             mock_svc.return_value = svc
 
@@ -35,7 +44,7 @@ class TestListPoolsRoute:
 
     async def test_returns_empty_list(self, api_client):
         with patch("src.api.earn.get_vault_service") as mock_svc:
-            svc = MagicMock()
+            svc = _mock_service()
             svc.list_pools.return_value = []
             mock_svc.return_value = svc
 
@@ -47,7 +56,7 @@ class TestListPoolsRoute:
         with patch("src.api.earn.get_vault_service") as mock_svc:
             pool = _mock_pool()
             pool["active"] = False
-            svc = MagicMock()
+            svc = _mock_service()
             svc.list_pools.return_value = [pool]
             mock_svc.return_value = svc
 
@@ -56,18 +65,39 @@ class TestListPoolsRoute:
 
     async def test_returns_500_on_error(self, api_client):
         with patch("src.api.earn.get_vault_service") as mock_svc:
-            svc = MagicMock()
+            svc = _mock_service()
             svc.list_pools.side_effect = RuntimeError("rpc down")
             mock_svc.return_value = svc
 
             r = await api_client.get("/v1/earn/pools")
             assert r.status_code == 500
 
+    async def test_total_assets_reflects_strategy_live_aum(self, api_client):
+        with patch("src.api.earn.get_vault_service") as mock_svc:
+            svc = MagicMock()
+            svc.list_pools.return_value = [_mock_pool()]
+            svc.effective_total_assets = AsyncMock(return_value=1100)
+            svc.strategy_apy_bps_safe = AsyncMock(return_value=0)
+            mock_svc.return_value = svc
+
+            r = await api_client.get("/v1/earn/pools")
+            assert r.json()["pools"][0]["total_assets"] == "1100"
+
+    async def test_apy_bps_reflects_strategy_value(self, api_client):
+        with patch("src.api.earn.get_vault_service") as mock_svc:
+            svc = _mock_service()
+            svc.list_pools.return_value = [_mock_pool()]
+            svc.strategy_apy_bps_safe = AsyncMock(return_value=487)
+            mock_svc.return_value = svc
+
+            r = await api_client.get("/v1/earn/pools")
+            assert r.json()["pools"][0]["apy_bps"] == 487
+
 
 class TestGetPoolRoute:
     async def test_returns_200_for_existing_pool(self, api_client):
         with patch("src.api.earn.get_vault_service") as mock_svc:
-            svc = MagicMock()
+            svc = _mock_service()
             svc.get_pool.return_value = _mock_pool()
             mock_svc.return_value = svc
 
@@ -80,7 +110,7 @@ class TestGetPoolRoute:
 
     async def test_returns_404_for_missing_pool(self, api_client):
         with patch("src.api.earn.get_vault_service") as mock_svc:
-            svc = MagicMock()
+            svc = _mock_service()
             pool = _mock_pool()
             pool["pool_address"] = "0x0000000000000000000000000000000000000000"
             svc.get_pool.return_value = pool
@@ -95,6 +125,7 @@ class TestDepositQuoteRoute:
         with patch("src.api.earn.get_vault_service") as mock_svc:
             svc = MagicMock()
             svc.get_deposit_quote = AsyncMock(return_value={
+                "quote_id": "11111111-1111-1111-1111-111111111111",
                 "pool_id": POOL_ID,
                 "token_id": USDC_TOKEN_ID,
                 "amount": "1000",
@@ -102,6 +133,7 @@ class TestDepositQuoteRoute:
                 "exchange_rate": "1.05",
                 "pool_address": POOL_ADDRESS,
                 "transfer_nonce": 5,
+                "expires_at": 9999999999,
             })
             mock_svc.return_value = svc
 
@@ -185,6 +217,8 @@ class TestWithdrawRoute:
                 "pool_id": POOL_ID,
                 "user_address": USER_ADDRESS,
                 "amount": "500",
+                "nonce": 0,
+                "signature": "0x" + "cc" * 65,
             })
             assert r.status_code == 200
             assert r.json()["shares_burned"] == "476"
@@ -199,8 +233,20 @@ class TestWithdrawRoute:
                 "pool_id": POOL_ID,
                 "user_address": USER_ADDRESS,
                 "amount": "999999999",
+                "nonce": 0,
+                "signature": "0x" + "cc" * 65,
             })
             assert r.status_code == 400
+
+    async def test_returns_422_when_signature_missing(self, api_client):
+        # Pydantic-level guard: missing the new fields should be a structural
+        # rejection, not silently accepted as the old shape.
+        r = await api_client.post("/v1/earn/withdraw", json={
+            "pool_id": POOL_ID,
+            "user_address": USER_ADDRESS,
+            "amount": "500",
+        })
+        assert r.status_code == 422
 
 
 class TestBalanceRoute:
@@ -216,7 +262,10 @@ class TestBalanceRoute:
             }])
             mock_svc.return_value = svc
 
-            r = await api_client.get("/v1/earn/balance", params={"user_address": USER_ADDRESS})
+            r = await api_client.get(
+                "/v1/earn/balance",
+                headers={"X-SIWE-Token": "0x" + "ee" * 32},
+            )
             assert r.status_code == 200
             data = r.json()
             assert len(data["positions"]) == 1
@@ -228,81 +277,9 @@ class TestBalanceRoute:
             svc.get_all_balances = AsyncMock(return_value=[])
             mock_svc.return_value = svc
 
-            r = await api_client.get("/v1/earn/balance", params={"user_address": USER_ADDRESS})
+            r = await api_client.get(
+                "/v1/earn/balance",
+                headers={"X-SIWE-Token": "0x" + "ee" * 32},
+            )
             assert r.status_code == 200
             assert r.json()["positions"] == []
-
-
-ADMIN_KEY = "test-admin-key"
-
-
-class TestHarvestRoute:
-    async def test_returns_200_on_success(self, api_client):
-        with patch("src.api.admin_auth.load_settings") as mock_settings, \
-             patch("src.api.earn.get_vault_service") as mock_svc:
-            mock_settings.return_value.admin_api_key = ADMIN_KEY
-            svc = MagicMock()
-            svc.harvest = AsyncMock(return_value={
-                "pool_id": POOL_ID,
-                "yield_amount": "50",
-                "exchange_rate": "1.1",
-                "tx_hash": "0x" + "ff" * 32,
-                "status": "completed",
-            })
-            mock_svc.return_value = svc
-
-            r = await api_client.post(
-                "/v1/earn/harvest",
-                json={"pool_id": POOL_ID, "yield_amount": "50"},
-                headers={"X-Admin-API-Key": ADMIN_KEY},
-            )
-            assert r.status_code == 200
-            assert r.json()["yield_amount"] == "50"
-            assert r.json()["exchange_rate"] == "1.1"
-
-    async def test_returns_401_without_key(self, api_client):
-        with patch("src.api.admin_auth.load_settings") as mock_settings:
-            mock_settings.return_value.admin_api_key = ADMIN_KEY
-
-            r = await api_client.post(
-                "/v1/earn/harvest",
-                json={"pool_id": POOL_ID, "yield_amount": "50"},
-            )
-            assert r.status_code == 401
-
-    async def test_returns_401_with_wrong_key(self, api_client):
-        with patch("src.api.admin_auth.load_settings") as mock_settings:
-            mock_settings.return_value.admin_api_key = ADMIN_KEY
-
-            r = await api_client.post(
-                "/v1/earn/harvest",
-                json={"pool_id": POOL_ID, "yield_amount": "50"},
-                headers={"X-Admin-API-Key": "wrong"},
-            )
-            assert r.status_code == 401
-
-    async def test_returns_503_when_admin_unconfigured(self, api_client):
-        with patch("src.api.admin_auth.load_settings") as mock_settings:
-            mock_settings.return_value.admin_api_key = ""
-
-            r = await api_client.post(
-                "/v1/earn/harvest",
-                json={"pool_id": POOL_ID, "yield_amount": "50"},
-                headers={"X-Admin-API-Key": "anything"},
-            )
-            assert r.status_code == 503
-
-    async def test_returns_400_on_value_error(self, api_client):
-        with patch("src.api.admin_auth.load_settings") as mock_settings, \
-             patch("src.api.earn.get_vault_service") as mock_svc:
-            mock_settings.return_value.admin_api_key = ADMIN_KEY
-            svc = MagicMock()
-            svc.harvest = AsyncMock(side_effect=ValueError("Pool not found"))
-            mock_svc.return_value = svc
-
-            r = await api_client.post(
-                "/v1/earn/harvest",
-                json={"pool_id": POOL_ID, "yield_amount": "50"},
-                headers={"X-Admin-API-Key": ADMIN_KEY},
-            )
-            assert r.status_code == 400

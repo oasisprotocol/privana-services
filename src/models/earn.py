@@ -15,7 +15,6 @@ class PoolStatus(str, Enum):
 class TransactionType(str, Enum):
     DEPOSIT = "deposit"
     WITHDRAW = "withdraw"
-    HARVEST = "harvest"
 
 
 class PoolRecord(BaseModel):
@@ -27,7 +26,6 @@ class PoolRecord(BaseModel):
     pool_address: str
     apy_bps: int
     status: str
-    last_harvest_at: Optional[int] = None
     created_at: int
     updated_at: int
 
@@ -75,7 +73,6 @@ class PoolDetailResponse(BaseModel):
     pool_address: str
     apy_bps: int
     status: str
-    last_harvest_at: Optional[int] = None
     created_at: int
 
 
@@ -84,6 +81,7 @@ class PoolListResponse(BaseModel):
 
 
 class DepositQuoteResponse(BaseModel):
+    quote_id: str
     pool_id: str
     token_id: str
     amount: str
@@ -91,6 +89,7 @@ class DepositQuoteResponse(BaseModel):
     exchange_rate: str
     pool_address: str
     transfer_nonce: int
+    expires_at: int
 
 
 class DepositRequest(BaseModel):
@@ -115,6 +114,20 @@ class WithdrawRequest(BaseModel):
     pool_id: str = Field(..., description="Earn pool ID")
     user_address: str = Field(..., description="User wallet address")
     amount: str = Field(..., description="Amount to withdraw in base units")
+    nonce: int = Field(
+        ...,
+        description=(
+            "User withdraw consent nonce, must equal "
+            "EarnManager.withdrawNonces[user_address] at submission time."
+        ),
+    )
+    signature: str = Field(
+        ...,
+        description=(
+            "EIP-712 Withdraw(user, poolId, amount, nonce) signature in the "
+            "EarnManager domain. Authorizes burning the user's pool shares."
+        ),
+    )
 
 
 class WithdrawResponse(BaseModel):
@@ -122,19 +135,6 @@ class WithdrawResponse(BaseModel):
     pool_id: str
     amount: str
     shares_burned: Optional[str] = None
-    exchange_rate: Optional[str] = None
-    tx_hash: Optional[str] = None
-    status: str
-
-
-class HarvestRequest(BaseModel):
-    pool_id: str = Field(..., description="Earn pool ID (hex)")
-    yield_amount: str = Field(..., description="Yield to realize in base units")
-
-
-class HarvestResponse(BaseModel):
-    pool_id: str
-    yield_amount: str
     exchange_rate: Optional[str] = None
     tx_hash: Optional[str] = None
     status: str

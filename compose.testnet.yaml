@@ -1,0 +1,23 @@
+services:
+  privana-services:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      args:
+        - ENV_FILE=.env.testnet
+    image: "ghcr.io/oasisprotocol/privana-services:testnet"
+    platform: linux/amd64
+    environment:
+      - LIQUIDITY_PROVIDER_SECRET_KEY=${LIQUIDITY_PROVIDER_SECRET_KEY}
+      - LIFI_API_KEY=${LIFI_API_KEY}
+    volumes:
+      - /run/rofl-appd.sock:/run/rofl-appd.sock
+      - data:/app/data
+    ports:
+      - "8000:8000"
+    annotations:
+      net.oasis.proxy.ports.8000.custom_domain: services.testnet.privana.finance
+    restart: on-failure
+
+volumes:
+  data:

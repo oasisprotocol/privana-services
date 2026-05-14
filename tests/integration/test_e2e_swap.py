@@ -5,7 +5,7 @@ import pytest
 from dotenv import load_dotenv
 from eth_account import Account
 
-load_dotenv()
+load_dotenv(".env.localnet")
 
 from src.core.eip712 import sign_transfer
 

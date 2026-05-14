@@ -1,9 +1,10 @@
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from src.core.config import load_settings
 from src.models.settings import Settings
 
 
@@ -88,7 +89,8 @@ def _strategy_settings(
     heartbeat_sec: int = 86400,
     apy_bps: int = 350,
 ) -> Settings:
-    return Settings(
+    return replace(
+        load_settings(),
         liquidity_provider_secret_key=LP_PRIVATE_KEY,
         liquidity_provider_address=POOL_ADDRESS,
         accounting_contract_address=ACCOUNTING_CONTRACT,
@@ -180,7 +182,8 @@ def test_pool_address_defaults_to_lp_address(strategy) -> None:
 def test_unsupported_chain_id_rejected(midas_client, privana) -> None:
     from src.services.earn.strategies.midas import MidasStrategy
 
-    bogus = Settings(
+    bogus = replace(
+        load_settings(),
         liquidity_provider_secret_key=LP_PRIVATE_KEY,
         liquidity_provider_address=POOL_ADDRESS,
         accounting_contract_address=ACCOUNTING_CONTRACT,

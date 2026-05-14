@@ -1,0 +1,49 @@
+services:
+  sapphire-localnet:
+    image: "ghcr.io/oasisprotocol/sapphire-localnet"
+    platform: linux/amd64
+    environment:
+      - TO=chimney theory present latin find behave ankle clock shadow earn suit reflect
+    volumes:
+      - .:/rofls
+    ports:
+      - "8544-8549:8544-8549"
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /CONTAINER_READY"]
+      interval: 3s
+      timeout: 10s
+      retries: 100
+      start_period: 0s
+
+  privana:
+    image: "docker.io/ptrusr/accounting-module:staging"
+    depends_on:
+      sapphire-localnet:
+        condition: service_healthy
+    platform: linux/amd64
+    volumes:
+      - ./rofl-appd.sock:/run/rofl-appd.sock
+    network_mode: host # Requires linux
+    ports:
+      - "8000:8000"
+
+  privana-services:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      args:
+        - ENV_FILE=.env.localnet
+    image: "ghcr.io/oasisprotocol/privana-services:localnet"
+    pull_policy: never
+    depends_on:
+      privana:
+        condition: service_healthy
+    platform: linux/amd64
+    environment:
+      - LIFI_API_KEY=${LIFI_API_KEY}
+    volumes:
+      - ./rofl-appd.sock:/run/rofl-appd.sock
+    network_mode: host # Requires linux
+    ports:
+      - "8001:8001"
+    restart: on-failure

@@ -1,7 +1,9 @@
+from dataclasses import replace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from src.core.config import load_settings
 from src.models.api import TokenInfo
 from src.models.settings import Settings
 from src.services.earn.registry import (
@@ -37,7 +39,8 @@ POOL_ID_PREFIXED = "0xABC123"
 
 
 def _settings() -> Settings:
-    return Settings(
+    return replace(
+        load_settings(),
         liquidity_provider_secret_key=(
             "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
         ),
@@ -248,7 +251,8 @@ class TestRegisterAaveFromConfig:
 
 
 def _midas_settings() -> Settings:
-    return Settings(
+    return replace(
+        load_settings(),
         liquidity_provider_secret_key=(
             "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
         ),

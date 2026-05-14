@@ -1,9 +1,10 @@
 import time
+from dataclasses import replace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from src.models.settings import Settings
+from src.core.config import load_settings
 
 
 USDC_TOKEN_ID = "0x330ba47d00c7ce3018deee017b319fd7cc6473a2ddc9e6eba6ebb4207be15279"
@@ -15,7 +16,8 @@ SIWE_TOKEN = "0x" + "ee" * 32
 
 
 def _make_service(registry=None):
-    settings = Settings(
+    settings = replace(
+        load_settings(),
         earn_manager_contract_address="0x1111111111111111111111111111111111111111",
         liquidity_provider_secret_key="0x4c0883a69102937d6231471b5dbb6204fe512961708279f69e0f0fcbf24b5830",
         liquidity_provider_address=POOL_ADDRESS,

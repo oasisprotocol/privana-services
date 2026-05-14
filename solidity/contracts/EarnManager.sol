@@ -9,7 +9,7 @@ import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import "./interfaces/IAccounting.sol";
 
 /// @title EarnManager (UUPS upgradeable)
-/// @notice Pool registry and share accounting for FlexVaults earn strategies.
+/// @notice Pool registry and share accounting for Privana earn strategies.
 /// @dev Deployed behind an ERC1967 proxy. Storage layout MUST stay
 /// append-only across upgrades: never reorder, remove, or change the type of
 /// existing slots; new state goes at the end (and consumes from `__gap`).

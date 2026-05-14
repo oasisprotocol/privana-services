@@ -28,7 +28,7 @@ cp .env.testnet .env
 | `ACCOUNTING_CHAIN_ID` | Chain id for EIP-712 domain (Sapphire testnet = `23295`) |
 | `ACCOUNTING_API_BASE_URL` | Accounting REST API (e.g. `https://flexvaults-staging.rofl.build`) |
 | `SWAP_MANAGER_CONTRACT_ADDRESS` | `SwapManager` contract on Sapphire |
-| `EARN_MANAGER_CONTRACT_ADDRESS` | `EarnManager` contract on Sapphire |
+| `EARN_MANAGER_CONTRACT_ADDRESS` | `EarnManager` proxy contract on Sapphire |
 | `SAPPHIRE_RPC_URL` | Sapphire RPC endpoint |
 | `BASE_SEPOLIA_RPC_URL` | Base Sepolia RPC endpoint (for Aave reads/writes) |
 | `AAVE_POOL_ADDRESS` | Aave V3 `Pool` on Base Sepolia |

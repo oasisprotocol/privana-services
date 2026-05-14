@@ -124,6 +124,28 @@ def load_settings(refresh: bool = False) -> Settings:
             base_sepolia_rpc_url=os.getenv("BASE_SEPOLIA_RPC_URL", _defaults.base_sepolia_rpc_url),
             aave_pool_address=os.getenv("AAVE_POOL_ADDRESS", _defaults.aave_pool_address),
             aave_pool_assets=os.getenv("AAVE_POOL_ASSETS", _defaults.aave_pool_assets),
+            base_mainnet_rpc_url=os.getenv(
+                "BASE_MAINNET_RPC_URL", _defaults.base_mainnet_rpc_url
+            ),
+            midas_issuance_vault_address=os.getenv(
+                "MIDAS_ISSUANCE_VAULT_ADDRESS", _defaults.midas_issuance_vault_address
+            ),
+            midas_redemption_vault_address=os.getenv(
+                "MIDAS_REDEMPTION_VAULT_ADDRESS", _defaults.midas_redemption_vault_address
+            ),
+            midas_mtbill_token_address=os.getenv(
+                "MIDAS_MTBILL_TOKEN_ADDRESS", _defaults.midas_mtbill_token_address
+            ),
+            midas_oracle_address=os.getenv(
+                "MIDAS_ORACLE_ADDRESS", _defaults.midas_oracle_address
+            ),
+            midas_default_slippage_bps=_get_int(
+                "MIDAS_DEFAULT_SLIPPAGE_BPS", _defaults.midas_default_slippage_bps
+            ),
+            midas_oracle_heartbeat_sec=_get_int(
+                "MIDAS_ORACLE_HEARTBEAT_SEC", _defaults.midas_oracle_heartbeat_sec
+            ),
+            midas_pool_assets=os.getenv("MIDAS_POOL_ASSETS", _defaults.midas_pool_assets),
         )
     return _settings
 

@@ -62,6 +62,7 @@ class PoolResponse(BaseModel):
     total_assets: str
     apy_bps: int
     status: str
+    pool_address: str
 
 
 class PoolDetailResponse(BaseModel):

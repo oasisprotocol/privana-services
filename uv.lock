@@ -824,7 +824,7 @@ requires-dist = [
     { name = "eth-account", specifier = ">=0.13,<0.14" },
     { name = "fastapi", specifier = ">=0.135,<0.137" },
     { name = "httpx", specifier = ">=0.28,<0.30" },
-    { name = "oasis-privana", specifier = ">=0.1.16,<0.2" },
+    { name = "oasis-privana", specifier = ">=0.2.0,<0.3" },
     { name = "oasis-sapphire-py", specifier = ">=0.4.2,<0.5" },
     { name = "pydantic", specifier = ">=2.12,<3" },
     { name = "python-dotenv", specifier = ">=1.0,<2" },
@@ -1163,7 +1163,7 @@ wheels = [
 
 [[package]]
 name = "oasis-privana"
-version = "0.1.16"
+version = "0.2.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "eth-account" },
@@ -1171,9 +1171,9 @@ dependencies = [
     { name = "httpx" },
     { name = "pydantic" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/7c/ad/54219eb8d1dbb69bc8add4b908675096ea99b9601802d0bce4adaf4266c3/oasis_privana-0.1.16.tar.gz", hash = "sha256:d6a1263340f5b33bcf3312f2b9947b4d1cf28597013c6b0195ee8ca02e8155af", size = 108402, upload-time = "2026-05-09T22:20:39.99Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/39/9f/a32c79478f35002c94d1dfde261f413f6c4d6604488fa96349699037775c/oasis_privana-0.2.0.tar.gz", hash = "sha256:e5bea5ba30ef2d3e6e8efb0261f25d81a83159a84780149afd80244cf0dec266", size = 108328, upload-time = "2026-05-12T10:30:10.101Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/73/98/92bedcadbe7782c355411dd575fa14ce13044b895b27fef8f56ff54280fc/oasis_privana-0.1.16-py3-none-any.whl", hash = "sha256:3e8836e1690f93413143a9e86e5175f23a41c25f1e63ee5c722b2726e8c4d2bc", size = 27579, upload-time = "2026-05-09T22:20:38.544Z" },
+    { url = "https://files.pythonhosted.org/packages/62/19/a6e273b065e219a3d57c72523bfdd9197651ac6d0185011bbed7fc18eb0c/oasis_privana-0.2.0-py3-none-any.whl", hash = "sha256:883052c17f5cd59e448794de2738428a1f879fac6fb15c33e9a5bdc9921307da", size = 27382, upload-time = "2026-05-12T10:30:08.684Z" },
 ]
 
 [[package]]

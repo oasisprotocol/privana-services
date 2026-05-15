@@ -169,7 +169,7 @@ class MidasClient:
     def transfer_erc20(self, asset_address: str, to_address: str, amount: int) -> str:
         """Plain ERC20.transfer from the LP EOA. Mirrors AaveClient's helper;
         the strategy uses it to forward redeemed USDC from the LP EOA to the
-        flexvaults deposit address on Base.
+        privana deposit address on Base.
         """
         asset = Web3.to_checksum_address(asset_address)
         recipient = Web3.to_checksum_address(to_address)

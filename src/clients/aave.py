@@ -101,7 +101,7 @@ class AaveClient:
 
     def transfer_erc20(self, asset_address: str, to_address: str, amount: int) -> str:
         """Plain ERC20.transfer from the LP EOA. Used to push redeemed
-        Aave funds back to the flexvaults deposit address on Base.
+        Aave funds back to the privana deposit address on Base.
         """
         asset = Web3.to_checksum_address(asset_address)
         recipient = Web3.to_checksum_address(to_address)

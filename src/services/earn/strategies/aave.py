@@ -5,22 +5,22 @@ import logging
 from typing import Awaitable, Callable, Optional, TypeVar
 
 from eth_account import Account
-from flexvaults import (
+from privana import (
     DepositAddressRequest,
     DepositCheckRequest,
-    FlexvaultsClient,
+    PrivanaClient,
     SignWithdrawParams,
     WithdrawalRequest,
     WithdrawMessage,
     sign_withdraw_message,
 )
-from flexvaults.client.errors import NetworkError
-from flexvaults.types.common import Network
+from privana.client.errors import NetworkError
+from privana.types.common import Network
 
 from src.clients.aave import AaveClient
-from src.clients.flexvaults import (
-    get_authenticated_flexvaults_client,
-    get_flexvaults_client,
+from src.clients.privana import (
+    get_authenticated_privana_client,
+    get_privana_client,
 )
 from src.core.config import load_settings
 from src.services.earn.strategies.base import BaseStrategy
@@ -51,7 +51,7 @@ def _network_for_chain(chain_id: int) -> Network:
 
 
 class AaveStrategy(BaseStrategy):
-    """Aave V3 strategy. Bridges pool funds from the flexvaults accounting
+    """Aave V3 strategy. Bridges pool funds from the privana accounting
     layer on Sapphire to the LP EOA on Base, supplies them to Aave V3, and
     redeems on the way out.
 
@@ -73,7 +73,7 @@ class AaveStrategy(BaseStrategy):
         asset_address: str,
         token_id: str,
         pool_address: Optional[str] = None,
-        flexvaults_client: Optional[FlexvaultsClient] = None,
+        privana_client: Optional[PrivanaClient] = None,
         poll_interval_sec: float = DEFAULT_POLL_INTERVAL_SEC,
     ) -> None:
         self._client = client
@@ -86,7 +86,7 @@ class AaveStrategy(BaseStrategy):
         self._accounting_contract = settings.accounting_contract_address
         self._network = _network_for_chain(settings.accounting_chain_id)
 
-        self._flexvaults = flexvaults_client
+        self._privana = privana_client
         self._poll_interval_sec = poll_interval_sec
 
     @property
@@ -105,18 +105,18 @@ class AaveStrategy(BaseStrategy):
     def pool_address(self) -> str:
         return self._pool_address
 
-    def _get_flexvaults(self) -> FlexvaultsClient:
-        if self._flexvaults is not None:
-            return self._flexvaults
-        return get_flexvaults_client()
+    def _get_privana(self) -> PrivanaClient:
+        if self._privana is not None:
+            return self._privana
+        return get_privana_client()
 
-    async def _get_authed_flexvaults(self) -> FlexvaultsClient:
+    async def _get_authed_privana(self) -> PrivanaClient:
         """Auth-required SDK calls share the SIWE-authenticated singleton.
         Tests inject a pre-mocked client to bypass SIWE.
         """
-        if self._flexvaults is not None:
-            return self._flexvaults
-        return await get_authenticated_flexvaults_client()
+        if self._privana is not None:
+            return self._privana
+        return await get_authenticated_privana_client()
 
     async def get_apy_bps(self) -> int:
         return self._client.get_supply_apy_bps(self._asset_address)
@@ -179,7 +179,7 @@ class AaveStrategy(BaseStrategy):
         if amount <= 0:
             raise ValueError(f"withdraw_from_earn requires a positive amount, got {amount}")
 
-        client = await self._get_authed_flexvaults()
+        client = await self._get_authed_privana()
         pre_balance = await self._read_pool_balance()
 
         redeem_tx = self._client.withdraw(self._asset_address, amount, to=self._pool_address)
@@ -274,7 +274,7 @@ class AaveStrategy(BaseStrategy):
         reads tunnel through ``_retry_on_network_error`` so a single dropped
         TCP read doesn't tear the loop down.
         """
-        client = self._get_flexvaults()
+        client = self._get_privana()
         lp_account = Account.from_key(self._lp_secret_key)
 
         pre = await self._retry_on_network_error(
@@ -355,7 +355,7 @@ class AaveStrategy(BaseStrategy):
         client (LP/pool key) here. Wrapped in the network-retry helper so a
         flaky read can't take down the post-redeem credit poll.
         """
-        client = await self._get_authed_flexvaults()
+        client = await self._get_authed_privana()
         balance = await self._retry_on_network_error(
             "get_balance",
             lambda: client.get_balance(self._token_id),

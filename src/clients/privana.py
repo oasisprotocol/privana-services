@@ -5,46 +5,46 @@ from typing import Optional
 
 from eth_account import Account
 from eth_account.messages import encode_defunct
-from flexvaults import FlexvaultsClient
+from privana import PrivanaClient
 
 from src.core.config import load_settings
 
-_client: Optional[FlexvaultsClient] = None
+_client: Optional[PrivanaClient] = None
 _auth_token: Optional[str] = None
 
 
-def get_flexvaults_client() -> FlexvaultsClient:
+def get_privana_client() -> PrivanaClient:
     global _client
     if _client is None:
         settings = load_settings()
-        _client = FlexvaultsClient(base_url=settings.accounting_api_base_url)
+        _client = PrivanaClient(base_url=settings.accounting_api_base_url)
     return _client
 
 
-def reset_flexvaults_client() -> None:
+def reset_privana_client() -> None:
     global _client, _auth_token
     _client = None
     _auth_token = None
 
 
-async def get_authenticated_flexvaults_client() -> FlexvaultsClient:
-    """Return the singleton FlexvaultsClient, lazily authenticated as the
+async def get_authenticated_privana_client() -> PrivanaClient:
+    """Return the singleton PrivanaClient, lazily authenticated as the
     LP/pool address via SIWE. Required before any endpoint that infers the
     user from the auth context, e.g. `get_balance(token_id)`.
     """
     global _auth_token
-    client = get_flexvaults_client()
+    client = get_privana_client()
     if _auth_token is None:
         _auth_token = await _authenticate_as_lp(client)
         client.set_bearer_token(_auth_token)
     return client
 
 
-async def _authenticate_as_lp(client: FlexvaultsClient) -> str:
+async def _authenticate_as_lp(client: PrivanaClient) -> str:
     settings = load_settings()
     if not settings.liquidity_provider_secret_key:
         raise RuntimeError(
-            "flexvaults SIWE auth requires LIQUIDITY_PROVIDER_SECRET_KEY to be set"
+            "privana SIWE auth requires LIQUIDITY_PROVIDER_SECRET_KEY to be set"
         )
 
     lp_address = settings.liquidity_provider_address
@@ -71,7 +71,7 @@ async def _authenticate_as_lp(client: FlexvaultsClient) -> str:
 
 
 __all__ = [
-    "get_flexvaults_client",
-    "get_authenticated_flexvaults_client",
-    "reset_flexvaults_client",
+    "get_privana_client",
+    "get_authenticated_privana_client",
+    "reset_privana_client",
 ]

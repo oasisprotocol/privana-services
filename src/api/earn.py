@@ -46,6 +46,7 @@ async def list_pools() -> PoolListResponse:
                 total_assets=str(effective),
                 apy_bps=apy_bps,
                 status="active" if p["active"] else "paused",
+                pool_address=p["pool_address"],
             )
             for p, (effective, apy_bps) in zip(pools, results)
         ]

@@ -169,15 +169,14 @@ class MidasStrategy(BaseStrategy):
         The +12 comes from balancing decimals on both sides of the equation:
             18 (mTBILL) - 6 (USDC) + oracle_decimals = oracle_decimals + 12
 
-        TODO: implement. See TestConvertUsdcToMtbillAmount in
-        tests/services/earn/test_midas_strategy.py for the parametrized cases
-        this function must satisfy. Mis-scaling here means every Midas
-        deposit and withdrawal redeems the wrong amount in production.
+        Multiplication happens before division to preserve precision; Python
+        int has arbitrary precision so there is no overflow risk at any
+        realistic deposit size. ZeroDivisionError on a zero oracle price
+        is left to propagate — that condition should already be caught by
+        is_healthy() upstream.
         """
-        raise NotImplementedError(
-            "convert_usdc_to_mtbill_amount is a stub; implementation lands in "
-            "the next commit per the integration plan."
-        )
+        scale = 10 ** (oracle_decimals + _DECIMAL_BALANCE)
+        return (usdc_amount * scale) // oracle_price
 
     @staticmethod
     def convert_mtbill_to_usdc_amount(

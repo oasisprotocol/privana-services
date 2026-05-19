@@ -1,8 +1,10 @@
 import asyncio
 import logging
 
-from fastapi import APIRouter, Header, HTTPException, Query
+import httpx
+from fastapi import APIRouter, HTTPException, Query, Request
 
+from src.clients.accounting import get_accounting_client
 from src.models.earn import (
     BalanceListResponse,
     BalanceResponse,
@@ -20,6 +22,68 @@ from src.services.earn.vault_service import get_vault_service
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1/earn", tags=["Earn"])
+
+
+def _auth_error(detail: str = "Bearer token required") -> HTTPException:
+    return HTTPException(
+        status_code=401,
+        detail=detail,
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+
+def _bearer_token(authorization: str) -> str:
+    scheme, _, token = authorization.partition(" ")
+    if scheme.lower() != "bearer" or not token.strip():
+        raise _auth_error("Invalid bearer token")
+    return token.strip()
+
+
+async def _private_read_token(request: Request) -> str:
+    authorization = request.headers.get("authorization")
+    siwe_token = request.headers.get("x-siwe-token")
+    if authorization and siwe_token:
+        raise HTTPException(
+            status_code=400,
+            detail="Use either Authorization or X-SIWE-Token, not both",
+        )
+    if siwe_token:
+        return siwe_token
+    if not authorization:
+        raise _auth_error()
+
+    try:
+        return await get_accounting_client().exchange_jwt_for_siwe_token(
+            _bearer_token(authorization)
+        )
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 401:
+            raise _auth_error("Invalid bearer token") from exc
+        if exc.response.status_code == 403:
+            raise HTTPException(
+                status_code=403,
+                detail="Bearer token is not allowed",
+            ) from exc
+        logger.warning(
+            "Accounting JWT exchange failed with status %d",
+            exc.response.status_code,
+        )
+        raise HTTPException(
+            status_code=502,
+            detail="Accounting token exchange failed",
+        ) from exc
+    except (httpx.ConnectError, httpx.ReadError, httpx.RemoteProtocolError, httpx.TimeoutException) as exc:
+        logger.warning("Accounting JWT exchange request failed: %s", exc)
+        raise HTTPException(
+            status_code=502,
+            detail="Accounting token exchange failed",
+        ) from exc
+    except (KeyError, ValueError, RuntimeError) as exc:
+        logger.warning("Accounting JWT exchange returned an invalid response")
+        raise HTTPException(
+            status_code=502,
+            detail="Accounting token exchange failed",
+        ) from exc
 
 
 @router.get("/pools", response_model=PoolListResponse)
@@ -142,17 +206,12 @@ async def withdraw(payload: WithdrawRequest) -> WithdrawResponse:
 
 
 @router.get("/withdraw/nonce")
-async def get_withdraw_nonce(
-    x_siwe_token: str = Header(
-        ..., description="Encrypted SIWE auth token (hex). Sent as an HTTP "
-        "header rather than a URL parameter so the token does not end up in "
-        "server access logs, browser history, or referer chains."
-    ),
-) -> dict:
+async def get_withdraw_nonce(request: Request) -> dict:
+    token = await _private_read_token(request)
     try:
         service = get_vault_service()
         nonce = await asyncio.to_thread(
-            service.get_withdraw_nonce_via_token, x_siwe_token
+            service.get_withdraw_nonce_via_token, token
         )
         return {"nonce": nonce}
     except ValueError as exc:
@@ -163,16 +222,11 @@ async def get_withdraw_nonce(
 
 
 @router.get("/balance", response_model=BalanceListResponse)
-async def get_balances(
-    x_siwe_token: str = Header(
-        ..., description="Encrypted SIWE auth token (hex). Sent as an HTTP "
-        "header rather than a URL parameter so the token does not end up in "
-        "server access logs, browser history, or referer chains."
-    ),
-) -> BalanceListResponse:
+async def get_balances(request: Request) -> BalanceListResponse:
+    token = await _private_read_token(request)
     try:
         service = get_vault_service()
-        balances = await service.get_all_balances(x_siwe_token)
+        balances = await service.get_all_balances(token)
         return BalanceListResponse(
             positions=[BalanceResponse(**b) for b in balances]
         )
@@ -181,5 +235,3 @@ async def get_balances(
     except Exception as exc:
         logger.exception("Failed to get balances")
         raise HTTPException(status_code=500, detail="Failed to get balances") from exc
-
-

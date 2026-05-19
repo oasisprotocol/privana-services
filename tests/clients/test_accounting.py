@@ -1,9 +1,9 @@
-import httpx
-import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from src.models.common import Balance, TokenInfo
+import httpx
+import pytest
 
+from src.models.common import Balance, TokenInfo
 
 SAMPLE_TOKEN_NATIVE = {
     "token_id": "0x0000000000000000000000000000000000000000000000000000000000014a34",
@@ -149,3 +149,34 @@ class TestAccountingClient:
             "GET", "http://test:8000/v1/accounting/balances/0xtoken",
             headers={"Authorization": "Bearer test-jwt"},
         )
+
+    async def test_exchange_jwt_for_siwe_token_caches_until_expiry(self, client, mock_http_client):
+        mock_http_client.post.return_value = self._mock_response({
+            "siwe_token": "0x" + "ee" * 32,
+            "address": SAMPLE_BALANCE["user_address"],
+            "expires_in": 300,
+        })
+
+        first = await client.exchange_jwt_for_siwe_token("user-jwt")
+        second = await client.exchange_jwt_for_siwe_token("user-jwt")
+
+        assert first == "0x" + "ee" * 32
+        assert second == first
+        mock_http_client.post.assert_awaited_once_with(
+            "http://test:8000/v1/accounting/auth/jwt/siwe-token",
+            headers={"Authorization": "Bearer user-jwt"},
+        )
+
+    async def test_exchange_jwt_for_siwe_token_does_not_cache_near_expiry(
+        self, client, mock_http_client
+    ):
+        mock_http_client.post.return_value = self._mock_response({
+            "siwe_token": "0x" + "ee" * 32,
+            "address": SAMPLE_BALANCE["user_address"],
+            "expires_in": 5,
+        })
+
+        await client.exchange_jwt_for_siwe_token("user-jwt")
+        await client.exchange_jwt_for_siwe_token("user-jwt")
+
+        assert mock_http_client.post.await_count == 2

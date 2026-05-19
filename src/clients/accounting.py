@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -19,6 +20,7 @@ logger = logging.getLogger(__name__)
 
 MAX_RETRIES = 3
 RETRY_DELAY = 1.0
+JWT_SIWE_CACHE_SKEW_SECONDS = 30
 
 
 async def _request_with_retry(client: httpx.AsyncClient, method: str, url: str, **kwargs) -> httpx.Response:
@@ -45,6 +47,8 @@ class AccountingClient:
         self._siwe_token: Optional[str] = None
         self._jwt_token: Optional[str] = None
         self._auth_timestamp: Optional[float] = None
+        self._jwt_siwe_cache: dict[str, tuple[str, float]] = {}
+        self._jwt_siwe_lock = asyncio.Lock()
         self._accounting_contract = None
 
     async def _ensure_authenticated(self) -> None:
@@ -112,6 +116,46 @@ class AccountingClient:
             f"{self.base_url}/v1/accounting/tokens/{token_id}",
         )
         return TokenInfo(**response.json())
+
+    async def exchange_jwt_for_siwe_token(self, jwt_token: str) -> str:
+        jwt_token = jwt_token.strip()
+        if not jwt_token:
+            raise ValueError("JWT bearer token is required")
+
+        cache_key = hashlib.sha256(jwt_token.encode("utf-8")).hexdigest()
+        loop = asyncio.get_event_loop()
+        now = loop.time()
+        cached = self._jwt_siwe_cache.get(cache_key)
+        if cached and cached[1] > now:
+            return cached[0]
+
+        async with self._jwt_siwe_lock:
+            now = loop.time()
+            cached = self._jwt_siwe_cache.get(cache_key)
+            if cached and cached[1] > now:
+                return cached[0]
+
+            response = await self.client.post(
+                f"{self.base_url}/v1/accounting/auth/jwt/siwe-token",
+                headers={"Authorization": f"Bearer {jwt_token}"},
+            )
+            response.raise_for_status()
+            data = response.json()
+            siwe_token = data["siwe_token"]
+            expires_in = int(data["expires_in"])
+            if not siwe_token or expires_in <= 0:
+                raise RuntimeError("Accounting JWT exchange returned an invalid token")
+
+            for key, (_, expires_at) in list(self._jwt_siwe_cache.items()):
+                if expires_at <= now:
+                    del self._jwt_siwe_cache[key]
+
+            cache_ttl = expires_in - JWT_SIWE_CACHE_SKEW_SECONDS
+            if cache_ttl > 0:
+                self._jwt_siwe_cache[cache_key] = (siwe_token, now + cache_ttl)
+            else:
+                self._jwt_siwe_cache.pop(cache_key, None)
+            return siwe_token
 
     async def get_transfer_nonce(self, user_address: str) -> int:
         """Read ``transferNonces[user]`` directly from the Accounting contract.

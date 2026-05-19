@@ -363,11 +363,6 @@ async def test_withdraw_from_earn_propagates_aave_failure(
 
 
 @pytest.mark.asyncio
-async def test_pending_yield_is_zero(strategy) -> None:
-    assert await strategy.pending_yield() == 0
-
-
-@pytest.mark.asyncio
 async def test_total_assets_reads_aToken_balance_for_pool_address(strategy, aave_client) -> None:
     aave_client.get_aToken_balance.return_value = 42_000_000
 

@@ -62,9 +62,9 @@ contract EarnManager is
 
     IAccounting public accounting;
 
-    /// @notice Account authorized to manage pools (create, pause, harvest,
-    /// sync). Separated from `owner` so day-to-day operations don't share a
-    /// key with proxy upgrades / accounting reconfiguration.
+    /// @notice Account authorized to manage pools (create, pause, sync
+    /// totalAssets). Separated from `owner` so day-to-day operations don't
+    /// share a key with proxy upgrades / accounting reconfiguration.
     address public poolAdmin;
 
     /// @notice Pool registry keyed by `poolId` (typically
@@ -180,12 +180,6 @@ contract EarnManager is
     function setPoolActive(bytes32 poolId, bool active) external onlyPoolAdmin {
         if (pools[poolId].poolAddress == address(0)) revert PoolNotFound();
         pools[poolId].active = active;
-    }
-
-    function harvest(bytes32 poolId, uint256 yieldAmount) external onlyPoolAdmin {
-        Pool storage pool = pools[poolId];
-        if (pool.poolAddress == address(0)) revert PoolNotFound();
-        pool.totalAssets += yieldAmount;
     }
 
     /// @dev Replace totalAssets with an externally observed value. Used to

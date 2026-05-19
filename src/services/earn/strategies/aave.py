@@ -373,9 +373,6 @@ class AaveStrategy(BaseStrategy):
                 return
             await asyncio.sleep(self._poll_interval_sec)
 
-    async def pending_yield(self) -> int:
-        return 0
-
     async def total_assets(self) -> int:
         """aToken balance held by the pool address for this asset, which
         equals principal plus accrued Aave yield.

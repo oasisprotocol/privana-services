@@ -342,9 +342,6 @@ class MidasStrategy(BaseStrategy):
             self._pool_address, self._token_id, amount,
         )
 
-    async def pending_yield(self) -> int:
-        return 0
-
     async def total_assets(self) -> int:
         """Live AUM held by the pool address, in USDC base units. mTBILL
         balance times the oracle price. Returns 0 when the pool holds no

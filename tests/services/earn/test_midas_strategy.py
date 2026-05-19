@@ -220,11 +220,6 @@ async def test_get_apy_bps_reads_from_settings(midas_client, privana) -> None:
     assert await s.get_apy_bps() == 525
 
 
-@pytest.mark.asyncio
-async def test_pending_yield_is_zero(strategy) -> None:
-    assert await strategy.pending_yield() == 0
-
-
 class TestConvertUsdcToMtbillAmount:
     """Defines the contract for MidasStrategy.convert_usdc_to_mtbill_amount.
 

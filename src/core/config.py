@@ -145,6 +145,7 @@ def load_settings(refresh: bool = False) -> Settings:
             midas_oracle_heartbeat_sec=_get_int(
                 "MIDAS_ORACLE_HEARTBEAT_SEC", _defaults.midas_oracle_heartbeat_sec
             ),
+            midas_apy_bps=_get_int("MIDAS_APY_BPS", _defaults.midas_apy_bps),
             midas_pool_assets=os.getenv("MIDAS_POOL_ASSETS", _defaults.midas_pool_assets),
         )
     return _settings

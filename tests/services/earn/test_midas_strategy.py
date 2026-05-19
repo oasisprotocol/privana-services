@@ -83,7 +83,11 @@ class _DepositCheckResponse:
     detail: str | None = None
 
 
-def _strategy_settings(slippage_bps: int = 50, heartbeat_sec: int = 86400) -> Settings:
+def _strategy_settings(
+    slippage_bps: int = 50,
+    heartbeat_sec: int = 86400,
+    apy_bps: int = 350,
+) -> Settings:
     return Settings(
         liquidity_provider_secret_key=LP_PRIVATE_KEY,
         liquidity_provider_address=POOL_ADDRESS,
@@ -91,6 +95,7 @@ def _strategy_settings(slippage_bps: int = 50, heartbeat_sec: int = 86400) -> Se
         accounting_chain_id=23295,
         midas_default_slippage_bps=slippage_bps,
         midas_oracle_heartbeat_sec=heartbeat_sec,
+        midas_apy_bps=apy_bps,
     )
 
 
@@ -192,8 +197,27 @@ def test_unsupported_chain_id_rejected(midas_client, privana) -> None:
 
 
 @pytest.mark.asyncio
-async def test_get_apy_bps_returns_placeholder(strategy) -> None:
+async def test_get_apy_bps_returns_configured_default(strategy) -> None:
     assert await strategy.get_apy_bps() == 350
+
+
+@pytest.mark.asyncio
+async def test_get_apy_bps_reads_from_settings(midas_client, privana) -> None:
+    from src.services.earn.strategies.midas import MidasStrategy
+
+    with patch(
+        "src.services.earn.strategies.midas.load_settings",
+        return_value=_strategy_settings(apy_bps=525),
+    ):
+        s = MidasStrategy(
+            client=midas_client,
+            asset_address=ASSET_ADDRESS,
+            token_id=TOKEN_ID,
+            privana_client=privana,
+            poll_interval_sec=0,
+        )
+
+    assert await s.get_apy_bps() == 525
 
 
 @pytest.mark.asyncio

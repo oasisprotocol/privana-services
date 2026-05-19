@@ -40,4 +40,5 @@ class Settings:
     midas_oracle_address: str = "0x70E58b7A1c884fFFE7dbce5249337603a28b8422"
     midas_default_slippage_bps: int = 50
     midas_oracle_heartbeat_sec: int = 86400
+    midas_apy_bps: int = 350
     midas_pool_assets: str = ""

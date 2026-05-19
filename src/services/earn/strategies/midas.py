@@ -36,7 +36,6 @@ _NETWORK_BY_CHAIN_ID: dict[int, Network] = {
 }
 
 DEFAULT_POLL_INTERVAL_SEC = 3.0
-PLACEHOLDER_APY_BPS = 350
 
 _ACCEPTED_SUBMISSION_STATUSES = frozenset({"success", "pending", "accepted", "ok", "submitted"})
 
@@ -77,9 +76,11 @@ class MidasStrategy(BaseStrategy):
     while a Midas operator approves it). Holding a shared withdraw lock that
     long would block every other pool's withdrawals.
 
-    APY is a hardcoded placeholder for now; mTBILL yield is realised as
-    price appreciation against USD, not as a token-balance accrual, so the
-    APY is best fetched off-chain. See `get_apy_bps`.
+    APY is admin-managed via the ``MIDAS_APY_BPS`` setting. mTBILL yield is
+    realised as price appreciation against USD, not as a token-balance
+    accrual, so the live APY is not derivable from a single on-chain read.
+    The configured value is used for ``/v1/earn/pools`` display only and
+    has no impact on routing or share math.
 
     `convert_usdc_to_mtbill_amount` and `convert_mtbill_to_usdc_amount` are
     staticmethods so they can be unit-tested without constructing a
@@ -95,6 +96,7 @@ class MidasStrategy(BaseStrategy):
         privana_client: Optional[PrivanaClient] = None,
         slippage_bps: Optional[int] = None,
         oracle_heartbeat_sec: Optional[int] = None,
+        apy_bps: Optional[int] = None,
         poll_interval_sec: float = DEFAULT_POLL_INTERVAL_SEC,
     ) -> None:
         self._client = client
@@ -114,6 +116,7 @@ class MidasStrategy(BaseStrategy):
             if oracle_heartbeat_sec is not None
             else settings.midas_oracle_heartbeat_sec
         )
+        self._apy_bps = apy_bps if apy_bps is not None else settings.midas_apy_bps
 
         self._privana = privana_client
         self._poll_interval_sec = poll_interval_sec
@@ -145,8 +148,7 @@ class MidasStrategy(BaseStrategy):
         return await get_authenticated_privana_client()
 
     async def get_apy_bps(self) -> int:
-        # TODO: replace with a real APY source (Midas API or oracle-delta).
-        return PLACEHOLDER_APY_BPS
+        return self._apy_bps
 
     @staticmethod
     def convert_usdc_to_mtbill_amount(

@@ -17,10 +17,13 @@ class StrategyRegistry:
     under strategies/ plus a single registration call, not an edit to
     vault_service.py.
 
-    Missing pool_id falls back to ManualStrategy so pools without a
-    configured adapter continue to work as they did before Sprint 4.
-    TODO: decide whether the fallback should be an error instead once
-    all pools are expected to have strategies declared.
+    Missing pool_id falls back to ManualStrategy by design. This is a
+    soft-fail safety net: a pool can exist on-chain before its off-chain
+    adapter is registered (e.g. during a deploy/config window) and reads
+    against it still succeed against the on-chain `totalAssets` snapshot.
+    The trade-off is that a forgotten config silently routes through the
+    no-op fallback rather than erroring loudly; startup logs make
+    registered pool_ids visible so operators can verify coverage.
     """
 
     def __init__(self) -> None:

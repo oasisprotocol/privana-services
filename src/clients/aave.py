@@ -25,9 +25,9 @@ class AaveClient:
     Reads are free (no signer). Writes use the LP EOA on Base Sepolia via
     standard web3 signing (non-confidential chain, no sapphirepy wrapper).
 
-    TODO: splitting read-only and write-enabled clients would be cleaner, but
-    keeping a single class for now matches the strategy's needs (one protocol
-    adapter, one client).
+    Single class by design: each protocol adapter has exactly one strategy
+    consuming it, and the strategy needs both read and write surfaces, so a
+    split would only push the same coupling one layer down.
     """
 
     def __init__(self) -> None:
@@ -53,10 +53,11 @@ class AaveClient:
         """Current supply rate for the given asset, in basis points.
 
         Aave V3 returns currentLiquidityRate as APR (linear annualized) in
-        RAY units (1e27). We convert to bps via integer division. The
-        APR→APY gap at typical supply rates (<10%) is under ~2 bps and is
-        rounded away.
-        TODO: compound explicitly if needed?
+        RAY units (1e27). We convert to bps via integer division and treat
+        the result as APY. The APR→APY gap at typical supply rates (<10%)
+        is under ~2 bps and is rounded away — intentional precision
+        trade-off, since this value is used for display only and routing
+        decisions don't depend on sub-bps accuracy.
         """
         reserve = self._get_reserve_data(asset_address)
         current_liquidity_rate = reserve[2]

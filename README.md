@@ -117,14 +117,15 @@ The API starts on `http://localhost:8000` by default. Configure with `API_HOST` 
 
 ### Earn
 
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/v1/earn/pools` | List registered Earn pools (with live strategy AUM) |
-| `GET` | `/v1/earn/pools/{pool_id}` | Pool detail, including current APY and assets |
-| `GET` | `/v1/earn/quote` | Deposit quote: shares estimate, exchange rate, transfer nonce |
-| `POST` | `/v1/earn/deposit` | Bridge funds to Base, deploy into the pool's strategy (Aave supply / Midas mint), mint pool shares |
-| `POST` | `/v1/earn/withdraw` | Burn shares, redeem from strategy (Aave withdraw / Midas instant redeem), bridge back to accounting |
-| `GET` | `/v1/earn/balance` | User shares + redeemable assets across pools |
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| `GET` | `/v1/earn/pools` | none | List registered Earn pools (with live strategy AUM) |
+| `GET` | `/v1/earn/pools/{pool_id}` | none | Pool detail, including current APY and assets |
+| `GET` | `/v1/earn/quote` | none | Deposit quote: shares estimate, exchange rate, transfer nonce |
+| `POST` | `/v1/earn/deposit` | EIP-712 signature | Bridge funds to Base, supply to Aave, mint pool shares |
+| `GET` | `/v1/earn/withdraw/nonce` | `Authorization: Bearer <Privana JWT>` | Withdraw consent nonce for the authenticated user |
+| `POST` | `/v1/earn/withdraw` | EIP-712 signature | Burn shares, redeem from Aave, bridge back to accounting |
+| `GET` | `/v1/earn/balance` | `Authorization: Bearer <Privana JWT>` | User shares + redeemable assets across pools |
 
 ## Tests
 

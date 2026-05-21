@@ -4,6 +4,7 @@ import time
 from pathlib import Path
 
 import pytest
+import requests
 from web3 import Web3
 
 pytestmark = pytest.mark.integration
@@ -17,10 +18,35 @@ ORACLE = Web3.to_checksum_address("0x70E58b7A1c884fFFE7dbce5249337603a28b8422")
 
 ABI_DIR = Path(__file__).resolve().parents[2] / "src" / "abis"
 
+_RETRY_DELAYS_SEC = (0.5, 1.0, 2.0, 4.0, 8.0)
+
 
 def _abi(name: str) -> list:
     with (ABI_DIR / f"{name}.json").open() as f:
         return json.load(f)["abi"]
+
+
+def _call(fn):
+    """Wrap a web3 contract function call with retry on 429 rate-limits.
+
+    Public Base RPCs throttle bursts of eth_calls, which is exactly the
+    pattern this probe produces. Real ops would configure a private RPC
+    via BASE_MAINNET_RPC_URL, but we want CI to be green against the
+    public endpoint too.
+    """
+    last_exc: Exception | None = None
+    for delay in _RETRY_DELAYS_SEC:
+        try:
+            return fn.call()
+        except requests.exceptions.HTTPError as exc:
+            status = exc.response.status_code if exc.response is not None else None
+            if status != 429:
+                raise
+            last_exc = exc
+            time.sleep(delay)
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("unreachable")
 
 
 @pytest.fixture(scope="module")
@@ -56,14 +82,12 @@ def test_oracle_decimals_is_18(oracle) -> None:
     assumes this; if Chronicle ever ships a feed with different precision
     the conversion is silently wrong by 10^delta.
     """
-    assert oracle.functions.decimals().call() == 18
+    assert _call(oracle.functions.decimals()) == 18
 
 
 def test_oracle_returns_positive_answer(oracle) -> None:
-    answer = oracle.functions.latestAnswer().call()
+    answer = _call(oracle.functions.latestAnswer())
     assert answer > 0, "oracle returned non-positive price"
-    # mTBILL is a yield-bearing $1 floor token; a price below $0.95 or above
-    # $2.00 is implausible and signals oracle malfunction.
     assert 0.95 * 10**18 < answer < 2.0 * 10**18, (
         f"oracle answer {answer} outside sane bounds for MTBILL/USD"
     )
@@ -75,7 +99,7 @@ def test_oracle_round_data_recent(oracle) -> None:
     barely move day-to-day) so we tolerate up to two weeks here, far looser
     than the 48h is_healthy() gate which is a separate routing concern.
     """
-    _, answer, _, updated_at, _ = oracle.functions.latestRoundData().call()
+    _, answer, _, updated_at, _ = _call(oracle.functions.latestRoundData())
     assert answer > 0
     age = int(time.time()) - int(updated_at)
     assert age < 14 * 86400, (
@@ -84,25 +108,25 @@ def test_oracle_round_data_recent(oracle) -> None:
 
 
 def test_issuance_vault_not_paused(issuance) -> None:
-    assert issuance.functions.paused().call() is False
+    assert _call(issuance.functions.paused()) is False
 
 
 def test_redemption_vault_not_paused(redemption) -> None:
-    assert redemption.functions.paused().call() is False
+    assert _call(redemption.functions.paused()) is False
 
 
 def test_issuance_vault_min_amount_is_set(issuance) -> None:
-    min_amount = issuance.functions.minAmount().call()
+    min_amount = _call(issuance.functions.minAmount())
     assert min_amount >= 0
 
 
 def test_issuance_vault_tokens_receiver_is_non_zero(issuance) -> None:
-    receiver = issuance.functions.tokensReceiver().call()
+    receiver = _call(issuance.functions.tokensReceiver())
     assert int(receiver, 16) != 0, "tokensReceiver should be a real address"
 
 
 def test_redemption_instant_fee_within_sane_bounds(redemption) -> None:
-    fee_bps = redemption.functions.instantFee().call()
+    fee_bps = _call(redemption.functions.instantFee())
     assert 0 <= fee_bps <= 500, (
         f"instantFee {fee_bps} bps is outside 0-5% sane bounds"
     )
@@ -113,9 +137,9 @@ def test_mtbill_token_address_is_proxy_with_balance_method(mtbill) -> None:
     the proxy delegates to a working ERC20 implementation and our ABI is
     selector-compatible.
     """
-    balance = mtbill.functions.balanceOf(
-        "0x0000000000000000000000000000000000000000",
-    ).call()
+    balance = _call(
+        mtbill.functions.balanceOf("0x0000000000000000000000000000000000000000"),
+    )
     assert balance == 0
 
 

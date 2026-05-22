@@ -2,19 +2,15 @@ from src.services.earn.strategies.base import BaseStrategy
 
 
 class ManualStrategy(BaseStrategy):
-    """Admin-controlled strategy. Funds stay in the pool, yield is submitted
-    manually by admins via the harvest API.
+    """No-op strategy used as the registry default for pools without an
+    external yield source. All flows are no-ops; the pool's full AUM lives
+    in the accounting layer.
 
-    Reports 0 APY and 0 pending yield because the strategy has no autonomous
-    view into yield accrual. The admin supplies the yield amount when calling
-    /v1/earn/harvest, which is written on-chain as pool.totalAssets +=
-    yieldAmount in EarnManager.harvest(). That on-chain total is the only
-    state. Nothing is tracked here.
-
-    total_assets is 0 by contract: a manual pool keeps its AUM inside the
-    accounting layer, not in any external protocol, so there's no external
-    balance for this strategy to report. The vault reads its own idle balance
-    from accounting and adds this (0) on top.
+    `total_assets` returns 0 by contract because the strategy holds no
+    external balance. Callers fall back to the on-chain `pool.totalAssets`
+    snapshot for AUM. If an operator ever needs to credit yield to such a
+    pool, they call `EarnManager.syncTotalAssets(poolId, newTotal)` directly
+    against the contract.
     """
 
     @property
@@ -29,9 +25,6 @@ class ManualStrategy(BaseStrategy):
 
     async def withdraw_from_earn(self, amount: int) -> None:
         return None
-
-    async def pending_yield(self) -> int:
-        return 0
 
     async def total_assets(self) -> int:
         return 0

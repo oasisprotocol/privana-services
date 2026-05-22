@@ -1,0 +1,63 @@
+{
+  "abi": [
+    {
+      "inputs": [
+        {"internalType": "address", "name": "tokenOut", "type": "address"},
+        {"internalType": "uint256", "name": "amountMTokenIn", "type": "uint256"},
+        {"internalType": "uint256", "name": "minReceiveAmount", "type": "uint256"}
+      ],
+      "name": "redeemInstant",
+      "outputs": [],
+      "stateMutability": "nonpayable",
+      "type": "function"
+    },
+    {
+      "inputs": [],
+      "name": "instantFee",
+      "outputs": [
+        {"internalType": "uint256", "name": "", "type": "uint256"}
+      ],
+      "stateMutability": "view",
+      "type": "function"
+    },
+    {
+      "inputs": [],
+      "name": "instantDailyLimit",
+      "outputs": [
+        {"internalType": "uint256", "name": "", "type": "uint256"}
+      ],
+      "stateMutability": "view",
+      "type": "function"
+    },
+    {
+      "inputs": [],
+      "name": "minAmount",
+      "outputs": [
+        {"internalType": "uint256", "name": "", "type": "uint256"}
+      ],
+      "stateMutability": "view",
+      "type": "function"
+    },
+    {
+      "inputs": [],
+      "name": "paused",
+      "outputs": [
+        {"internalType": "bool", "name": "", "type": "bool"}
+      ],
+      "stateMutability": "view",
+      "type": "function"
+    },
+    {
+      "anonymous": false,
+      "inputs": [
+        {"indexed": true, "internalType": "address", "name": "user", "type": "address"},
+        {"indexed": true, "internalType": "address", "name": "tokenOut", "type": "address"},
+        {"indexed": false, "internalType": "uint256", "name": "amount", "type": "uint256"},
+        {"indexed": false, "internalType": "uint256", "name": "feeAmount", "type": "uint256"},
+        {"indexed": false, "internalType": "uint256", "name": "amountTokenOut", "type": "uint256"}
+      ],
+      "name": "RedeemInstant",
+      "type": "event"
+    }
+  ]
+}

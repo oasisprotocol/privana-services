@@ -17,10 +17,13 @@ class StrategyRegistry:
     under strategies/ plus a single registration call, not an edit to
     vault_service.py.
 
-    Missing pool_id falls back to ManualStrategy so pools without a
-    configured adapter continue to work as they did before Sprint 4.
-    TODO: decide whether the fallback should be an error instead once
-    all pools are expected to have strategies declared.
+    Missing pool_id falls back to ManualStrategy by design. This is a
+    soft-fail safety net: a pool can exist on-chain before its off-chain
+    adapter is registered (e.g. during a deploy/config window) and reads
+    against it still succeed against the on-chain `totalAssets` snapshot.
+    The trade-off is that a forgotten config silently routes through the
+    no-op fallback rather than erroring loudly; startup logs make
+    registered pool_ids visible so operators can verify coverage.
     """
 
     def __init__(self) -> None:
@@ -177,6 +180,89 @@ async def register_aave_strategies_from_config(registry: StrategyRegistry, raw_c
         )
         logger.info(
             "Registered AaveStrategy pool=%s asset=%s token=%s chain=%s",
+            pool_id, asset_address, token_id, token_info.chain_id,
+        )
+        count += 1
+    return count
+
+
+async def register_midas_strategies_from_config(registry: StrategyRegistry, raw_config: str) -> int:
+    """Parse ``MIDAS_POOL_ASSETS`` JSON and register a MidasStrategy per pool.
+
+    Config format:
+        ``{"<pool_id_hex>": "<token_id>", ...}``
+
+    Unlike ``register_aave_strategies_from_config``, no legacy nested form is
+    accepted: Midas is a new integration with no prior config shape to
+    migrate from. The payment-token address (typically USDC on Base) is
+    resolved per pool via ``accounting.get_token_info(token_id)`` and used as
+    the strategy's ``asset_address``. The Midas-specific vault/oracle
+    addresses come from global settings, not the per-pool config.
+
+    Empty or whitespace-only input short-circuits with a debug log.
+
+    Returns the number of pools registered. Per-pool failures (bad shape,
+    accounting lookup failure, missing token_address) are logged but do not
+    crash the app; affected pools fall back to ManualStrategy via the
+    registry's default.
+    """
+    if not raw_config.strip():
+        logger.info("MIDAS_POOL_ASSETS not configured; skipping Midas strategy registration")
+        return 0
+
+    try:
+        pool_assets = json.loads(raw_config)
+    except json.JSONDecodeError:
+        logger.exception("MIDAS_POOL_ASSETS contains invalid JSON; skipping registration")
+        return 0
+
+    if not isinstance(pool_assets, dict):
+        logger.error(
+            "MIDAS_POOL_ASSETS must be a JSON object; got %s",
+            type(pool_assets).__name__,
+        )
+        return 0
+
+    from src.clients.accounting import get_accounting_client
+    from src.clients.midas import get_midas_client
+    from src.services.earn.strategies.midas import MidasStrategy
+
+    client = get_midas_client()
+    accounting = get_accounting_client()
+    count = 0
+    for pool_id, entry in pool_assets.items():
+        if not isinstance(entry, str) or not entry:
+            logger.error(
+                "MIDAS_POOL_ASSETS pool=%s must be a token_id string; got %s",
+                pool_id, type(entry).__name__,
+            )
+            continue
+
+        token_id = entry
+
+        try:
+            token_info = await accounting.get_token_info(token_id)
+        except Exception:
+            logger.exception(
+                "MIDAS_POOL_ASSETS pool=%s: failed to resolve token_id=%s via accounting; skipping",
+                pool_id, token_id,
+            )
+            continue
+
+        asset_address = token_info.token_address
+        if not asset_address:
+            logger.error(
+                "MIDAS_POOL_ASSETS pool=%s: accounting has no token_address for token_id=%s; skipping",
+                pool_id, token_id,
+            )
+            continue
+
+        registry.register(
+            pool_id,
+            MidasStrategy(client=client, asset_address=asset_address, token_id=token_id),
+        )
+        logger.info(
+            "Registered MidasStrategy pool=%s asset=%s token=%s chain=%s",
             pool_id, asset_address, token_id, token_info.chain_id,
         )
         count += 1

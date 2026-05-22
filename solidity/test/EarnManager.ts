@@ -217,16 +217,16 @@ describe('EarnManager', function () {
     it('should mint proportional shares for second depositor', async function () {
       const { earnManager, mockAccounting, user, poolWallet, otherUser } = await deployWithPool();
       const firstAmount = ethers.parseUnits('1000', 6);
-      const harvestAmount = ethers.parseUnits('50', 6);
+      const yieldAmount = ethers.parseUnits('50', 6);
       const secondAmount = ethers.parseUnits('2000', 6);
 
       await mockAccounting.setBalance(user.address, TOKEN_ID, firstAmount);
       await earnManager.deposit(POOL_ID, user.address, firstAmount, 0, mockSig(user.address));
 
-      await earnManager.harvest(POOL_ID, harvestAmount);
+      await earnManager.syncTotalAssets(POOL_ID, firstAmount + yieldAmount);
 
       const firstShares = expectedDepositShares(0n, 0n, firstAmount);
-      const secondShares = expectedDepositShares(firstShares, firstAmount + harvestAmount, secondAmount);
+      const secondShares = expectedDepositShares(firstShares, firstAmount + yieldAmount, secondAmount);
 
       await mockAccounting.setBalance(otherUser.address, TOKEN_ID, secondAmount);
       await earnManager.deposit(POOL_ID, otherUser.address, secondAmount, 0, mockSig(otherUser.address));
@@ -283,7 +283,7 @@ describe('EarnManager', function () {
       expect(await earnManager.getWithdrawNonce(authToken(user.address))).to.equal(1);
     });
 
-    it('should withdraw with profit after harvest', async function () {
+    it('should withdraw with profit after yield sync', async function () {
       const { earnManager, mockAccounting, user, poolWallet } = await deployWithPool();
       const deposit = ethers.parseUnits('1000', 6);
       const yieldAmount = ethers.parseUnits('100', 6);
@@ -291,7 +291,7 @@ describe('EarnManager', function () {
       await mockAccounting.setBalance(user.address, TOKEN_ID, deposit);
       await earnManager.deposit(POOL_ID, user.address, deposit, 0, mockSig(user.address));
 
-      await earnManager.harvest(POOL_ID, yieldAmount);
+      await earnManager.syncTotalAssets(POOL_ID, deposit + yieldAmount);
       await mockAccounting.setBalance(poolWallet.address, TOKEN_ID, deposit + yieldAmount);
 
       // Virtual offset retains a sub-unit of value as "dust" against the
@@ -404,37 +404,6 @@ describe('EarnManager', function () {
     });
   });
 
-  describe('harvest', function () {
-    it('should increase totalAssets without changing shares', async function () {
-      const { earnManager, mockAccounting, user, poolWallet } = await deployWithPool();
-      const amount = ethers.parseUnits('1000', 6);
-
-      await mockAccounting.setBalance(user.address, TOKEN_ID, amount);
-      await earnManager.deposit(POOL_ID, user.address, amount, 0, mockSig(user.address));
-
-      const sharesBefore = await earnManager.getUserShares(POOL_ID, authToken(user.address));
-      await earnManager.harvest(POOL_ID, ethers.parseUnits('50', 6));
-
-      const pool = await earnManager.pools(POOL_ID);
-      expect(pool.totalAssets).to.equal(ethers.parseUnits('1050', 6));
-      expect(pool.totalShares).to.equal(sharesBefore);
-      expect(await earnManager.getUserShares(POOL_ID, authToken(user.address))).to.equal(sharesBefore);
-    });
-
-    it('should reject non-pool-admin', async function () {
-      const { earnManager, user, poolWallet } = await deployWithPool();
-      await expect(earnManager.connect(user).harvest(POOL_ID, 1000))
-        .to.be.revertedWithCustomError(earnManager, 'NotPoolAdmin');
-    });
-
-    it('should reject nonexistent pool', async function () {
-      const { earnManager, poolWallet } = await loadFixture(deployFixture);
-      const fakePool = ethers.keccak256(ethers.toUtf8Bytes('fake'));
-      await expect(earnManager.harvest(fakePool, 1000))
-        .to.be.revertedWithCustomError(earnManager, 'PoolNotFound');
-    });
-  });
-
   describe('syncTotalAssets', function () {
     it('should overwrite totalAssets without changing shares', async function () {
       const { earnManager, mockAccounting, user, poolWallet } = await deployWithPool();
@@ -489,15 +458,15 @@ describe('EarnManager', function () {
       await mockAccounting.setBalance(user.address, TOKEN_ID, ethers.parseUnits('1000', 6));
       await earnManager.deposit(POOL_ID, user.address, ethers.parseUnits('1000', 6), 0, mockSig(user.address));
 
-      await earnManager.harvest(POOL_ID, ethers.parseUnits('50', 6));
+      await earnManager.syncTotalAssets(POOL_ID, ethers.parseUnits('1050', 6));
 
       await mockAccounting.setBalance(otherUser.address, TOKEN_ID, ethers.parseUnits('2000', 6));
       await earnManager.deposit(POOL_ID, otherUser.address, ethers.parseUnits('2000', 6), 0, mockSig(otherUser.address));
 
-      await earnManager.harvest(POOL_ID, ethers.parseUnits('150', 6));
+      await earnManager.syncTotalAssets(POOL_ID, ethers.parseUnits('3200', 6));
 
       const pool = await earnManager.pools(POOL_ID);
-      // totalAssets = 1000 + 50 + 2000 + 150 = 3200
+      // totalAssets = 1000 + 50 (sync 1) + 2000 deposit + 150 (sync 2) = 3200
       expect(pool.totalAssets).to.equal(ethers.parseUnits('3200', 6));
 
       const userShares = await earnManager.getUserShares(POOL_ID, authToken(user.address));
@@ -508,11 +477,11 @@ describe('EarnManager', function () {
       const userValue = (userShares * pool.totalAssets) / pool.totalShares;
       const otherValue = (otherShares * pool.totalAssets) / pool.totalShares;
 
-      // user deposited 1000, should have ~1101 (earned from both harvest periods)
+      // user deposited 1000, should have ~1101 (earned from both yield syncs)
       expect(userValue).to.be.greaterThan(ethers.parseUnits('1100', 6));
       expect(userValue).to.be.lessThan(ethers.parseUnits('1102', 6));
 
-      // other deposited 2000, should have ~2098 (earned from second harvest only)
+      // other deposited 2000, should have ~2098 (earned from second yield sync only)
       expect(otherValue).to.be.greaterThan(ethers.parseUnits('2097', 6));
       expect(otherValue).to.be.lessThan(ethers.parseUnits('2099', 6));
     });
@@ -527,14 +496,14 @@ describe('EarnManager', function () {
       expect(await earnManager.convertToAssets(POOL_ID, 1000n * VIRTUAL_SHARES)).to.equal(1000);
     });
 
-    it('should reflect exchange rate after harvest', async function () {
+    it('should reflect exchange rate after yield sync', async function () {
       const { earnManager, mockAccounting, user, poolWallet } = await deployWithPool();
       const amount = ethers.parseUnits('1000', 6);
       const yieldAmount = ethers.parseUnits('50', 6);
 
       await mockAccounting.setBalance(user.address, TOKEN_ID, amount);
       await earnManager.deposit(POOL_ID, user.address, amount, 0, mockSig(user.address));
-      await earnManager.harvest(POOL_ID, yieldAmount);
+      await earnManager.syncTotalAssets(POOL_ID, amount + yieldAmount);
 
       const totalShares = expectedDepositShares(0n, 0n, amount);
       const totalAssets = amount + yieldAmount;

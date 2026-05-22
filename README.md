@@ -3,7 +3,7 @@
 Order routing service for FlexVaults. Two pipelines:
 
 - **Swap** — fetches rates from LiFi, applies a configurable fee, and executes atomic on-chain swaps via the `SwapManager` contract on Oasis Sapphire.
-- **Earn** — registers yield strategies (currently Aave V3 on Base Sepolia) behind the `EarnManager` contract on Sapphire. Deposits bridge accounting funds to Base, supply to Aave, and mint pool shares; withdrawals redeem and bridge back.
+- **Earn** — registers yield strategies behind the `EarnManager` contract on Sapphire. Pluggable per-pool adapters: **Aave V3** on Base Sepolia (variable-rate lending) and **Midas mTBILL** on Base mainnet (tokenized US Treasury bills). Deposits bridge accounting funds to Base, deploy into the configured protocol, and mint pool shares; withdrawals redeem and bridge back.
 
 ## Setup
 
@@ -33,6 +33,15 @@ cp .env.testnet .env
 | `BASE_SEPOLIA_RPC_URL` | Base Sepolia RPC endpoint (for Aave reads/writes) |
 | `AAVE_POOL_ADDRESS` | Aave V3 `Pool` on Base Sepolia |
 | `AAVE_POOL_ASSETS` | JSON map of `pool_id -> {token_id, asset_address}` registering Aave strategies at startup |
+| `BASE_MAINNET_RPC_URL` | Base mainnet RPC endpoint (for Midas reads/writes) |
+| `MIDAS_ISSUANCE_VAULT_ADDRESS` | Midas Issuance Vault proxy on Base mainnet (defaults to the canonical deployment) |
+| `MIDAS_REDEMPTION_VAULT_ADDRESS` | Midas Instant Redemption Vault proxy on Base mainnet |
+| `MIDAS_MTBILL_TOKEN_ADDRESS` | mTBILL ERC20 on Base mainnet |
+| `MIDAS_ORACLE_ADDRESS` | Chronicle MTBILL/USD price oracle on Base mainnet |
+| `MIDAS_DEFAULT_SLIPPAGE_BPS` | Slippage tolerance on `depositInstant` / `redeemInstant` (default 50 = 0.5%) |
+| `MIDAS_ORACLE_HEARTBEAT_SEC` | Max oracle staleness before `is_healthy()` refuses routing (default 86400 = 24h; checked against 2× this) |
+| `MIDAS_APY_BPS` | Admin-managed display APY for Midas pools (default 350 = 3.5%); display only, not routing |
+| `MIDAS_POOL_ASSETS` | JSON map of `pool_id -> token_id` registering MidasStrategy per pool at startup |
 | `LIFI_API_KEY` | LiFi API key (optional, improves rate limits) |
 | `LIFI_API_URL` | LiFi base URL (defaults to `https://li.quest/v1`) |
 | `LIFI_INTEGRATOR` | LiFi integrator id |
@@ -69,6 +78,16 @@ cp .env.testnet .env
 |----------|---------|
 | Aave V3 Pool | `0x07eA79F68B2B3df564D0A34F8e19D9B1e339814b` |
 | USDC | `0x036CbD53842c5426634e7929541eC2318f3dCF7e` |
+
+### Base Mainnet (chainId 8453)
+
+| Contract | Address |
+|----------|---------|
+| Midas Issuance Vault | `0x8978e327FE7C72Fa4eaF4649C23147E279ae1470` |
+| Midas Instant Redemption Vault | `0x2a8c22E3b10036f3AEF5875d04f8441d4188b656` |
+| mTBILL | `0xDD629E5241CbC5919847783e6C96B2De4754e438` |
+| Chronicle MTBILL/USD Oracle | `0x70E58b7A1c884fFFE7dbce5249337603a28b8422` |
+| USDC | `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913` |
 
 ## Run
 

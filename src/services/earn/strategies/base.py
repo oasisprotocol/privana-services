@@ -32,14 +32,6 @@ class BaseStrategy(ABC):
         """Pull funds back from the external earn protocol to the pool."""
 
     @abstractmethod
-    async def pending_yield(self) -> int:
-        """Unrealized yield in base units (not yet harvested on-chain).
-
-        TODO: goes away alongside harvest() once total_assets becomes the
-        single source of truth for pool AUM.
-        """
-
-    @abstractmethod
     async def total_assets(self) -> int:
         """Current pool AUM held by this strategy, in base units: principal
         plus accrued yield as reported by the external protocol (e.g. aToken

@@ -46,6 +46,7 @@ async def lifespan(_app: FastAPI):
     from src.services.earn.registry import (
         get_strategy_registry,
         register_aave_strategies_from_config,
+        register_midas_strategies_from_config,
     )
 
     logger.info("FlexVaults Swap starting...")
@@ -60,7 +61,16 @@ async def lifespan(_app: FastAPI):
         if registered:
             logger.info("Earn strategy registry: %d Aave pool(s) registered", registered)
     except Exception:
-        logger.exception("Earn strategy registration failed; pools fall back to manual")
+        logger.exception("Aave strategy registration failed; affected pools fall back to manual")
+
+    try:
+        registered = await register_midas_strategies_from_config(
+            get_strategy_registry(), settings.midas_pool_assets,
+        )
+        if registered:
+            logger.info("Earn strategy registry: %d Midas pool(s) registered", registered)
+    except Exception:
+        logger.exception("Midas strategy registration failed; affected pools fall back to manual")
 
     yield
 

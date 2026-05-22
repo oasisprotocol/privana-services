@@ -104,7 +104,7 @@ def aave_client():
 
 
 @pytest.fixture
-def flexvaults():
+def privana():
     client = MagicMock()
     client.get_pending_withdrawals = AsyncMock(
         return_value=_PendingWithdrawalsResponse(user_address=POOL_ADDRESS, pending_withdrawals=[]),
@@ -131,7 +131,7 @@ def flexvaults():
 
 
 @pytest.fixture
-def strategy(aave_client, flexvaults):
+def strategy(aave_client, privana):
     from src.services.earn.strategies.aave import AaveStrategy
 
     with patch("src.services.earn.strategies.aave.load_settings", return_value=_strategy_settings()):
@@ -139,7 +139,7 @@ def strategy(aave_client, flexvaults):
             client=aave_client,
             asset_address=ASSET_ADDRESS,
             token_id=TOKEN_ID,
-            flexvaults_client=flexvaults,
+            privana_client=privana,
             poll_interval_sec=0,
         )
 
@@ -160,7 +160,7 @@ def test_pool_address_defaults_to_lp_address(strategy) -> None:
     assert strategy.pool_address == POOL_ADDRESS
 
 
-def test_unsupported_chain_id_rejected(aave_client, flexvaults) -> None:
+def test_unsupported_chain_id_rejected(aave_client, privana) -> None:
     from src.services.earn.strategies.aave import AaveStrategy
 
     bogus = Settings(
@@ -175,7 +175,7 @@ def test_unsupported_chain_id_rejected(aave_client, flexvaults) -> None:
                 client=aave_client,
                 asset_address=ASSET_ADDRESS,
                 token_id=TOKEN_ID,
-                flexvaults_client=flexvaults,
+                privana_client=privana,
             )
 
 
@@ -188,15 +188,15 @@ async def test_get_apy_bps_delegates_to_client(strategy, aave_client) -> None:
 
 
 @pytest.mark.asyncio
-async def test_deposit_to_earn_bridges_then_supplies(strategy, aave_client, flexvaults) -> None:
-    flexvaults.get_pending_withdrawals.side_effect = [
+async def test_deposit_to_earn_bridges_then_supplies(strategy, aave_client, privana) -> None:
+    privana.get_pending_withdrawals.side_effect = [
         _PendingWithdrawalsResponse(user_address=POOL_ADDRESS, pending_withdrawals=[]),
         _PendingWithdrawalsResponse(
             user_address=POOL_ADDRESS,
             pending_withdrawals=[_PendingWithdrawal(index=42, amount=1_000_000)],
         ),
     ]
-    flexvaults.get_withdrawal_info.return_value = _WithdrawalInfo(
+    privana.get_withdrawal_info.return_value = _WithdrawalInfo(
         index=42, resolved=True, tx_identifier="0xresolved",
     )
     aave_client.get_allowance.return_value = 0
@@ -204,31 +204,31 @@ async def test_deposit_to_earn_bridges_then_supplies(strategy, aave_client, flex
 
     await strategy.deposit_to_earn(1_000_000)
 
-    flexvaults.get_withdrawal_nonce.assert_awaited_once_with(POOL_ADDRESS)
-    flexvaults.request_withdrawal.assert_awaited_once()
-    sent_request = flexvaults.request_withdrawal.await_args.args[0]
+    privana.get_withdrawal_nonce.assert_awaited_once_with(POOL_ADDRESS)
+    privana.request_withdrawal.assert_awaited_once()
+    sent_request = privana.request_withdrawal.await_args.args[0]
     assert sent_request.token_id == TOKEN_ID
     assert sent_request.amount == 1_000_000
     assert sent_request.nonce == 7
     assert sent_request.signature.startswith("0x")
 
-    flexvaults.get_withdrawal_info.assert_awaited_with(42)
+    privana.get_withdrawal_info.assert_awaited_with(42)
     aave_client.approve_pool.assert_called_once_with(ASSET_ADDRESS, 1_000_000)
     aave_client.supply.assert_called_once_with(ASSET_ADDRESS, 1_000_000)
 
 
 @pytest.mark.asyncio
 async def test_deposit_to_earn_skips_approve_when_allowance_sufficient(
-    strategy, aave_client, flexvaults
+    strategy, aave_client, privana
 ) -> None:
-    flexvaults.get_pending_withdrawals.side_effect = [
+    privana.get_pending_withdrawals.side_effect = [
         _PendingWithdrawalsResponse(user_address=POOL_ADDRESS, pending_withdrawals=[]),
         _PendingWithdrawalsResponse(
             user_address=POOL_ADDRESS,
             pending_withdrawals=[_PendingWithdrawal(index=10, amount=500_000)],
         ),
     ]
-    flexvaults.get_withdrawal_info.return_value = _WithdrawalInfo(
+    privana.get_withdrawal_info.return_value = _WithdrawalInfo(
         index=10, resolved=True, tx_identifier="0xresolved",
     )
     aave_client.get_allowance.return_value = 10_000_000_000
@@ -241,19 +241,19 @@ async def test_deposit_to_earn_skips_approve_when_allowance_sufficient(
 
 
 @pytest.mark.asyncio
-async def test_deposit_to_earn_rejects_non_positive_amount(strategy, aave_client, flexvaults) -> None:
+async def test_deposit_to_earn_rejects_non_positive_amount(strategy, aave_client, privana) -> None:
     with pytest.raises(ValueError, match="positive amount"):
         await strategy.deposit_to_earn(0)
     with pytest.raises(ValueError, match="positive amount"):
         await strategy.deposit_to_earn(-1)
 
-    flexvaults.request_withdrawal.assert_not_called()
+    privana.request_withdrawal.assert_not_called()
     aave_client.supply.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_deposit_to_earn_propagates_request_failure(strategy, aave_client, flexvaults) -> None:
-    flexvaults.request_withdrawal.side_effect = RuntimeError("rejected by accounting")
+async def test_deposit_to_earn_propagates_request_failure(strategy, aave_client, privana) -> None:
+    privana.request_withdrawal.side_effect = RuntimeError("rejected by accounting")
 
     with pytest.raises(RuntimeError, match="rejected by accounting"):
         await strategy.deposit_to_earn(1_000_000)
@@ -262,8 +262,8 @@ async def test_deposit_to_earn_propagates_request_failure(strategy, aave_client,
 
 
 @pytest.mark.asyncio
-async def test_bridge_keeps_polling_until_resolved(strategy, aave_client, flexvaults) -> None:
-    flexvaults.get_pending_withdrawals.side_effect = [
+async def test_bridge_keeps_polling_until_resolved(strategy, aave_client, privana) -> None:
+    privana.get_pending_withdrawals.side_effect = [
         _PendingWithdrawalsResponse(user_address=POOL_ADDRESS, pending_withdrawals=[]),
         _PendingWithdrawalsResponse(
             user_address=POOL_ADDRESS,
@@ -274,7 +274,7 @@ async def test_bridge_keeps_polling_until_resolved(strategy, aave_client, flexva
             pending_withdrawals=[_PendingWithdrawal(index=5, amount=1_000_000)],
         ),
     ]
-    flexvaults.get_withdrawal_info.side_effect = [
+    privana.get_withdrawal_info.side_effect = [
         _WithdrawalInfo(index=5, resolved=False),
         _WithdrawalInfo(index=5, resolved=True, tx_identifier="0xfinal"),
     ]
@@ -282,17 +282,17 @@ async def test_bridge_keeps_polling_until_resolved(strategy, aave_client, flexva
 
     await strategy.deposit_to_earn(1_000_000)
 
-    assert flexvaults.get_withdrawal_info.await_count == 2
+    assert privana.get_withdrawal_info.await_count == 2
     aave_client.supply.assert_called_once_with(ASSET_ADDRESS, 1_000_000)
 
 
 @pytest.mark.asyncio
 async def test_withdraw_from_earn_redeems_transfers_and_polls_until_credited(
-    strategy, aave_client, flexvaults
+    strategy, aave_client, privana
 ) -> None:
     aave_client.withdraw.return_value = "0xredeem"
     aave_client.transfer_erc20.return_value = "0xtransfer"
-    flexvaults.get_balance.side_effect = [
+    privana.get_balance.side_effect = [
         _Balance(user_address=POOL_ADDRESS, token_id=TOKEN_ID, balance=0),
         _Balance(user_address=POOL_ADDRESS, token_id=TOKEN_ID, balance=0),
         _Balance(user_address=POOL_ADDRESS, token_id=TOKEN_ID, balance=750_000),
@@ -303,30 +303,30 @@ async def test_withdraw_from_earn_redeems_transfers_and_polls_until_credited(
 
     aave_client.withdraw.assert_called_once_with(ASSET_ADDRESS, 1_000_000, to=POOL_ADDRESS)
 
-    flexvaults.get_deposit_address.assert_awaited_once()
-    address_request = flexvaults.get_deposit_address.await_args.args[0]
+    privana.get_deposit_address.assert_awaited_once()
+    address_request = privana.get_deposit_address.await_args.args[0]
     assert address_request.chain_type == "evm"
 
     aave_client.transfer_erc20.assert_called_once_with(
         ASSET_ADDRESS, DEPOSIT_ADDRESS_BASE, 1_000_000,
     )
 
-    flexvaults.check_deposit.assert_awaited_once()
-    check_request = flexvaults.check_deposit.await_args.args[0]
+    privana.check_deposit.assert_awaited_once()
+    check_request = privana.check_deposit.await_args.args[0]
     assert check_request.chain_id == aave_client.w3.eth.chain_id
     assert check_request.tx_hash == "0xtransfer"
     assert check_request.amount == 1_000_000
 
-    assert flexvaults.get_balance.await_count >= 3
+    assert privana.get_balance.await_count >= 3
 
 
 @pytest.mark.asyncio
 async def test_withdraw_from_earn_uses_pre_balance_baseline(
-    strategy, aave_client, flexvaults
+    strategy, aave_client, privana
 ) -> None:
     aave_client.withdraw.return_value = "0xredeem"
     aave_client.transfer_erc20.return_value = "0xtransfer"
-    flexvaults.get_balance.side_effect = [
+    privana.get_balance.side_effect = [
         _Balance(user_address=POOL_ADDRESS, token_id=TOKEN_ID, balance=400_000),
         _Balance(user_address=POOL_ADDRESS, token_id=TOKEN_ID, balance=400_000),
         _Balance(user_address=POOL_ADDRESS, token_id=TOKEN_ID, balance=900_000),
@@ -335,7 +335,7 @@ async def test_withdraw_from_earn_uses_pre_balance_baseline(
 
     await strategy.withdraw_from_earn(1_000_000)
 
-    assert flexvaults.get_balance.await_count == 4
+    assert privana.get_balance.await_count == 4
 
 
 @pytest.mark.asyncio
@@ -351,7 +351,7 @@ async def test_withdraw_from_earn_rejects_non_positive_amount(strategy, aave_cli
 
 @pytest.mark.asyncio
 async def test_withdraw_from_earn_propagates_aave_failure(
-    strategy, aave_client, flexvaults
+    strategy, aave_client, privana
 ) -> None:
     aave_client.withdraw.side_effect = RuntimeError("aave reverted")
 
@@ -359,12 +359,7 @@ async def test_withdraw_from_earn_propagates_aave_failure(
         await strategy.withdraw_from_earn(1_000_000)
 
     aave_client.transfer_erc20.assert_not_called()
-    flexvaults.check_deposit.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_pending_yield_is_zero(strategy) -> None:
-    assert await strategy.pending_yield() == 0
+    privana.check_deposit.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -391,7 +386,7 @@ async def test_is_healthy_false_when_rate_read_raises(strategy, aave_client) -> 
 
 @pytest.mark.asyncio
 async def test_retry_on_network_error_recovers_from_transient_drop(strategy) -> None:
-    from flexvaults.client.errors import NetworkError
+    from privana.client.errors import NetworkError
 
     factory = MagicMock(side_effect=[
         NetworkError("Server disconnected"),
@@ -410,26 +405,26 @@ async def test_retry_on_network_error_recovers_from_transient_drop(strategy) -> 
 
 @pytest.mark.asyncio
 async def test_bridge_fails_fast_when_request_rejected(
-    strategy, aave_client, flexvaults
+    strategy, aave_client, privana
 ) -> None:
-    flexvaults.request_withdrawal.return_value = _TxSubmission(
+    privana.request_withdrawal.return_value = _TxSubmission(
         submission_id="sub-x", status="rejected",
     )
 
     with pytest.raises(RuntimeError, match="Withdrawal request rejected.*rejected"):
         await strategy.deposit_to_earn(1_000_000)
 
-    flexvaults.get_withdrawal_info.assert_not_called()
+    privana.get_withdrawal_info.assert_not_called()
     aave_client.supply.assert_not_called()
 
 
 @pytest.mark.asyncio
 async def test_bridge_survives_transient_network_error_mid_poll(
-    strategy, aave_client, flexvaults
+    strategy, aave_client, privana
 ) -> None:
-    from flexvaults.client.errors import NetworkError
+    from privana.client.errors import NetworkError
 
-    flexvaults.get_pending_withdrawals.side_effect = [
+    privana.get_pending_withdrawals.side_effect = [
         _PendingWithdrawalsResponse(user_address=POOL_ADDRESS, pending_withdrawals=[]),
         NetworkError("Server disconnected"),
         _PendingWithdrawalsResponse(
@@ -437,14 +432,14 @@ async def test_bridge_survives_transient_network_error_mid_poll(
             pending_withdrawals=[_PendingWithdrawal(index=99, amount=1_000_000)],
         ),
     ]
-    flexvaults.get_withdrawal_info.return_value = _WithdrawalInfo(
+    privana.get_withdrawal_info.return_value = _WithdrawalInfo(
         index=99, resolved=True, tx_identifier="0xresolved",
     )
     aave_client.get_allowance.return_value = 10_000_000
 
     await strategy.deposit_to_earn(1_000_000)
 
-    assert flexvaults.get_pending_withdrawals.await_count == 3
+    assert privana.get_pending_withdrawals.await_count == 3
     aave_client.supply.assert_called_once_with(ASSET_ADDRESS, 1_000_000)
 
 

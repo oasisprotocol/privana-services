@@ -32,3 +32,13 @@ class Settings:
     base_sepolia_rpc_url: str = "https://sepolia.base.org"
     aave_pool_address: str = "0x8bAB6d1b75f19e9eD9fCe8b9BD338844fF79aE27"
     aave_pool_assets: str = ""
+
+    base_mainnet_rpc_url: str = "https://mainnet.base.org"
+    midas_issuance_vault_address: str = "0x8978e327FE7C72Fa4eaF4649C23147E279ae1470"
+    midas_redemption_vault_address: str = "0x2a8c22E3b10036f3AEF5875d04f8441d4188b656"
+    midas_mtbill_token_address: str = "0xDD629E5241CbC5919847783e6C96B2De4754e438"
+    midas_oracle_address: str = "0x70E58b7A1c884fFFE7dbce5249337603a28b8422"
+    midas_default_slippage_bps: int = 50
+    midas_oracle_heartbeat_sec: int = 86400
+    midas_apy_bps: int = 350
+    midas_pool_assets: str = ""

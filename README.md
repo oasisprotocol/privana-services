@@ -63,8 +63,15 @@ cp .env.testnet .env
 | Contract | Address |
 |----------|---------|
 | SwapManager | `0x6a0a11Aa78c575e6C9CFD295104F36b3964991BC` |
-| EarnManager | `0x96e8fFdb9432f2A56CDeF0F9834E10A47ea029F9` |
+| EarnManager (proxy) | `0x96e8fFdb9432f2A56CDeF0F9834E10A47ea029F9` |
+| EarnManager (implementation) | `0xf00116aa07541c3f5d25D89C431907853858add9` |
 | Accounting (proxy) | `0xad3C76e4E621C0cfF7540479Ee9B0A945723A642` |
+
+The EarnManager is a UUPS upgradeable proxy. `harvest()` was removed in the
+current implementation; admins record yield exclusively via
+`syncTotalAssets(poolId, newTotal)`. Run `scripts/upgrade-earn.ts` (sets
+`EARN_MANAGER_CONTRACT_ADDRESS`, signs as the proxy owner) to deploy a new
+implementation against the existing proxy.
 
 ### Earn Pools
 

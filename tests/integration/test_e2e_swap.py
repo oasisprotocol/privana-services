@@ -2,14 +2,11 @@ import os
 
 import httpx
 import pytest
-from dotenv import load_dotenv
 from eth_account import Account
-
-load_dotenv(".env.localnet")
 
 from src.core.eip712 import sign_transfer
 
-LP_SK = os.getenv("LIQUIDITY_PROVIDER_SECRET_KEY") or os.getenv("LIQUIDITY_PROVIDER_PRIVATE_KEY")
+LP_SK = os.getenv("LIQUIDITY_PROVIDER_SECRET_KEY")
 LP_ADDRESS = Account.from_key(LP_SK).address if LP_SK else None
 ACCOUNTING_CONTRACT = os.getenv("ACCOUNTING_CONTRACT_ADDRESS")
 CHAIN_ID = int(os.getenv("ACCOUNTING_CHAIN_ID", "23295"))
@@ -22,8 +19,8 @@ WETH_TOKEN_ID = "0x335b5cccd1e63b2fe79863a0db73fce430e4e66902e2b78424f8662621e29
 
 pytestmark = [
     pytest.mark.skipif(
-        not LP_SK,
-        reason="Integration tests require .env with LP credentials",
+        not LP_SK or not os.getenv("LIFI_API_KEY"),
+        reason="Integration tests require .env with Testnet LIQUIDITY_PROVIDER_SECRET_KEY and LIFI_API_KEY",
     ),
     pytest.mark.integration,
 ]
@@ -128,7 +125,6 @@ class TestSwapEndpoint:
             private_key=TEST_USER_PK,
             chain_id=CHAIN_ID,
             verifying_contract=ACCOUNTING_CONTRACT,
-            user_address=TEST_USER_ADDRESS,
             to_address=quote["liquidity_provider"],
             token_id=USDC_TOKEN_ID,
             amount=int(swap_amount),
@@ -164,7 +160,6 @@ class TestSwapEndpoint:
             private_key=TEST_USER_PK,
             chain_id=CHAIN_ID,
             verifying_contract=ACCOUNTING_CONTRACT,
-            user_address=TEST_USER_ADDRESS,
             to_address=quote["liquidity_provider"],
             token_id=WETH_TOKEN_ID,
             amount=int(swap_amount),
@@ -228,7 +223,6 @@ class TestSwapStatus:
             private_key=TEST_USER_PK,
             chain_id=CHAIN_ID,
             verifying_contract=ACCOUNTING_CONTRACT,
-            user_address=TEST_USER_ADDRESS,
             to_address=quote["liquidity_provider"],
             token_id=USDC_TOKEN_ID,
             amount=int("500000"),

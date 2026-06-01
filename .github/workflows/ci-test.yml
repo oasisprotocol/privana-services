@@ -47,6 +47,7 @@ jobs:
         env:
           LIQUIDITY_PROVIDER_SECRET_KEY: ${{ secrets.LIQUIDITY_PROVIDER_SECRET_KEY }}
           LIFI_API_KEY: ${{ secrets.LIFI_API_KEY }}
+          TEST_USER_SECRET_KEY: ${{ secrets.TEST_USER_SECRET_KEY }}
         run: uv run pytest tests/integration/ -v -s
 
   solidity-tests:

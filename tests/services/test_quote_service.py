@@ -1,10 +1,11 @@
 import time
+from dataclasses import replace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from src.core.config import load_settings
 from src.models.common import Balance
-from src.models.settings import Settings
 
 SUFFICIENT_BALANCE = Balance(
     user_address="0xlp", token_id="0xbbb", balance="999999999999999999999"
@@ -15,7 +16,7 @@ class TestQuoteDeduplication:
     def _make_service(self):
         from src.services.swap.quote_service import QuoteService
         service = QuoteService.__new__(QuoteService)
-        service.settings = Settings()
+        service.settings = load_settings()
         service._last_cleanup = 0
         service.accounting = MagicMock()
         service.accounting.get_transfer_nonce = AsyncMock(return_value=0)
@@ -55,7 +56,7 @@ class TestExpiredQuoteCleanup:
     def _make_service(self):
         from src.services.swap.quote_service import QuoteService
         service = QuoteService.__new__(QuoteService)
-        service.settings = Settings()
+        service.settings = load_settings()
         service._last_cleanup = 0
         return service
 
@@ -96,7 +97,8 @@ class TestGetQuote:
     def _make_service(self):
         from src.services.swap.quote_service import QuoteService
         service = QuoteService.__new__(QuoteService)
-        service.settings = Settings(
+        service.settings = replace(
+            load_settings(),
             fee_bps=10,
             quote_ttl=30,
             liquidity_provider_address="0x152E6a7125665764a4F1F1df80E8f5D49Bf0239c",

@@ -1,9 +1,9 @@
+from dataclasses import replace
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.models.settings import Settings
-
+from src.core.config import load_settings
 
 TEST_USDC = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
 TEST_ATOKEN = "0x0000000000000000000000000000000000000aaa"
@@ -14,13 +14,12 @@ RAY = 10**27
 
 
 def _make_client(with_signer: bool = False):
-    settings_kwargs = {
-        "base_sepolia_rpc_url": "http://localhost:8545",
-        "aave_pool_address": POOL_ADDRESS,
-    }
-    if with_signer:
-        settings_kwargs["liquidity_provider_secret_key"] = TEST_LP_SK
-    settings = Settings(**settings_kwargs)
+    settings = replace(
+        load_settings(),
+        base_sepolia_rpc_url="http://localhost:8545",
+        aave_pool_address=POOL_ADDRESS,
+        liquidity_provider_secret_key=TEST_LP_SK if with_signer else "",
+    )
 
     with patch("src.clients.aave.load_settings") as mock_settings, \
          patch("src.clients.aave.Web3") as mock_web3_cls:

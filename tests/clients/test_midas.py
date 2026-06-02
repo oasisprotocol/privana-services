@@ -1,8 +1,9 @@
+from dataclasses import replace
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.models.settings import Settings
+from src.core.config import load_settings
 
 
 TEST_USDC = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
@@ -15,16 +16,15 @@ TEST_LP_ADDRESS = "0xd8991364507FAfC256EafF950d28618735753476"
 
 
 def _make_client(with_signer: bool = False):
-    settings_kwargs = {
-        "base_mainnet_rpc_url": "http://localhost:8545",
-        "midas_issuance_vault_address": TEST_ISSUANCE_VAULT,
-        "midas_redemption_vault_address": TEST_REDEMPTION_VAULT,
-        "midas_mtbill_token_address": TEST_MTBILL,
-        "midas_oracle_address": TEST_ORACLE,
-    }
-    if with_signer:
-        settings_kwargs["liquidity_provider_secret_key"] = TEST_LP_SK
-    settings = Settings(**settings_kwargs)
+    settings = replace(
+        load_settings(),
+        base_mainnet_rpc_url="http://localhost:8545",
+        midas_issuance_vault_address=TEST_ISSUANCE_VAULT,
+        midas_redemption_vault_address=TEST_REDEMPTION_VAULT,
+        midas_mtbill_token_address=TEST_MTBILL,
+        midas_oracle_address=TEST_ORACLE,
+        liquidity_provider_secret_key=TEST_LP_SK if with_signer else "",
+    )
 
     with patch("src.clients.midas.load_settings") as mock_settings, \
          patch("src.clients.midas.Web3") as mock_web3_cls:

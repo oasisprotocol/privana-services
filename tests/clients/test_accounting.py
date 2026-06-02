@@ -1,8 +1,10 @@
+from dataclasses import replace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
 
+from src.core.config import load_settings
 from src.models.common import Balance, TokenInfo
 
 SAMPLE_TOKEN_NATIVE = {
@@ -87,12 +89,13 @@ class TestAccountingClient:
     @pytest.fixture
     def client(self, mock_http_client):
         with patch("src.clients.accounting.load_settings") as mock_settings:
-            from src.models.settings import Settings
-            mock_settings.return_value = Settings(
+            mock_settings.return_value = replace(
+                load_settings(),
                 accounting_api_base_url="http://test:8000",
                 liquidity_provider_secret_key="0x4c0883a69102937d6231471b5dbb6204fe512961708279f69e0f0fcbf24b5830",
                 liquidity_provider_address="0x2c7536E3605D9C16a7a3D7b1898e529396a65c23",
             )
+
             from src.clients.accounting import AccountingClient
             acct = AccountingClient()
             acct.client = mock_http_client

@@ -49,7 +49,7 @@ async def lifespan(_app: FastAPI):
         register_midas_strategies_from_config,
     )
 
-    logger.info("FlexVaults Swap starting...")
+    logger.info("Privana services starting...")
 
     _validate_settings()
     get_db()
@@ -84,12 +84,12 @@ async def lifespan(_app: FastAPI):
         logger.warning("Error closing Li.Fi client")
 
     close_db()
-    logger.info("FlexVaults Swap shut down")
+    logger.info("Privana services shut down")
 
 
 app = FastAPI(
-    title="FlexVaults Swap",
-    description="Order routing service for FlexVaults token swaps",
+    title="Privana Services",
+    description="Privana Services for DeFi",
     version="0.1.0",
     lifespan=lifespan,
 )

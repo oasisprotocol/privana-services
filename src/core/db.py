@@ -6,7 +6,7 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-_DB_PATH = Path(__file__).parent.parent.parent / "data" / "flexvaults-swap.db"
+_DB_PATH = Path(__file__).parent.parent.parent / "data" / "privana-services.db"
 _connection: Optional[sqlite3.Connection] = None
 _write_lock = threading.Lock()
 

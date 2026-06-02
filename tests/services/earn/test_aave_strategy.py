@@ -1,9 +1,10 @@
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from src.core.config import load_settings
 from src.models.settings import Settings
 
 
@@ -90,7 +91,8 @@ class _DepositCheckResponse:
 
 
 def _strategy_settings() -> Settings:
-    return Settings(
+    return replace(
+        load_settings(),
         liquidity_provider_secret_key=LP_PRIVATE_KEY,
         liquidity_provider_address=POOL_ADDRESS,
         accounting_contract_address=ACCOUNTING_CONTRACT,
@@ -163,7 +165,8 @@ def test_pool_address_defaults_to_lp_address(strategy) -> None:
 def test_unsupported_chain_id_rejected(aave_client, privana) -> None:
     from src.services.earn.strategies.aave import AaveStrategy
 
-    bogus = Settings(
+    bogus = replace(
+        load_settings(),
         liquidity_provider_secret_key=LP_PRIVATE_KEY,
         liquidity_provider_address=POOL_ADDRESS,
         accounting_contract_address=ACCOUNTING_CONTRACT,

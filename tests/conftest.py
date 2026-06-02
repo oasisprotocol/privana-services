@@ -5,7 +5,7 @@ import httpx
 import pytest
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(".env.localnet")
 
 import src.core.db as db_module
 from src.core.config import load_settings

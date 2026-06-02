@@ -1,8 +1,8 @@
-# FlexVaults Swap
+# Privana DeFi Services
 
-Order routing service for FlexVaults. Two pipelines:
+Currently, two Privana-powered services are available:
 
-- **Swap** — fetches rates from LiFi, applies a configurable fee, and executes atomic on-chain swaps via the `SwapManager` contract on Oasis Sapphire.
+- **Swap** — fetches rates from LiFi, applies a configurable fee, and executes confidential atomic on-chain swaps via the `SwapManager` contract on Oasis Sapphire.
 - **Earn** — registers yield strategies behind the `EarnManager` contract on Sapphire. Pluggable per-pool adapters: **Aave V3** on Base Sepolia (variable-rate lending) and **Midas mTBILL** on Base mainnet (tokenized US Treasury bills). Deposits bridge accounting funds to Base, deploy into the configured protocol, and mint pool shares; withdrawals redeem and bridge back.
 
 ## Setup
@@ -13,20 +13,20 @@ Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/).
 uv sync
 ```
 
-Copy the example env and fill in your values:
+Copy the env and fill in missing values:
 
 ```bash
-cp .env.testnet .env
+cp .env.localnet .env
 ```
 
 ### Required variables
 
 | Variable | Description |
 |----------|-------------|
-| `LIQUIDITY_PROVIDER_SECRET_KEY` | LP wallet secret key (signs accounting transfers and Aave bridges; LP/pool address is derived from this). The legacy `LIQUIDITY_PROVIDER_PRIVATE_KEY` env name is still accepted with a deprecation warning. |
+| `LIQUIDITY_PROVIDER_SECRET_KEY` | LP wallet secret key (signs accounting transfers and Aave bridges; LP/pool address is derived from this). |
 | `ACCOUNTING_CONTRACT_ADDRESS` | Accounting proxy on Sapphire |
 | `ACCOUNTING_CHAIN_ID` | Chain id for EIP-712 domain (Sapphire testnet = `23295`) |
-| `ACCOUNTING_API_BASE_URL` | Accounting REST API (e.g. `https://flexvaults-staging.rofl.build`) |
+| `ACCOUNTING_API_BASE_URL` | Accounting REST API (e.g. `https://testnet.privana.finance`) |
 | `SWAP_MANAGER_CONTRACT_ADDRESS` | `SwapManager` contract on Sapphire |
 | `EARN_MANAGER_CONTRACT_ADDRESS` | `EarnManager` proxy contract on Sapphire |
 | `SAPPHIRE_RPC_URL` | Sapphire RPC endpoint |
@@ -54,7 +54,6 @@ cp .env.testnet .env
 | `API_HOST` / `API_PORT` | Server bind (defaults `0.0.0.0:8000`) |
 | `LOG_LEVEL` | Log level (default `INFO`) |
 | `ENVIRONMENT` | `development` / `staging` / `production` |
-| `ADMIN_API_KEY` | Optional admin auth for management routes |
 
 ## Deployed Addresses
 
@@ -89,10 +88,14 @@ cp .env.testnet .env
 | Chronicle MTBILL/USD Oracle | `0x70E58b7A1c884fFFE7dbce5249337603a28b8422` |
 | USDC | `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913` |
 
-## Run
+## Run on Localnet
+
+Spin up sapphire-localnet and local privana endpoint.
+
+Then:
 
 ```bash
-uv run flexvaults-swap
+uv run privana-services
 ```
 
 The API starts on `http://localhost:8000` by default. Configure with `API_HOST` and `API_PORT`.
@@ -161,5 +164,5 @@ Pool registration script (one-shot, calls `EarnManager.createPool` against the d
 
 ```bash
 cd solidity
-bun run hardhat run scripts/create-aave-usdc-pool.ts --network sapphire-testnet
+bun run hardhat run scripts/create-aave-usdc-pool.ts --network sapphire-localnet
 ```

@@ -11,7 +11,10 @@ import { HardhatUserConfig } from 'hardhat/config';
 import { HDAccountsUserConfig } from 'hardhat/types';
 import 'solidity-coverage';
 
-dotenvConfig();
+import './tasks';
+import {HttpNetworkAccountsUserConfig} from "hardhat/src/types/config"; // Import tasks from the separate file
+
+dotenvConfig({ quiet: true }); // Remove dotenv greeting line littering.
 
 const TEST_HDWALLET = {
   mnemonic: 'chimney theory present latin find behave ankle clock shadow earn suit reflect',
@@ -21,9 +24,9 @@ const TEST_HDWALLET = {
   passphrase: '',
 } as const satisfies HDAccountsUserConfig;
 
-const PRIVATE_KEY = process.env.PRIVATE_KEY;
+const SECRET_KEY = process.env.SECRET_KEY;
 
-const accounts = PRIVATE_KEY ? [PRIVATE_KEY] : TEST_HDWALLET;
+const accounts = SECRET_KEY ? [SECRET_KEY] : TEST_HDWALLET;
 
 const config: HardhatUserConfig = {
   networks: {

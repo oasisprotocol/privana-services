@@ -1,9 +1,10 @@
+from dataclasses import replace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
 
-from src.models.settings import Settings
+from src.core.config import load_settings
 
 
 SAMPLE_ROUTES_RESPONSE = {
@@ -25,7 +26,8 @@ class TestLiFiClient:
     @pytest.fixture
     def client(self, mock_http_client):
         with patch("src.clients.lifi.load_settings") as mock_settings:
-            mock_settings.return_value = Settings(
+            mock_settings.return_value = replace(
+                load_settings(),
                 lifi_api_url="https://li.quest/v1",
                 lifi_integrator="test",
                 lifi_api_key="test-key",
@@ -113,7 +115,8 @@ class TestLiFiClient:
 
     def test_sets_api_key_header(self):
         with patch("src.clients.lifi.load_settings") as mock_settings:
-            mock_settings.return_value = Settings(
+            mock_settings.return_value = replace(
+                load_settings(),
                 lifi_api_url="https://li.quest/v1",
                 lifi_api_key="my-secret-key",
             )
@@ -123,7 +126,8 @@ class TestLiFiClient:
 
     def test_strips_trailing_slash_from_url(self):
         with patch("src.clients.lifi.load_settings") as mock_settings:
-            mock_settings.return_value = Settings(
+            mock_settings.return_value = replace(
+                load_settings(),
                 lifi_api_url="https://li.quest/v1/",
             )
             from src.clients.lifi import LiFiClient

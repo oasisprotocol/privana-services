@@ -110,3 +110,4 @@ solidity/.env
 # OpenZeppelin Upgrades manifests are per-developer state and are never
 # committed to this repo by team convention.
 solidity/.openzeppelin/
+*.orc

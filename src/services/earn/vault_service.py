@@ -72,6 +72,26 @@ class VaultService:
             return
         await strategy.withdraw_from_earn(amount)
 
+    async def _rollback_reclaim(self, pool_id_hex: str, amount: int, tx_id: str) -> None:
+        """Re-supply funds that ``_reclaim_from_strategy`` pulled back when the
+        subsequent on-chain ``EarnManager.withdraw`` reverted. Without this the
+        reclaimed liquidity sits idle in pool balance with shares unburned.
+        Best-effort: a failed rollback is logged at CRITICAL for manual
+        reconciliation rather than masked.
+        """
+        try:
+            await self._route_to_strategy(pool_id_hex, amount)
+            logger.info(
+                "Earn withdraw %s: reclaimed funds re-supplied to strategy after revert",
+                tx_id,
+            )
+        except Exception:
+            logger.critical(
+                "Earn withdraw %s: on-chain burn reverted AND re-supply rollback failed; "
+                "amount=%d reclaimed into pool balance is stranded and needs manual redeploy",
+                tx_id, amount,
+            )
+
     def get_pool(self, pool_id: bytes) -> dict:
         pool = self.contract.functions.pools(pool_id).call()
         return {
@@ -287,7 +307,14 @@ class VaultService:
 
             self._update_transaction(tx_id, status=EARN_STATUS_COMPLETED, tx_hash=tx_hash)
 
-            await self._route_to_strategy(pool_id_hex, int(amount))
+            try:
+                await self._route_to_strategy(pool_id_hex, int(amount))
+            except Exception:
+                logger.exception(
+                    "Earn deposit %s minted shares but strategy routing failed; "
+                    "funds are in pool balance pending redeploy",
+                    tx_id,
+                )
 
         try:
             pool_after = self.get_pool(pool_id)
@@ -397,6 +424,7 @@ class VaultService:
                 )
             except Exception as exc:
                 logger.exception("Earn withdraw %s failed", tx_id)
+                await self._rollback_reclaim(pool_id_hex, int(amount), tx_id)
                 self._update_transaction(tx_id, status=EARN_STATUS_FAILED, error=sanitize_error(str(exc)))
                 return {
                     "pool_id": pool_id_hex,

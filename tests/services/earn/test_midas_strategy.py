@@ -555,3 +555,29 @@ async def test_bridge_propagates_request_failure(
         await strategy.deposit_to_earn(1_000_000)
 
     midas_client.deposit_instant.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_bridge_raises_after_max_poll_attempts(midas_client, privana) -> None:
+    from src.services.earn.strategies.midas import MidasStrategy
+
+    privana.get_pending_withdrawals = AsyncMock(
+        return_value=_PendingWithdrawalsResponse(
+            user_address=POOL_ADDRESS, pending_withdrawals=[],
+        ),
+    )
+
+    with patch("src.services.earn.strategies.midas.load_settings", return_value=_strategy_settings()):
+        strategy = MidasStrategy(
+            client=midas_client,
+            asset_address=ASSET_ADDRESS,
+            token_id=TOKEN_ID,
+            privana_client=privana,
+            poll_interval_sec=0,
+            max_bridge_poll_attempts=2,
+        )
+
+    with pytest.raises(RuntimeError, match="aborting to release lock"):
+        await strategy.deposit_to_earn(1_000_000)
+
+    midas_client.deposit_instant.assert_not_called()

@@ -36,6 +36,7 @@ _NETWORK_BY_CHAIN_ID: dict[int, Network] = {
 }
 
 DEFAULT_POLL_INTERVAL_SEC = 3.0
+DEFAULT_MAX_BRIDGE_POLL_ATTEMPTS = 200
 
 _ACCEPTED_SUBMISSION_STATUSES = frozenset({"success", "pending", "accepted", "ok", "submitted"})
 
@@ -98,6 +99,7 @@ class MidasStrategy(BaseStrategy):
         oracle_heartbeat_sec: Optional[int] = None,
         apy_bps: Optional[int] = None,
         poll_interval_sec: float = DEFAULT_POLL_INTERVAL_SEC,
+        max_bridge_poll_attempts: int = DEFAULT_MAX_BRIDGE_POLL_ATTEMPTS,
     ) -> None:
         self._client = client
         self._asset_address = asset_address
@@ -120,6 +122,7 @@ class MidasStrategy(BaseStrategy):
 
         self._privana = privana_client
         self._poll_interval_sec = poll_interval_sec
+        self._max_bridge_poll_attempts = max_bridge_poll_attempts
 
     @property
     def name(self) -> str:
@@ -479,7 +482,15 @@ class MidasStrategy(BaseStrategy):
             )
 
         own_index: Optional[int] = None
+        attempts = 0
         while True:
+            attempts += 1
+            if attempts > self._max_bridge_poll_attempts:
+                raise RuntimeError(
+                    f"MidasStrategy._bridge_to_base: withdrawal unresolved after "
+                    f"{self._max_bridge_poll_attempts} polls (pool={self._pool_address} "
+                    f"token={self._token_id} amount={amount}); aborting to release lock"
+                )
             pending = await self._retry_on_network_error(
                 "get_pending_withdrawals",
                 lambda: client.get_pending_withdrawals(self._pool_address),

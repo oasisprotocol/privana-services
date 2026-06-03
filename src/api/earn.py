@@ -17,6 +17,7 @@ from src.models.earn import (
     WithdrawRequest,
     WithdrawResponse,
 )
+from src.services.earn.registry import get_strategy_registry
 from src.services.earn.vault_service import get_vault_service
 
 logger = logging.getLogger(__name__)
@@ -106,7 +107,7 @@ async def list_pools() -> PoolListResponse:
             PoolResponse(
                 pool_id=p["pool_id"],
                 token_id=p["token_id"],
-                strategy="aave-v3",
+                strategy=get_strategy_registry().get(p["pool_id"]).name,
                 total_assets=str(effective),
                 apy_bps=apy_bps,
                 status="active" if p["active"] else "paused",
@@ -135,7 +136,7 @@ async def get_pool(pool_id: str) -> PoolDetailResponse:
         return PoolDetailResponse(
             pool_id=pool_id,
             token_id=p["token_id"],
-            strategy="aave-v3",
+            strategy=get_strategy_registry().get(pool_id).name,
             total_shares=str(p["total_shares"]),
             total_assets=str(effective),
             pool_address=p["pool_address"],

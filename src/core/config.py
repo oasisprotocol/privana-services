@@ -21,6 +21,8 @@ _settings: Optional[Settings] = None
 
 def _get_int(name: str) -> int:
     value = os.getenv(name)
+    if value is None:
+        raise ValueError(f"Environment variable {name} is required")
     try:
         return int(value, 0)
     except ValueError as exc:
@@ -30,6 +32,8 @@ def _get_int(name: str) -> int:
 def load_settings(refresh: bool = False) -> Settings:
     global _settings
     if _settings is None or refresh:
+        lp_secret_key = os.getenv("LIQUIDITY_PROVIDER_SECRET_KEY")
+        lp_address = Account.from_key(lp_secret_key).address if lp_secret_key else ""
         _settings = Settings(
             api_host=os.getenv("API_HOST"),
             api_port=_get_int("API_PORT"),
@@ -39,8 +43,8 @@ def load_settings(refresh: bool = False) -> Settings:
             lifi_api_key=os.getenv("LIFI_API_KEY"),
             lifi_api_url=os.getenv("LIFI_API_URL"),
             lifi_integrator=os.getenv("LIFI_INTEGRATOR"),
-            liquidity_provider_secret_key=os.getenv("LIQUIDITY_PROVIDER_SECRET_KEY"),
-            liquidity_provider_address=Account.from_key(os.getenv("LIQUIDITY_PROVIDER_SECRET_KEY")).address,
+            liquidity_provider_secret_key=lp_secret_key,
+            liquidity_provider_address=lp_address,
             accounting_contract_address=os.getenv("ACCOUNTING_CONTRACT_ADDRESS"),
             accounting_chain_id=_get_int("ACCOUNTING_CHAIN_ID"),
             swap_manager_contract_address=os.getenv("SWAP_MANAGER_CONTRACT_ADDRESS"),

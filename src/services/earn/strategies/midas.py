@@ -282,6 +282,10 @@ class MidasStrategy(BaseStrategy):
         mtbill_to_redeem = baseline_mtbill * (10_000 + fee_bps) // 10_000
         min_receive_usdc = amount * (10_000 - self._slippage_bps) // 10_000
 
+        lp_usdc_before = await asyncio.to_thread(
+            self._client.get_erc20_balance, self._asset_address,
+        )
+
         try:
             redeem_tx = await asyncio.to_thread(
                 self._client.redeem_instant,
@@ -295,10 +299,20 @@ class MidasStrategy(BaseStrategy):
                 f"mtbill_in={mtbill_to_redeem}): {exc}"
             ) from exc
 
+        lp_usdc_after = await asyncio.to_thread(
+            self._client.get_erc20_balance, self._asset_address,
+        )
+        realized_usdc = lp_usdc_after - lp_usdc_before
+        if realized_usdc <= 0:
+            raise MidasInstantUnavailableError(
+                f"Midas redeemInstant produced no USDC (target_usdc={amount} "
+                f"mtbill_in={mtbill_to_redeem} before={lp_usdc_before} after={lp_usdc_after})"
+            )
+
         logger.info(
             "MidasStrategy.withdraw_from_earn: redeemed via Midas mtbill_in=%d "
-            "min_usdc=%d tx=%s",
-            mtbill_to_redeem, min_receive_usdc, redeem_tx,
+            "min_usdc=%d realized_usdc=%d tx=%s",
+            mtbill_to_redeem, min_receive_usdc, realized_usdc, redeem_tx,
         )
 
         deposit = await client.get_deposit_address(DepositAddressRequest(chain_type="evm"))
@@ -307,11 +321,11 @@ class MidasStrategy(BaseStrategy):
             self._client.transfer_erc20,
             self._asset_address,
             deposit.deposit_address,
-            amount,
+            realized_usdc,
         )
         logger.info(
             "MidasStrategy.withdraw_from_earn: forwarded to deposit_address=%s amount=%d tx=%s",
-            deposit.deposit_address, amount, transfer_tx,
+            deposit.deposit_address, realized_usdc, transfer_tx,
         )
 
         try:
@@ -319,7 +333,7 @@ class MidasStrategy(BaseStrategy):
                 DepositCheckRequest(
                     chain_id=self._client.w3.eth.chain_id,
                     tx_hash=transfer_tx,
-                    amount=amount,
+                    amount=realized_usdc,
                 )
             )
             if check.status == "error":
@@ -335,11 +349,11 @@ class MidasStrategy(BaseStrategy):
                 exc,
             )
 
-        target_balance = pre_balance + amount
+        target_balance = pre_balance + realized_usdc
         await self._poll_until_balance_at_least(target_balance)
         logger.info(
             "MidasStrategy.withdraw_from_earn: pool balance credited pool=%s token=%s amount=%d",
-            self._pool_address, self._token_id, amount,
+            self._pool_address, self._token_id, realized_usdc,
         )
 
     async def total_assets(self) -> int:

@@ -38,8 +38,7 @@ class VaultService:
         self.settings = load_settings()
         self.sapphire = get_sapphire_client()
         self.accounting = get_accounting_client()
-        self._withdraw_lock = asyncio.Lock()
-        self._deposit_lock = asyncio.Lock()
+        self._lp_tx_lock = asyncio.Lock()
         self._registry = registry if registry is not None else get_strategy_registry()
         self.contract_address = Web3.to_checksum_address(
             self.settings.earn_manager_contract_address
@@ -248,7 +247,7 @@ class VaultService:
 
         sig_bytes = bytes.fromhex(signature.removeprefix("0x"))
 
-        async with self._deposit_lock:
+        async with self._lp_tx_lock:
             tx_id = self._record_transaction(
                 operation=EARN_OP_DEPOSIT,
                 pool_id_hex=pool_id_hex,
@@ -352,7 +351,7 @@ class VaultService:
 
         await self.sync_total_assets(pool_id_hex)
 
-        async with self._withdraw_lock:
+        async with self._lp_tx_lock:
             await self._reclaim_from_strategy(pool_id_hex, int(amount))
 
             pool_nonce = await self.accounting.get_transfer_nonce(pool["pool_address"])

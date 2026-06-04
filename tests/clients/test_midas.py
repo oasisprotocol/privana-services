@@ -115,6 +115,16 @@ def test_get_mtbill_balance_calls_balanceOf_with_holder():
     c["mtbill"].functions.balanceOf.assert_called_once_with(TEST_LP_ADDRESS)
 
 
+def test_get_erc20_balance_reads_balanceOf_for_holder():
+    client, c = _make_client()
+    erc20 = MagicMock(name="erc20")
+    erc20.functions.balanceOf.return_value.call.return_value = 4_242_000
+    c["w3"].eth.contract.return_value = erc20
+
+    assert client.get_erc20_balance(TEST_USDC, TEST_LP_ADDRESS) == 4_242_000
+    erc20.functions.balanceOf.assert_called_once_with(TEST_LP_ADDRESS)
+
+
 @pytest.mark.parametrize("paused_value", [True, False])
 def test_is_issuance_paused_reflects_contract(paused_value):
     client, c = _make_client()

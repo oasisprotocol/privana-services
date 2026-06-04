@@ -36,6 +36,7 @@ _NETWORK_BY_CHAIN_ID: dict[int, Network] = {
 }
 
 DEFAULT_POLL_INTERVAL_SEC = 3.0
+DEFAULT_MAX_BRIDGE_POLL_ATTEMPTS = 200
 
 _ACCEPTED_SUBMISSION_STATUSES = frozenset({"success", "pending", "accepted", "ok", "submitted"})
 
@@ -98,6 +99,7 @@ class MidasStrategy(BaseStrategy):
         oracle_heartbeat_sec: Optional[int] = None,
         apy_bps: Optional[int] = None,
         poll_interval_sec: float = DEFAULT_POLL_INTERVAL_SEC,
+        max_bridge_poll_attempts: int = DEFAULT_MAX_BRIDGE_POLL_ATTEMPTS,
     ) -> None:
         self._client = client
         self._asset_address = asset_address
@@ -120,6 +122,7 @@ class MidasStrategy(BaseStrategy):
 
         self._privana = privana_client
         self._poll_interval_sec = poll_interval_sec
+        self._max_bridge_poll_attempts = max_bridge_poll_attempts
 
     @property
     def name(self) -> str:
@@ -282,6 +285,10 @@ class MidasStrategy(BaseStrategy):
         mtbill_to_redeem = baseline_mtbill * (10_000 + fee_bps) // 10_000
         min_receive_usdc = amount * (10_000 - self._slippage_bps) // 10_000
 
+        lp_usdc_before = await asyncio.to_thread(
+            self._client.get_erc20_balance, self._asset_address,
+        )
+
         try:
             redeem_tx = await asyncio.to_thread(
                 self._client.redeem_instant,
@@ -295,10 +302,20 @@ class MidasStrategy(BaseStrategy):
                 f"mtbill_in={mtbill_to_redeem}): {exc}"
             ) from exc
 
+        lp_usdc_after = await asyncio.to_thread(
+            self._client.get_erc20_balance, self._asset_address,
+        )
+        realized_usdc = lp_usdc_after - lp_usdc_before
+        if realized_usdc <= 0:
+            raise MidasInstantUnavailableError(
+                f"Midas redeemInstant produced no USDC (target_usdc={amount} "
+                f"mtbill_in={mtbill_to_redeem} before={lp_usdc_before} after={lp_usdc_after})"
+            )
+
         logger.info(
             "MidasStrategy.withdraw_from_earn: redeemed via Midas mtbill_in=%d "
-            "min_usdc=%d tx=%s",
-            mtbill_to_redeem, min_receive_usdc, redeem_tx,
+            "min_usdc=%d realized_usdc=%d tx=%s",
+            mtbill_to_redeem, min_receive_usdc, realized_usdc, redeem_tx,
         )
 
         deposit = await client.get_deposit_address(DepositAddressRequest(chain_type="evm"))
@@ -307,11 +324,11 @@ class MidasStrategy(BaseStrategy):
             self._client.transfer_erc20,
             self._asset_address,
             deposit.deposit_address,
-            amount,
+            realized_usdc,
         )
         logger.info(
             "MidasStrategy.withdraw_from_earn: forwarded to deposit_address=%s amount=%d tx=%s",
-            deposit.deposit_address, amount, transfer_tx,
+            deposit.deposit_address, realized_usdc, transfer_tx,
         )
 
         try:
@@ -319,7 +336,7 @@ class MidasStrategy(BaseStrategy):
                 DepositCheckRequest(
                     chain_id=self._client.w3.eth.chain_id,
                     tx_hash=transfer_tx,
-                    amount=amount,
+                    amount=realized_usdc,
                 )
             )
             if check.status == "error":
@@ -335,11 +352,11 @@ class MidasStrategy(BaseStrategy):
                 exc,
             )
 
-        target_balance = pre_balance + amount
+        target_balance = pre_balance + realized_usdc
         await self._poll_until_balance_at_least(target_balance)
         logger.info(
             "MidasStrategy.withdraw_from_earn: pool balance credited pool=%s token=%s amount=%d",
-            self._pool_address, self._token_id, amount,
+            self._pool_address, self._token_id, realized_usdc,
         )
 
     async def total_assets(self) -> int:
@@ -465,7 +482,15 @@ class MidasStrategy(BaseStrategy):
             )
 
         own_index: Optional[int] = None
+        attempts = 0
         while True:
+            attempts += 1
+            if attempts > self._max_bridge_poll_attempts:
+                raise RuntimeError(
+                    f"MidasStrategy._bridge_to_base: withdrawal unresolved after "
+                    f"{self._max_bridge_poll_attempts} polls (pool={self._pool_address} "
+                    f"token={self._token_id} amount={amount}); aborting to release lock"
+                )
             pending = await self._retry_on_network_error(
                 "get_pending_withdrawals",
                 lambda: client.get_pending_withdrawals(self._pool_address),

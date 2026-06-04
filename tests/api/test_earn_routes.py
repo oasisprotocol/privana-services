@@ -92,6 +92,27 @@ class TestListPoolsRoute:
             r = await api_client.get("/v1/earn/pools")
             assert r.json()["pools"][0]["apy_bps"] == 487
 
+    async def test_strategy_field_reflects_registered_strategy(self, api_client):
+        from src.services.earn.registry import (
+            get_strategy_registry,
+            reset_strategy_registry,
+        )
+
+        reset_strategy_registry()
+        strat = MagicMock()
+        strat.name = "midas-mtbill"
+        get_strategy_registry().register(POOL_ID, strat)
+        try:
+            with patch("src.api.earn.get_vault_service") as mock_svc:
+                svc = _mock_service()
+                svc.list_pools.return_value = [_mock_pool()]
+                mock_svc.return_value = svc
+
+                r = await api_client.get("/v1/earn/pools")
+                assert r.json()["pools"][0]["strategy"] == "midas-mtbill"
+        finally:
+            reset_strategy_registry()
+
 
 class TestGetPoolRoute:
     async def test_returns_200_for_existing_pool(self, api_client):

@@ -446,4 +446,30 @@ async def test_bridge_survives_transient_network_error_mid_poll(
     aave_client.supply.assert_called_once_with(ASSET_ADDRESS, 1_000_000)
 
 
+@pytest.mark.asyncio
+async def test_bridge_raises_after_max_poll_attempts(aave_client, privana) -> None:
+    from src.services.earn.strategies.aave import AaveStrategy
+
+    privana.get_pending_withdrawals = AsyncMock(
+        return_value=_PendingWithdrawalsResponse(
+            user_address=POOL_ADDRESS, pending_withdrawals=[],
+        ),
+    )
+
+    with patch("src.services.earn.strategies.aave.load_settings", return_value=_strategy_settings()):
+        strategy = AaveStrategy(
+            client=aave_client,
+            asset_address=ASSET_ADDRESS,
+            token_id=TOKEN_ID,
+            privana_client=privana,
+            poll_interval_sec=0,
+            max_bridge_poll_attempts=2,
+        )
+
+    with pytest.raises(RuntimeError, match="aborting to release lock"):
+        await strategy.deposit_to_earn(1_000_000)
+
+    aave_client.supply.assert_not_called()
+
+
 _ = asyncio

@@ -24,10 +24,12 @@ def _validate_settings() -> None:
     errors = []
     if not settings.liquidity_provider_secret_key:
         errors.append("LIQUIDITY_PROVIDER_SECRET_KEY is not set")
-    if settings.accounting_contract_address == _ZERO_ADDRESS:
+    if not settings.accounting_contract_address or settings.accounting_contract_address == _ZERO_ADDRESS:
         errors.append("ACCOUNTING_CONTRACT_ADDRESS is not set")
-    if settings.swap_manager_contract_address == _ZERO_ADDRESS:
+    if not settings.swap_manager_contract_address or settings.swap_manager_contract_address == _ZERO_ADDRESS:
         errors.append("SWAP_MANAGER_CONTRACT_ADDRESS is not set")
+    if not settings.earn_manager_contract_address or settings.earn_manager_contract_address == _ZERO_ADDRESS:
+        errors.append("EARN_MANAGER_CONTRACT_ADDRESS is not set")
     if not settings.accounting_api_base_url:
         errors.append("ACCOUNTING_API_BASE_URL is not set")
     if errors and settings.environment.lower() != "development":

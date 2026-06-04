@@ -333,13 +333,14 @@ class TestStrategyRouting:
         assert result["status"] == "completed"
         strategy.deposit_to_earn.assert_awaited_once_with(1000)
 
-    async def test_deposit_strategy_failure_propagates(self, test_db):
+    async def test_deposit_completes_when_strategy_routing_fails(self, test_db):
         from src.services.earn.registry import StrategyRegistry
 
         registry = StrategyRegistry()
         strategy = MagicMock()
         strategy.name = "aave-v3"
         strategy.deposit_to_earn = AsyncMock(side_effect=RuntimeError("aave rpc down"))
+        strategy.total_assets = AsyncMock(return_value=0)
         registry.register(POOL_ID_HEX, strategy)
 
         service, contract, _, _ = _make_service(registry=registry)
@@ -350,11 +351,11 @@ class TestStrategyRouting:
         )
         contract.functions.userShares.return_value.call.side_effect = [0, 952]
 
-        with pytest.raises(RuntimeError, match="aave rpc down"):
-            await service.deposit(
-                POOL_ID_HEX, USER_ADDRESS, "1000", 5, "0x" + "aa" * 65
-            )
+        result = await service.deposit(
+            POOL_ID_HEX, USER_ADDRESS, "1000", 5, "0x" + "aa" * 65
+        )
 
+        assert result["status"] == "completed"
         strategy.deposit_to_earn.assert_awaited_once()
 
     async def test_deposit_manual_strategy_skips_routing(self, test_db):
@@ -420,6 +421,33 @@ class TestStrategyRouting:
 
         strategy.withdraw_from_earn.assert_awaited_once()
         sapphire.execute_contract_call.assert_not_called()
+
+    async def test_withdraw_onchain_revert_resupplies_reclaimed_funds(self, test_db):
+        from src.services.earn.registry import StrategyRegistry
+
+        registry = StrategyRegistry()
+        strategy = MagicMock()
+        strategy.name = "aave-v3"
+        strategy.withdraw_from_earn = AsyncMock()
+        strategy.deposit_to_earn = AsyncMock()
+        registry.register(POOL_ID_HEX, strategy)
+
+        service, contract, sapphire, _ = _make_service(registry=registry)
+        contract.functions.pools.return_value.call.return_value = (
+            bytes.fromhex(USDC_TOKEN_ID[2:]),
+            POOL_ADDRESS,
+            1000, 1050, True,
+        )
+        contract.functions.userShares.return_value.call.return_value = 500
+        contract.functions.convertToAssets.return_value.call.return_value = 525
+        sapphire.execute_contract_call.side_effect = RuntimeError("InvalidWithdrawSignature")
+
+        with patch("src.services.earn.vault_service.sign_transfer", return_value="0x" + "bb" * 65):
+            result = await service.withdraw(POOL_ID_HEX, USER_ADDRESS, "500", 0, USER_WITHDRAW_SIG)
+
+        assert result["status"] == "failed"
+        strategy.withdraw_from_earn.assert_awaited_once_with(500)
+        strategy.deposit_to_earn.assert_awaited_once_with(500)
 
 
 class TestEffectiveTotalAssets:

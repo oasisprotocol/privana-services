@@ -112,6 +112,7 @@ def midas_client():
     client.deposit_instant.return_value = "0xdeposit"
     client.redeem_instant.return_value = "0xredeem"
     client.transfer_erc20.return_value = "0xtransfer"
+    client.get_erc20_balance.return_value = 0
     client.get_oracle_answer.return_value = 10**18
     client.get_oracle_decimals.return_value = 18
     client.get_oracle_round.return_value = (10**18, 1_700_086_400)
@@ -459,9 +460,12 @@ async def test_withdraw_from_earn_redeems_forwards_and_polls(
 ) -> None:
     privana.get_balance.side_effect = [
         _Balance(user_address=POOL_ADDRESS, token_id=TOKEN_ID, balance=0),
-        _Balance(user_address=POOL_ADDRESS, token_id=TOKEN_ID, balance=1_000_000),
-        _Balance(user_address=POOL_ADDRESS, token_id=TOKEN_ID, balance=1_000_000),
+        _Balance(user_address=POOL_ADDRESS, token_id=TOKEN_ID, balance=1_002_300),
+        _Balance(user_address=POOL_ADDRESS, token_id=TOKEN_ID, balance=1_002_300),
     ]
+    # Realized USDC out (1_002_300) differs from the requested amount: the fee
+    # buffer over-redeems, so the LP EOA receives slightly more than target.
+    midas_client.get_erc20_balance.side_effect = [0, 1_002_300]
     midas_client.get_oracle_answer.return_value = 10**18
     midas_client.get_oracle_decimals.return_value = 18
     midas_client.get_redemption_instant_fee_bps.return_value = 25
@@ -477,10 +481,12 @@ async def test_withdraw_from_earn_redeems_forwards_and_polls(
     # min_receive_usdc = 1_000_000 * 9950 / 10000 = 995_000
     assert redeem_args[2] == 995_000
 
+    # The realized USDC delta is forwarded, not the requested target amount.
     midas_client.transfer_erc20.assert_called_once_with(
-        ASSET_ADDRESS, DEPOSIT_ADDRESS_BASE, 1_000_000,
+        ASSET_ADDRESS, DEPOSIT_ADDRESS_BASE, 1_002_300,
     )
     privana.check_deposit.assert_awaited_once()
+    assert privana.check_deposit.await_args.args[0].amount == 1_002_300
     assert privana.get_balance.await_count >= 2
 
 
@@ -503,6 +509,24 @@ async def test_withdraw_from_earn_raises_typed_error_on_revert(
 
 
 @pytest.mark.asyncio
+async def test_withdraw_from_earn_raises_when_no_usdc_realized(
+    strategy, midas_client, privana,
+) -> None:
+    from src.services.earn.strategies.midas import MidasInstantUnavailableError
+
+    privana.get_balance.return_value = _Balance(
+        user_address=POOL_ADDRESS, token_id=TOKEN_ID, balance=0,
+    )
+    midas_client.get_erc20_balance.side_effect = [500_000, 500_000]
+
+    with pytest.raises(MidasInstantUnavailableError, match="produced no USDC"):
+        await strategy.withdraw_from_earn(1_000_000)
+
+    midas_client.transfer_erc20.assert_not_called()
+    privana.check_deposit.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_withdraw_from_earn_continues_when_check_deposit_errors(
     strategy, midas_client, privana,
 ) -> None:
@@ -510,6 +534,7 @@ async def test_withdraw_from_earn_continues_when_check_deposit_errors(
         _Balance(user_address=POOL_ADDRESS, token_id=TOKEN_ID, balance=0),
         _Balance(user_address=POOL_ADDRESS, token_id=TOKEN_ID, balance=1_000_000),
     ]
+    midas_client.get_erc20_balance.side_effect = [0, 1_000_000]
     privana.check_deposit.return_value = _DepositCheckResponse(
         status="error", detail="relay temporarily unreachable",
     )
@@ -527,6 +552,32 @@ async def test_bridge_propagates_request_failure(
     privana.request_withdrawal.side_effect = RuntimeError("rejected by accounting")
 
     with pytest.raises(RuntimeError, match="rejected by accounting"):
+        await strategy.deposit_to_earn(1_000_000)
+
+    midas_client.deposit_instant.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_bridge_raises_after_max_poll_attempts(midas_client, privana) -> None:
+    from src.services.earn.strategies.midas import MidasStrategy
+
+    privana.get_pending_withdrawals = AsyncMock(
+        return_value=_PendingWithdrawalsResponse(
+            user_address=POOL_ADDRESS, pending_withdrawals=[],
+        ),
+    )
+
+    with patch("src.services.earn.strategies.midas.load_settings", return_value=_strategy_settings()):
+        strategy = MidasStrategy(
+            client=midas_client,
+            asset_address=ASSET_ADDRESS,
+            token_id=TOKEN_ID,
+            privana_client=privana,
+            poll_interval_sec=0,
+            max_bridge_poll_attempts=2,
+        )
+
+    with pytest.raises(RuntimeError, match="aborting to release lock"):
         await strategy.deposit_to_earn(1_000_000)
 
     midas_client.deposit_instant.assert_not_called()

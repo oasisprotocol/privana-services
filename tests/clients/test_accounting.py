@@ -91,7 +91,7 @@ class TestAccountingClient:
         with patch("src.clients.accounting.load_settings") as mock_settings:
             mock_settings.return_value = replace(
                 load_settings(),
-                accounting_api_base_url="http://test:8000",
+                privana_api_base_url="http://test:8000",
                 liquidity_provider_secret_key="0x4c0883a69102937d6231471b5dbb6204fe512961708279f69e0f0fcbf24b5830",
                 liquidity_provider_address="0x2c7536E3605D9C16a7a3D7b1898e529396a65c23",
             )

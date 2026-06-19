@@ -39,7 +39,7 @@ async def _request_with_retry(client: httpx.AsyncClient, method: str, url: str, 
 class AccountingClient:
     def __init__(self) -> None:
         settings = load_settings()
-        self.base_url = settings.accounting_api_base_url
+        self.base_url = settings.privana_api_base_url
         self.client = httpx.AsyncClient(timeout=30.0)
         self._lp_address = settings.liquidity_provider_address
         self._lp_secret_key = settings.liquidity_provider_secret_key
@@ -68,7 +68,7 @@ class AccountingClient:
         domain = self.base_url.replace("https://", "").replace("http://", "").rstrip("/")
         siwe = (
             f"{domain} wants you to sign in with your Ethereum account:\n"
-            f"{self._lp_address}\n\nSign in to FlexVaults\n\n"
+            f"{self._lp_address}\n\nSign in to Privana on chain {self._chain_id}\n\n"
             f"URI: {self.base_url}\n"
             f"Version: 1\nChain ID: {self._chain_id}\nNonce: {nonce}\n"
             f"Issued At: {now.strftime('%Y-%m-%dT%H:%M:%SZ')}\n"

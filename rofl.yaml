@@ -73,7 +73,7 @@ deployments:
     machines:
       default:
         provider: oasis1qp2ens0hsp7gh23wajxa4hpetkdek3swyyulyrmz
-        offer: playground_short
-        id: "0000000000000610"
+        offer: playground_internal_m
+        id: 000000000000062d
 tooling:
   version: 0.18.6-gite53cca7

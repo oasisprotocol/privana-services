@@ -21,39 +21,39 @@ cp .env.localnet .env
 
 ### Required variables
 
-| Variable | Description |
-|----------|-------------|
-| `LIQUIDITY_PROVIDER_SECRET_KEY` | LP wallet secret key (signs accounting transfers and Aave bridges; LP/pool address is derived from this). |
-| `ACCOUNTING_CONTRACT_ADDRESS` | Accounting proxy on Sapphire |
-| `ACCOUNTING_CHAIN_ID` | Chain id for EIP-712 domain (Sapphire testnet = `23295`) |
-| `ACCOUNTING_API_BASE_URL` | Accounting REST API (e.g. `https://testnet.privana.finance`) |
-| `SWAP_MANAGER_CONTRACT_ADDRESS` | `SwapManager` contract on Sapphire |
-| `EARN_MANAGER_CONTRACT_ADDRESS` | `EarnManager` proxy contract on Sapphire |
-| `SAPPHIRE_RPC_URL` | Sapphire RPC endpoint |
-| `BASE_SEPOLIA_RPC_URL` | Base Sepolia RPC endpoint (for Aave reads/writes) |
-| `AAVE_POOL_ADDRESS` | Aave V3 `Pool` on Base Sepolia |
-| `AAVE_POOL_ASSETS` | JSON map of `pool_id -> {token_id, asset_address}` registering Aave strategies at startup |
-| `BASE_MAINNET_RPC_URL` | Base mainnet RPC endpoint (for Midas reads/writes) |
-| `MIDAS_ISSUANCE_VAULT_ADDRESS` | Midas Issuance Vault proxy on Base mainnet (defaults to the canonical deployment) |
-| `MIDAS_REDEMPTION_VAULT_ADDRESS` | Midas Instant Redemption Vault proxy on Base mainnet |
-| `MIDAS_MTBILL_TOKEN_ADDRESS` | mTBILL ERC20 on Base mainnet |
-| `MIDAS_ORACLE_ADDRESS` | Chronicle MTBILL/USD price oracle on Base mainnet |
-| `MIDAS_DEFAULT_SLIPPAGE_BPS` | Slippage tolerance on `depositInstant` / `redeemInstant` (default 50 = 0.5%) |
-| `MIDAS_ORACLE_HEARTBEAT_SEC` | Max oracle staleness before `is_healthy()` refuses routing (default 86400 = 24h; checked against 2× this) |
-| `MIDAS_APY_BPS` | Admin-managed display APY for Midas pools (default 350 = 3.5%); display only, not routing |
-| `MIDAS_POOL_ASSETS` | JSON map of `pool_id -> token_id` registering MidasStrategy per pool at startup |
-| `LIFI_API_KEY` | LiFi API key (optional, improves rate limits) |
-| `LIFI_API_URL` | LiFi base URL (defaults to `https://li.quest/v1`) |
-| `LIFI_INTEGRATOR` | LiFi integrator id |
-| `LIFI_TOKEN_MAP` | JSON map for testnet→mainnet pricing fallbacks |
-| `SUPPORTED_TOKEN_IDS` | Comma-separated accounting token ids |
-| `SUPPORTED_CHAINS` | JSON array of supported chains |
-| `FEE_BPS` | Swap fee in basis points (e.g. `150` = 1.5%) |
-| `QUOTE_TTL` | Quote validity window in seconds |
-| `MAX_SWAP_AMOUNT_USD` | Per-swap cap |
-| `API_HOST` / `API_PORT` | Server bind (defaults `0.0.0.0:8000`) |
-| `LOG_LEVEL` | Log level (default `INFO`) |
-| `ENVIRONMENT` | `development` / `staging` / `production` |
+| Variable                         | Description                                                                                               |
+|----------------------------------|-----------------------------------------------------------------------------------------------------------|
+| `LIQUIDITY_PROVIDER_SECRET_KEY`  | LP wallet secret key (signs accounting transfers and Aave bridges; LP/pool address is derived from this). |
+| `ACCOUNTING_CONTRACT_ADDRESS`    | Accounting proxy on Sapphire                                                                              |
+| `ACCOUNTING_CHAIN_ID`            | Chain id for EIP-712 domain (Sapphire testnet = `23295`)                                                  |
+| `PRIVANA_API_BASE_URL`           | Privana REST API (e.g. `https://api.testnet.privana.finance`)                                             |
+| `SWAP_MANAGER_CONTRACT_ADDRESS`  | `SwapManager` contract on Sapphire                                                                        |
+| `EARN_MANAGER_CONTRACT_ADDRESS`  | `EarnManager` proxy contract on Sapphire                                                                  |
+| `SAPPHIRE_RPC_URL`               | Sapphire RPC endpoint                                                                                     |
+| `BASE_SEPOLIA_RPC_URL`           | Base Sepolia RPC endpoint (for Aave reads/writes)                                                         |
+| `AAVE_POOL_ADDRESS`              | Aave V3 `Pool` on Base Sepolia                                                                            |
+| `AAVE_POOL_ASSETS`               | JSON map of `pool_id -> {token_id, asset_address}` registering Aave strategies at startup                 |
+| `BASE_MAINNET_RPC_URL`           | Base mainnet RPC endpoint (for Midas reads/writes)                                                        |
+| `MIDAS_ISSUANCE_VAULT_ADDRESS`   | Midas Issuance Vault proxy on Base mainnet (defaults to the canonical deployment)                         |
+| `MIDAS_REDEMPTION_VAULT_ADDRESS` | Midas Instant Redemption Vault proxy on Base mainnet                                                      |
+| `MIDAS_MTBILL_TOKEN_ADDRESS`     | mTBILL ERC20 on Base mainnet                                                                              |
+| `MIDAS_ORACLE_ADDRESS`           | Chronicle MTBILL/USD price oracle on Base mainnet                                                         |
+| `MIDAS_DEFAULT_SLIPPAGE_BPS`     | Slippage tolerance on `depositInstant` / `redeemInstant` (default 50 = 0.5%)                              |
+| `MIDAS_ORACLE_HEARTBEAT_SEC`     | Max oracle staleness before `is_healthy()` refuses routing (default 86400 = 24h; checked against 2× this) |
+| `MIDAS_APY_BPS`                  | Admin-managed display APY for Midas pools (default 350 = 3.5%); display only, not routing                 |
+| `MIDAS_POOL_ASSETS`              | JSON map of `pool_id -> token_id` registering MidasStrategy per pool at startup                           |
+| `LIFI_API_KEY`                   | LiFi API key (optional, improves rate limits)                                                             |
+| `LIFI_API_URL`                   | LiFi base URL (defaults to `https://li.quest/v1`)                                                         |
+| `LIFI_INTEGRATOR`                | LiFi integrator id                                                                                        |
+| `LIFI_TOKEN_MAP`                 | JSON map for testnet→mainnet pricing fallbacks                                                            |
+| `SUPPORTED_TOKEN_IDS`            | Comma-separated accounting token ids                                                                      |
+| `SUPPORTED_CHAINS`               | JSON array of supported chains                                                                            |
+| `FEE_BPS`                        | Swap fee in basis points (e.g. `150` = 1.5%)                                                              |
+| `QUOTE_TTL`                      | Quote validity window in seconds                                                                          |
+| `MAX_SWAP_AMOUNT_USD`            | Per-swap cap                                                                                              |
+| `API_HOST` / `API_PORT`          | Server bind (defaults `0.0.0.0:8000`)                                                                     |
+| `LOG_LEVEL`                      | Log level (default `INFO`)                                                                                |
+| `ENVIRONMENT`                    | `development` / `staging` / `production`                                                                  |
 
 ## Deployed Addresses
 

@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import logging
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -21,6 +22,13 @@ logger = logging.getLogger(__name__)
 MAX_RETRIES = 3
 RETRY_DELAY = 1.0
 JWT_SIWE_CACHE_SKEW_SECONDS = 30
+
+
+@dataclass(frozen=True)
+class _JwtSiweAuth:
+    siwe_token: str
+    address: str
+    expires_at: float
 
 
 async def _request_with_retry(client: httpx.AsyncClient, method: str, url: str, **kwargs) -> httpx.Response:
@@ -47,7 +55,7 @@ class AccountingClient:
         self._siwe_token: Optional[str] = None
         self._jwt_token: Optional[str] = None
         self._auth_timestamp: Optional[float] = None
-        self._jwt_siwe_cache: dict[str, tuple[str, float]] = {}
+        self._jwt_siwe_cache: dict[str, _JwtSiweAuth] = {}
         self._jwt_siwe_lock = asyncio.Lock()
         self._accounting_contract = None
 
@@ -117,7 +125,7 @@ class AccountingClient:
         )
         return TokenInfo(**response.json())
 
-    async def exchange_jwt_for_siwe_token(self, jwt_token: str) -> str:
+    async def _exchange_jwt_for_siwe_auth(self, jwt_token: str) -> _JwtSiweAuth:
         jwt_token = jwt_token.strip()
         if not jwt_token:
             raise ValueError("JWT bearer token is required")
@@ -126,14 +134,14 @@ class AccountingClient:
         loop = asyncio.get_event_loop()
         now = loop.time()
         cached = self._jwt_siwe_cache.get(cache_key)
-        if cached and cached[1] > now:
-            return cached[0]
+        if cached and cached.expires_at > now:
+            return cached
 
         async with self._jwt_siwe_lock:
             now = loop.time()
             cached = self._jwt_siwe_cache.get(cache_key)
-            if cached and cached[1] > now:
-                return cached[0]
+            if cached and cached.expires_at > now:
+                return cached
 
             response = await self.client.post(
                 f"{self.base_url}/v1/accounting/auth/jwt/siwe-token",
@@ -142,20 +150,34 @@ class AccountingClient:
             response.raise_for_status()
             data = response.json()
             siwe_token = data["siwe_token"]
+            address = data["address"]
             expires_in = int(data["expires_in"])
             if not siwe_token or expires_in <= 0:
                 raise RuntimeError("Accounting JWT exchange returned an invalid token")
+            if not Web3.is_address(address):
+                raise RuntimeError("Accounting JWT exchange returned an invalid address")
 
-            for key, (_, expires_at) in list(self._jwt_siwe_cache.items()):
-                if expires_at <= now:
+            for key, auth in list(self._jwt_siwe_cache.items()):
+                if auth.expires_at <= now:
                     del self._jwt_siwe_cache[key]
 
             cache_ttl = expires_in - JWT_SIWE_CACHE_SKEW_SECONDS
+            auth = _JwtSiweAuth(
+                siwe_token=siwe_token,
+                address=Web3.to_checksum_address(address),
+                expires_at=now + cache_ttl,
+            )
             if cache_ttl > 0:
-                self._jwt_siwe_cache[cache_key] = (siwe_token, now + cache_ttl)
+                self._jwt_siwe_cache[cache_key] = auth
             else:
                 self._jwt_siwe_cache.pop(cache_key, None)
-            return siwe_token
+            return auth
+
+    async def exchange_jwt_for_siwe_token(self, jwt_token: str) -> str:
+        return (await self._exchange_jwt_for_siwe_auth(jwt_token)).siwe_token
+
+    async def get_jwt_user_address(self, jwt_token: str) -> str:
+        return (await self._exchange_jwt_for_siwe_auth(jwt_token)).address
 
     async def get_transfer_nonce(self, user_address: str) -> int:
         """Read ``transferNonces[user]`` directly from the Accounting contract.

@@ -130,6 +130,12 @@ The API starts on `http://localhost:8000` by default. Configure with `API_HOST` 
 | `POST` | `/v1/earn/withdraw` | EIP-712 signature | Burn shares, redeem from Aave, bridge back to accounting |
 | `GET` | `/v1/earn/balance` | `Authorization: Bearer <Privana JWT>` | User shares + redeemable assets across pools |
 
+### Operations
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| `GET` | `/v1/operations/unsettled` | `Authorization: Bearer <Privana JWT>` | Persisted pending and failed swap/earn operations (canceled is reserved, not currently emitted) |
+
 ## Tests
 
 Unit tests (no network or credentials required):

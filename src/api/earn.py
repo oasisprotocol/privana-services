@@ -1,9 +1,9 @@
 import asyncio
 import logging
 
-import httpx
 from fastapi import APIRouter, HTTPException, Query, Request
 
+from src.api._auth import auth_error, bearer_token, resolve_via_accounting
 from src.clients.accounting import get_accounting_client
 from src.models.earn import (
     BalanceListResponse,
@@ -25,21 +25,6 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1/earn", tags=["Earn"])
 
 
-def _auth_error(detail: str = "Bearer token required") -> HTTPException:
-    return HTTPException(
-        status_code=401,
-        detail=detail,
-        headers={"WWW-Authenticate": "Bearer"},
-    )
-
-
-def _bearer_token(authorization: str) -> str:
-    scheme, _, token = authorization.partition(" ")
-    if scheme.lower() != "bearer" or not token.strip():
-        raise _auth_error("Invalid bearer token")
-    return token.strip()
-
-
 async def _private_read_token(request: Request) -> str:
     authorization = request.headers.get("authorization")
     siwe_token = request.headers.get("x-siwe-token")
@@ -51,40 +36,14 @@ async def _private_read_token(request: Request) -> str:
     if siwe_token:
         return siwe_token
     if not authorization:
-        raise _auth_error()
+        raise auth_error()
 
-    try:
-        return await get_accounting_client().exchange_jwt_for_siwe_token(
-            _bearer_token(authorization)
-        )
-    except httpx.HTTPStatusError as exc:
-        if exc.response.status_code == 401:
-            raise _auth_error("Invalid bearer token") from exc
-        if exc.response.status_code == 403:
-            raise HTTPException(
-                status_code=403,
-                detail="Bearer token is not allowed",
-            ) from exc
-        logger.warning(
-            "Accounting JWT exchange failed with status %d",
-            exc.response.status_code,
-        )
-        raise HTTPException(
-            status_code=502,
-            detail="Accounting token exchange failed",
-        ) from exc
-    except (httpx.ConnectError, httpx.ReadError, httpx.RemoteProtocolError, httpx.TimeoutException) as exc:
-        logger.warning("Accounting JWT exchange request failed: %s", exc)
-        raise HTTPException(
-            status_code=502,
-            detail="Accounting token exchange failed",
-        ) from exc
-    except (KeyError, ValueError, RuntimeError) as exc:
-        logger.warning("Accounting JWT exchange returned an invalid response")
-        raise HTTPException(
-            status_code=502,
-            detail="Accounting token exchange failed",
-        ) from exc
+    token = bearer_token(authorization)
+    return await resolve_via_accounting(
+        lambda: get_accounting_client().exchange_jwt_for_siwe_token(token),
+        failure_detail="Accounting token exchange failed",
+        log_label="Accounting JWT exchange",
+    )
 
 
 @router.get("/pools", response_model=PoolListResponse)

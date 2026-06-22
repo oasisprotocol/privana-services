@@ -3,6 +3,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
+from web3 import Web3
 
 from src.core.config import load_settings
 from src.models.common import Balance, TokenInfo
@@ -183,3 +184,22 @@ class TestAccountingClient:
         await client.exchange_jwt_for_siwe_token("user-jwt")
 
         assert mock_http_client.post.await_count == 2
+
+    async def test_get_jwt_user_address_returns_checksummed_address(self, client, mock_http_client):
+        lower = SAMPLE_BALANCE["user_address"].lower()
+        mock_http_client.post.return_value = self._mock_response({
+            "siwe_token": "0x" + "ee" * 32,
+            "address": lower,
+            "expires_in": 300,
+        })
+
+        first = await client.get_jwt_user_address(" user-jwt ")
+        second = await client.get_jwt_user_address("user-jwt")
+
+        assert first == Web3.to_checksum_address(lower)
+        assert second == first
+        mock_http_client.post.assert_awaited_once_with(
+            "http://test:8000/v1/accounting/auth/jwt/siwe-token",
+            headers={"Authorization": "Bearer user-jwt"},
+        )
+        mock_http_client.get.assert_not_called()

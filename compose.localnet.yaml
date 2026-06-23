@@ -16,7 +16,7 @@ services:
       start_period: 0s
 
   privana:
-    image: "docker.io/ptrusr/accounting-module:staging"
+    image: "ghcr.io/oasisprotocol/privana:testnet"
     depends_on:
       sapphire-localnet:
         condition: service_healthy
@@ -33,7 +33,7 @@ services:
       dockerfile: docker/Dockerfile
       args:
         - ENV_FILE=.env.localnet
-    image: "ghcr.io/oasisprotocol/privana-services:localnet"
+    image: "privana-services:localnet"
     pull_policy: never
     depends_on:
       privana:

@@ -2,7 +2,7 @@
 
 import { Component, useCallback, useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
-import { FlexvaultsButton, useFlexvaultsContext } from "@oasisprotocol/flexvaults-sdk";
+import { PrivanaButton, usePrivanaContext } from "@oasisprotocol/privana-sdk";
 import { toast } from "sonner";
 import { useAccount, useConnect, useDisconnect } from "wagmi";
 
@@ -177,7 +177,7 @@ export default function Page() {
 }
 
 function PageInner() {
-  const { client } = useFlexvaultsContext();
+  const { client } = usePrivanaContext();
   const [config, setConfig] = useState<ConfigPayload | null>(null);
   const [health, setHealth] = useState<{ ok: boolean; status: number; error?: string } | null>(null);
   const [pools, setPools] = useState<Pool[]>([]);
@@ -344,7 +344,7 @@ function PageInner() {
   const submitWithdraw = useCallback(async () => {
     if (!config || !selectedPoolId || !amountBaseUnits) return;
     if (!siweToken) {
-      toast.error("Withdraw failed", { description: "Connect wallet and authenticate via Flexvaults to obtain a SIWE token." });
+      toast.error("Withdraw failed", { description: "Connect wallet and authenticate via Privana to obtain a SIWE token." });
       return;
     }
     setPendingAction("withdraw");
@@ -467,7 +467,7 @@ function Header({
   return (
     <header className="flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
       <div className="flex flex-col gap-1.5">
-        <h1 className="text-3xl font-semibold tracking-tight">FlexVaults Earn</h1>
+        <h1 className="text-3xl font-semibold tracking-tight">Privana Earn</h1>
         <p className="flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
           <span>{config.apiBaseUrl}</span>
           <Separator orientation="vertical" className="h-3.5" />
@@ -486,7 +486,7 @@ function Header({
           {config.hasUserKey ? "user key loaded" : "no user key"}
         </Badge>
         <WalletConnect />
-        <FlexvaultsLauncher />
+        <PrivanaLauncher />
         <Button variant="outline" size="sm" onClick={onRefresh} disabled={refreshing}>
           {refreshing ? <Spinner data-icon="inline-start" /> : null}
           Refresh
@@ -1047,16 +1047,16 @@ function WalletConnect() {
   );
 }
 
-function FlexvaultsLauncher() {
+function PrivanaLauncher() {
   return (
-    <FlexvaultsButton
+    <PrivanaButton
       variant="default"
       size="sm"
       hideWhenDisconnected={false}
       onDepositSuccess={() => toast.success("Deposit success", { description: "Funds en route" })}
     >
-      Flexvaults wallet
-    </FlexvaultsButton>
+      Privana wallet
+    </PrivanaButton>
   );
 }
 

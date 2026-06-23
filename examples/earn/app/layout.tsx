@@ -9,8 +9,8 @@ import { Providers } from "./providers";
 const geist = Geist({ subsets: ["latin"], variable: "--font-sans" });
 
 export const metadata: Metadata = {
-  title: "FlexVaults Earn Tester",
-  description: "Local-only test bench for the FlexVaults earn pipeline"
+  title: "Privana Earn Tester",
+  description: "Local-only test bench for the Privana Earn pipeline"
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

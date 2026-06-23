@@ -8,7 +8,7 @@ class Settings:
     log_level: str
     environment: str
 
-    accounting_api_base_url: str
+    privana_api_base_url: str
 
     lifi_api_key: str
     lifi_api_url: str

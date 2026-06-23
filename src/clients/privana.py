@@ -17,7 +17,7 @@ def get_privana_client() -> PrivanaClient:
     global _client
     if _client is None:
         settings = load_settings()
-        _client = PrivanaClient(base_url=settings.accounting_api_base_url)
+        _client = PrivanaClient(base_url=settings.privana_api_base_url)
     return _client
 
 
@@ -51,11 +51,11 @@ async def _authenticate_as_lp(client: PrivanaClient) -> str:
     nonce = (await client.get_siwe_nonce(lp_address)).nonce
 
     now = datetime.now(timezone.utc)
-    base_url = settings.accounting_api_base_url
+    base_url = settings.privana_api_base_url
     domain = base_url.replace("https://", "").replace("http://", "").rstrip("/")
     message = (
         f"{domain} wants you to sign in with your Ethereum account:\n"
-        f"{lp_address}\n\nSign in to FlexVaults\n\n"
+        f"{lp_address}\n\nSign in to Privana on chain {settings.accounting_chain_id}\n\n"
         f"URI: {base_url}\n"
         f"Version: 1\nChain ID: {settings.accounting_chain_id}\nNonce: {nonce}\n"
         f"Issued At: {now.strftime('%Y-%m-%dT%H:%M:%SZ')}\n"

@@ -15,7 +15,7 @@ dependencies = [
     "web3>=7.14,<8",
     "eth-account>=0.13,<0.14",
     "oasis-sapphire-py>=0.4.2,<0.5",
-    "oasis-privana>=0.2.0,<0.3",
+    "oasis-privana>=0.2.1,<0.3",
 ]
 
 [project.scripts]

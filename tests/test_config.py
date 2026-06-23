@@ -44,7 +44,7 @@ def test_validate_settings_flags_unset_addresses(monkeypatch):
         accounting_contract_address=None,
         swap_manager_contract_address=None,
         earn_manager_contract_address=None,
-        accounting_api_base_url="https://example.test",
+        privana_api_base_url="https://example.test",
         environment="production",
     )
     monkeypatch.setattr(main_module, "settings", crafted)
@@ -62,7 +62,7 @@ def test_validate_settings_passes_with_real_addresses(monkeypatch):
         accounting_contract_address="0x" + "a" * 40,
         swap_manager_contract_address="0x" + "b" * 40,
         earn_manager_contract_address="0x" + "c" * 40,
-        accounting_api_base_url="https://example.test",
+        privana_api_base_url="https://example.test",
         environment="production",
     )
     monkeypatch.setattr(main_module, "settings", crafted)

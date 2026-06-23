@@ -1,4 +1,4 @@
-# FlexVaults Earn — local tester UI
+# Privana Earn — local tester UI
 
 Next.js dashboard for poking the earn pipeline against a local backend.
 Local-only: signs deposits with the test user key from `.env.local`, talks
@@ -31,7 +31,7 @@ uv run uvicorn src.main:app --port 8001 --reload
 - Quote preview, deposit, withdraw forms wired to `/v1/earn/quote|deposit|withdraw`
 - Position table per pool for the test user
 - Session activity feed with explorer links
-- `<FlexvaultsButton>` widget for funding / balance from the official SDK
+- `<PrivanaButton>` widget for funding / balance from the official SDK
 
 ## Signing
 
@@ -46,11 +46,11 @@ user signature, so `POST /api/withdraw` just proxies.
 - Next.js 16 (App Router, Turbopack)
 - shadcn/ui (`base-nova` preset, Tailwind v4)
 - wagmi + @tanstack/react-query (peer deps for the SDK)
-- `@oasisprotocol/flexvaults-sdk` (provider, hooks, `<FlexvaultsButton>`)
+- `@oasisprotocol/privana-sdk` (provider, hooks, `<PrivanaButton>`)
 - viem (EIP-712 signing + Sapphire / Base Sepolia reads)
 
 ## Caveats
 
 This is a manual tester, not production code. The default `.env.local.example`
-ships a known test user private key for the Sapphire testnet flexvaults
+ships a known test user private key for the Sapphire Testnet Privana
 demo account. Never reuse it for anything that holds real funds.

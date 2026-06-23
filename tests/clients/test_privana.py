@@ -35,7 +35,7 @@ class _SiweLogin:
 
 def test_get_privana_client_returns_singleton():
     reset_privana_client()
-    settings = replace(load_settings(), accounting_api_base_url="https://example.test")
+    settings = replace(load_settings(), privana_api_base_url="https://example.test")
 
     with patch("src.clients.privana.load_settings", return_value=settings):
         client_a = get_privana_client()
@@ -48,7 +48,7 @@ def test_get_privana_client_returns_singleton():
 
 def test_get_privana_client_uses_configured_base_url():
     reset_privana_client()
-    settings = replace(load_settings(), accounting_api_base_url="https://accounting.example/")
+    settings = replace(load_settings(), privana_api_base_url="https://accounting.example/")
 
     with patch("src.clients.privana.load_settings", return_value=settings):
         client = get_privana_client()
@@ -59,8 +59,8 @@ def test_get_privana_client_uses_configured_base_url():
 
 def test_reset_privana_client_clears_singleton():
     reset_privana_client()
-    settings_one = replace(load_settings(), accounting_api_base_url="https://one.example")
-    settings_two = replace(load_settings(), accounting_api_base_url="https://two.example")
+    settings_one = replace(load_settings(), privana_api_base_url="https://one.example")
+    settings_two = replace(load_settings(), privana_api_base_url="https://two.example")
 
     with patch("src.clients.privana.load_settings", return_value=settings_one):
         first = get_privana_client()
@@ -79,7 +79,7 @@ async def test_authenticate_signs_siwe_and_sets_bearer_token():
     reset_privana_client()
     settings = replace(
         load_settings(),
-        accounting_api_base_url="https://accounting.example",
+        privana_api_base_url="https://accounting.example",
         liquidity_provider_secret_key=LP_PRIVATE_KEY,
         liquidity_provider_address=LP_ADDRESS,
         accounting_chain_id=23295,
@@ -113,7 +113,7 @@ async def test_authenticate_caches_token_across_calls():
     reset_privana_client()
     settings = replace(
         load_settings(),
-        accounting_api_base_url="https://accounting.example",
+        privana_api_base_url="https://accounting.example",
         liquidity_provider_secret_key=LP_PRIVATE_KEY,
         liquidity_provider_address=LP_ADDRESS,
         accounting_chain_id=23295,
@@ -141,7 +141,7 @@ async def test_authenticate_requires_lp_secret_key():
     reset_privana_client()
     settings = replace(
         load_settings(),
-        accounting_api_base_url="https://accounting.example",
+        privana_api_base_url="https://accounting.example",
         liquidity_provider_secret_key="",
         liquidity_provider_address=LP_ADDRESS,
     )

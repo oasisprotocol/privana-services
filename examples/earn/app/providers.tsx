@@ -1,8 +1,8 @@
 "use client";
 
 import { useState } from "react";
-import "@oasisprotocol/flexvaults-sdk/styles.css";
-import { FlexvaultsProvider } from "@oasisprotocol/flexvaults-sdk";
+import "@oasisprotocol/privana-sdk/styles.css";
+import { PrivanaProvider } from "@oasisprotocol/privana-sdk";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { WagmiProvider, createConfig, http } from "wagmi";
 import { baseSepolia } from "wagmi/chains";
@@ -22,7 +22,7 @@ export function Providers({ children }: { children: React.ReactNode }) {
   return (
     <WagmiProvider config={wagmiConfig}>
       <QueryClientProvider client={queryClient}>
-        <FlexvaultsProvider tokens={enabledTokens}>{children}</FlexvaultsProvider>
+        <PrivanaProvider tokens={enabledTokens}>{children}</PrivanaProvider>
       </QueryClientProvider>
     </WagmiProvider>
   );

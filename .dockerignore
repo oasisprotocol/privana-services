@@ -3,3 +3,5 @@ solidity/artifacts
 solidity/cache
 solidity/node_modules
 solidity/typechain-types
+.env
+.env.*.secrets

@@ -30,8 +30,8 @@ def _validate_settings() -> None:
         errors.append("SWAP_MANAGER_CONTRACT_ADDRESS is not set")
     if not settings.earn_manager_contract_address or settings.earn_manager_contract_address == _ZERO_ADDRESS:
         errors.append("EARN_MANAGER_CONTRACT_ADDRESS is not set")
-    if not settings.accounting_api_base_url:
-        errors.append("ACCOUNTING_API_BASE_URL is not set")
+    if not settings.privana_api_base_url:
+        errors.append("PRIVANA_API_BASE_URL is not set")
     if errors and settings.environment.lower() != "development":
         raise RuntimeError(
             "Missing required configuration:\n  - " + "\n  - ".join(errors)

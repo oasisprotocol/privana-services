@@ -108,6 +108,7 @@ class SwapExecutor:
                         lp_nonce,
                         output_sig_bytes,
                     ],
+                    gas_limit=1000000,
                 )
 
             self._update_swap(swap_id, status=SwapStatus.COMPLETED.value, swap_tx_hash=tx_hash)

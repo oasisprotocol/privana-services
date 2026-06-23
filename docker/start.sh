@@ -9,11 +9,11 @@ SECRET_KEY=`curl -s  --json '{ "key_id": "OWNER_SECRET_KEY_ID", "kind": "secp256
 echo "done."
 
 pushd solidity
-  if [ "${ACCOUNTING_CHAIN_ID}" = "23294" ]; then
+  if [ "${ACCOUNTING_CHAIN_ID}" = "23293" ]; then
     NETWORK=sapphire-localnet
   elif [ "${ACCOUNTING_CHAIN_ID}" = "23295" ]; then
     NETWORK=sapphire-testnet
-  elif [ "${ACCOUNTING_CHAIN_ID}" = "23296" ]; then
+  elif [ "${ACCOUNTING_CHAIN_ID}" = "23294" ]; then
     NETWORK=sapphire
   fi
 

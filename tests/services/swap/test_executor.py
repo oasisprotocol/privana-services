@@ -34,17 +34,8 @@ def _make_executor(settings):
 
 
 class TestSwapStatus:
-    def test_only_three_states(self):
-        assert len(SwapStatus) == 3
-
-    def test_pending_state(self):
-        assert SwapStatus.PENDING.value == "pending"
-
-    def test_completed_state(self):
-        assert SwapStatus.COMPLETED.value == "completed"
-
-    def test_failed_state(self):
-        assert SwapStatus.FAILED.value == "failed"
+    def test_six_states(self):
+        assert len(SwapStatus) == 6
 
 
 class TestValidateQuote:

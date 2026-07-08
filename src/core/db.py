@@ -71,6 +71,12 @@ MIGRATIONS = [
     "CREATE INDEX IF NOT EXISTS idx_earn_tx_user ON earn_transactions(user_address);",
     "ALTER TABLE swaps ADD COLUMN output_nonce INTEGER;",
     "ALTER TABLE swaps ADD COLUMN output_signature TEXT;",
+    "ALTER TABLE quotes ADD COLUMN venue TEXT NOT NULL DEFAULT 'internal';",
+    "ALTER TABLE swaps ADD COLUMN venue TEXT NOT NULL DEFAULT 'internal';",
+    "ALTER TABLE swaps ADD COLUMN step TEXT;",
+    "ALTER TABLE swaps ADD COLUMN withdrawal_index INTEGER;",
+    "ALTER TABLE swaps ADD COLUMN lifi_tx_hash TEXT;",
+    "ALTER TABLE swaps ADD COLUMN deposit_tx_hash TEXT;",
 ]
 
 

@@ -44,6 +44,43 @@ class LiFiClient:
         response.raise_for_status()
         return response.json()
 
+    async def get_execution_quote(
+        self,
+        from_chain_id: int,
+        to_chain_id: int,
+        from_token_address: str,
+        to_token_address: str,
+        from_amount: str,
+        from_address: str,
+        slippage: float = 0.03,
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {
+            "fromChain": from_chain_id,
+            "toChain": to_chain_id,
+            "fromToken": from_token_address,
+            "toToken": to_token_address,
+            "fromAmount": from_amount,
+            "fromAddress": from_address,
+            "slippage": slippage,
+        }
+        if self.integrator:
+            params["integrator"] = self.integrator
+        response = await self.client.get(f"{self.api_url}/quote", params=params)
+        if response.status_code != 200:
+            logger.error(
+                f"Li.Fi quote failed: {response.status_code} - {response.text}"
+            )
+        response.raise_for_status()
+        return response.json()
+
+    async def get_status(
+        self, tx_hash: str, from_chain_id: int, to_chain_id: int
+    ) -> dict[str, Any]:
+        params = {"txHash": tx_hash, "fromChain": from_chain_id, "toChain": to_chain_id}
+        response = await self.client.get(f"{self.api_url}/status", params=params)
+        response.raise_for_status()
+        return response.json()
+
     async def get_tokens(self) -> dict[str, Any]:
         response = await self.client.get(f"{self.api_url}/tokens")
         response.raise_for_status()

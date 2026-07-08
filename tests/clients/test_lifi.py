@@ -17,6 +17,22 @@ SAMPLE_ROUTES_RESPONSE = {
     ]
 }
 
+SAMPLE_EXECUTION_QUOTE = {
+    "tool": "fly",
+    "transactionRequest": {
+        "to": "0x1231DEB6f5749EF6cE6943a275A1D3E7486F4EaE",
+        "data": "0xdead",
+        "value": "0x0",
+        "gasLimit": "0x15fcbf",
+        "gasPrice": "0x3b9aca00",
+    },
+    "estimate": {
+        "approvalAddress": "0x1231DEB6f5749EF6cE6943a275A1D3E7486F4EaE",
+        "toAmount": "2000000000000000000",
+        "toAmountMin": "1950000000000000000",
+    },
+}
+
 
 class TestLiFiClient:
     @pytest.fixture
@@ -133,3 +149,58 @@ class TestLiFiClient:
             from src.clients.lifi import LiFiClient
             lifi = LiFiClient()
             assert lifi.api_url == "https://li.quest/v1"
+
+    async def test_get_execution_quote_sends_correct_params(self, client, mock_http_client):
+        mock_http_client.get.return_value = self._mock_response(SAMPLE_EXECUTION_QUOTE)
+
+        result = await client.get_execution_quote(
+            from_chain_id=8453,
+            to_chain_id=8453,
+            from_token_address="0xfrom",
+            to_token_address="0xto",
+            from_amount="1000000",
+            from_address="0xlp",
+        )
+
+        assert result == SAMPLE_EXECUTION_QUOTE
+        url = mock_http_client.get.call_args.args[0]
+        params = mock_http_client.get.call_args.kwargs["params"]
+        assert url == "https://li.quest/v1/quote"
+        assert params["fromChain"] == 8453
+        assert params["toChain"] == 8453
+        assert params["fromToken"] == "0xfrom"
+        assert params["toToken"] == "0xto"
+        assert params["fromAmount"] == "1000000"
+        assert params["fromAddress"] == "0xlp"
+        assert params["slippage"] == 0.03
+        assert params["integrator"] == "test"
+
+    async def test_get_execution_quote_raises_on_http_error(self, client, mock_http_client):
+        error_resp = self._mock_response({}, status_code=404)
+        error_resp.raise_for_status.side_effect = httpx.HTTPStatusError(
+            "no quote", request=MagicMock(), response=error_resp
+        )
+        mock_http_client.get.return_value = error_resp
+
+        with pytest.raises(httpx.HTTPStatusError):
+            await client.get_execution_quote(
+                from_chain_id=8453,
+                to_chain_id=8453,
+                from_token_address="0xfrom",
+                to_token_address="0xto",
+                from_amount="1000000",
+                from_address="0xlp",
+            )
+
+    async def test_get_status_sends_correct_params(self, client, mock_http_client):
+        mock_http_client.get.return_value = self._mock_response({"status": "DONE"})
+
+        result = await client.get_status(
+            tx_hash="0xabc", from_chain_id=8453, to_chain_id=8453
+        )
+
+        assert result == {"status": "DONE"}
+        url = mock_http_client.get.call_args.args[0]
+        params = mock_http_client.get.call_args.kwargs["params"]
+        assert url == "https://li.quest/v1/status"
+        assert params == {"txHash": "0xabc", "fromChain": 8453, "toChain": 8453}

@@ -49,6 +49,7 @@ def insert_quote(test_db):
             "route_tool": "uniswap",
             "liquidity_provider": _settings.liquidity_provider_address,
             "created_at": now,
+            "venue": "internal",
         }
         defaults.update(overrides)
         db_write(
@@ -56,15 +57,15 @@ def insert_quote(test_db):
             """INSERT INTO quotes
                (id, user_address, from_token_id, to_token_id, from_chain_id, to_chain_id,
                 from_amount, to_amount_gross, to_amount_estimate, to_amount_min,
-                route_tool, liquidity_provider, expires_at, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                route_tool, liquidity_provider, expires_at, created_at, venue)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 quote_id, defaults["user_address"], defaults["from_token_id"],
                 defaults["to_token_id"], defaults["from_chain_id"], defaults["to_chain_id"],
                 defaults["from_amount"], defaults["to_amount_gross"],
                 defaults["to_amount_estimate"], defaults["to_amount_min"],
                 defaults["route_tool"], defaults["liquidity_provider"],
-                expires_at, defaults["created_at"],
+                expires_at, defaults["created_at"], defaults["venue"],
             ),
         )
     return _insert

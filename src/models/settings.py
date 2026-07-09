@@ -39,3 +39,5 @@ class Settings:
     midas_oracle_heartbeat_sec: int
     midas_apy_bps: int
     midas_pool_assets: str
+
+    lifi_execution_enabled: bool = False

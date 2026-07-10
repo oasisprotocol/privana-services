@@ -13,7 +13,8 @@ from src.core.config import load_settings
 from src.core.db import db_write, get_db
 from src.core.eip712 import sign_transfer
 from src.core.validation import sanitize_error, validate_signature
-from src.models.swap import SwapRecord, SwapStatus
+from src.models.swap import SwapRecord, SwapStatus, SwapVenue
+from src.services.swap.lifi_pipeline import get_lifi_pipeline
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +37,11 @@ class SwapExecutor:
     ) -> SwapRecord:
         quote = self._validate_quote(quote_id, user_address)
         validate_signature(input_signature, "input_signature")
+
+        if quote.get("venue") == SwapVenue.LIFI.value:
+            return await get_lifi_pipeline().launch(
+                quote, user_address, input_nonce, input_signature
+            )
 
         lp_balance = await self.accounting.get_lp_balance(quote["to_token_id"])
         if int(lp_balance.balance) < int(quote["to_amount_estimate"]):

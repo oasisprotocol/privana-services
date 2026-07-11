@@ -173,6 +173,10 @@ class QuoteService:
         )
         if not real_routes.get("routes"):
             raise ValueError("Insufficient liquidity for this swap")
+        cap = self.settings.lifi_max_swap_amount_usd
+        from_amount_usd = real_routes["routes"][0].get("fromAmountUSD")
+        if cap > 0 and from_amount_usd is not None and float(from_amount_usd) > cap:
+            raise ValueError("Swap size exceeds LiFi routing limit")
         return SwapVenue.LIFI.value
 
     async def _find_existing_quote(

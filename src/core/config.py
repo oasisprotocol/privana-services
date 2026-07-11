@@ -67,6 +67,7 @@ def load_settings(refresh: bool = False) -> Settings:
             midas_apy_bps=_get_int("MIDAS_APY_BPS"),
             midas_pool_assets=os.getenv("MIDAS_POOL_ASSETS"),
             lifi_execution_enabled=os.getenv("LIFI_EXECUTION_ENABLED", "false").lower() == "true",
+            lifi_max_swap_amount_usd=int(os.getenv("LIFI_MAX_SWAP_AMOUNT_USD", "0")),
         )
     return _settings
 

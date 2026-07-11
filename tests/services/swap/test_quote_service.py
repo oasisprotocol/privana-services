@@ -273,6 +273,48 @@ class TestVenueSelection(TestGetQuote):
                 user_address="0x" + "a" * 40,
             )
 
+    async def test_lifi_swap_over_usd_cap_raises(self, test_db):
+        service = self._make_service()
+        service.settings = replace(
+            service.settings, lifi_execution_enabled=True, lifi_max_swap_amount_usd=100
+        )
+        service.accounting.get_lp_balance = AsyncMock(return_value=self.LOW_BALANCE)
+        routes_with_usd = {
+            "routes": [{"toAmount": "2000000000000000000",
+                        "toAmountMin": "1950000000000000000",
+                        "fromAmountUSD": "250.00",
+                        "steps": [{"tool": "uniswap"}]}]
+        }
+        service.lifi.get_routes = AsyncMock(return_value=routes_with_usd)
+        with pytest.raises(ValueError, match="exceeds LiFi routing limit"):
+            await service.get_quote(
+                from_token_id="0xaaa",
+                to_token_id="0xbbb",
+                from_amount="1000000",
+                user_address="0x" + "a" * 40,
+            )
+
+    async def test_lifi_swap_cap_disabled_when_zero(self, test_db):
+        service = self._make_service()
+        service.settings = replace(
+            service.settings, lifi_execution_enabled=True, lifi_max_swap_amount_usd=0
+        )
+        service.accounting.get_lp_balance = AsyncMock(return_value=self.LOW_BALANCE)
+        routes_with_usd = {
+            "routes": [{"toAmount": "2000000000000000000",
+                        "toAmountMin": "1950000000000000000",
+                        "fromAmountUSD": "250.00",
+                        "steps": [{"tool": "uniswap"}]}]
+        }
+        service.lifi.get_routes = AsyncMock(return_value=routes_with_usd)
+        result = await service.get_quote(
+            from_token_id="0xaaa",
+            to_token_id="0xbbb",
+            from_amount="1000000",
+            user_address="0x" + "a" * 40,
+        )
+        assert result.venue == "lifi"
+
     async def test_lifi_venue_persisted_and_returned_on_dedup(self, test_db):
         service = self._make_service()
         service.settings = replace(service.settings, lifi_execution_enabled=True)

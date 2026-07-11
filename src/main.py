@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 
@@ -74,6 +75,11 @@ async def lifespan(_app: FastAPI):
             logger.info("Earn strategy registry: %d Midas pool(s) registered", registered)
     except Exception:
         logger.exception("Midas strategy registration failed; affected pools fall back to manual")
+
+    if settings.lifi_execution_enabled:
+        from src.services.swap.lifi_pipeline import recover_inflight_lifi_swaps
+
+        asyncio.create_task(recover_inflight_lifi_swaps())
 
     yield
 

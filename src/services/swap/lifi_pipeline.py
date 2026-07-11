@@ -27,6 +27,8 @@ STATUS_POLL_INTERVAL_SEC = 10.0
 MAX_STATUS_POLLS = 720
 MAX_INPUT_CONFIRM_POLLS = 60
 CREDIT_MAX_RETRIES = 20
+DEPOSIT_MAX_RETRIES = 10
+REFUND_BALANCE_POLLS = 30
 
 lp_transfer_lock = asyncio.Lock()
 
@@ -48,6 +50,8 @@ class LifiSwapPipeline:
         self.evm = evm or get_base_evm_client()
         self._privana_factory = privana_factory or get_authenticated_privana_client
         self._poll_interval_sec = poll_interval_sec
+        self._credit_max_retries = CREDIT_MAX_RETRIES
+        self._deposit_max_retries = DEPOSIT_MAX_RETRIES
         self._tasks: set[asyncio.Task] = set()
 
     async def launch(
@@ -80,19 +84,70 @@ class LifiSwapPipeline:
             await self._confirm_input(quote, input_nonce)
             await self._withdraw(swap_id, quote)
             received, to_info = await self._lifi_execute(swap_id, quote)
-            await self._deposit(swap_id, quote, to_info, received)
+            await self._deposit_with_retries(swap_id, quote, to_info, received)
+            self._update_swap(swap_id, step=LifiSwapStep.CREDIT.value)
             credited = await self._credit(quote, received)
             self._update_swap(
                 swap_id,
                 status=SwapStatus.COMPLETED.value,
-                step=LifiSwapStep.CREDIT.value,
                 to_amount_actual=str(credited),
             )
         except Exception as exc:
             logger.exception("lifi swap %s failed", swap_id)
-            self._update_swap(
-                swap_id, status=SwapStatus.FAILED.value, error=sanitize_error(str(exc))
+            step = self._current_step(swap_id)
+            await self._refund(swap_id, quote, step, sanitize_error(str(exc)))
+
+    def _current_step(self, swap_id: str) -> Optional[str]:
+        db = get_db()
+        row = db.execute("SELECT step FROM swaps WHERE id = ?", (swap_id,)).fetchone()
+        return row["step"] if row else None
+
+    async def _refund(
+        self, swap_id: str, quote: dict, step: Optional[str], reason: str
+    ) -> None:
+        refundable = {LifiSwapStep.WITHDRAW.value, LifiSwapStep.LIFI_EXECUTE.value}
+        if step not in refundable:
+            self._update_swap(swap_id, status=SwapStatus.FAILED.value, error=reason)
+            return
+
+        self._update_swap(swap_id, status=SwapStatus.REFUNDING.value, error=reason)
+        try:
+            if step == LifiSwapStep.LIFI_EXECUTE.value:
+                await self._redeposit_input(quote)
+            await self._lp_transfer(
+                quote["user_address"], quote["from_token_id"], int(quote["from_amount"])
             )
+            self._update_swap(swap_id, status=SwapStatus.REFUNDED.value)
+        except Exception as exc:
+            logger.exception("lifi swap %s refund failed", swap_id)
+            self._update_swap(
+                swap_id,
+                status=SwapStatus.FAILED.value,
+                error=f"{reason}; refund failed, manual recovery required: {sanitize_error(str(exc))}",
+            )
+
+    async def _redeposit_input(self, quote: dict) -> None:
+        from_info = await self.accounting.get_token_info(quote["from_token_id"])
+        amount = int(quote["from_amount"])
+        for _ in range(REFUND_BALANCE_POLLS):
+            balance = await asyncio.to_thread(
+                self.evm.erc20_balance, from_info.token_address, self.evm.address
+            )
+            if balance >= amount:
+                break
+            await asyncio.sleep(self._poll_interval_sec)
+        else:
+            raise RuntimeError("input tokens not returned on-chain")
+
+        deposit_address = await self.bridge.get_deposit_address()
+        pre_internal = await self.bridge.lp_internal_balance(quote["from_token_id"])
+        async with base_tx_lock:
+            deposit_tx = await asyncio.to_thread(
+                self.evm.transfer_erc20, from_info.token_address, deposit_address, amount
+            )
+        await self.bridge.await_deposit_credit(
+            from_info.chain_id, deposit_tx, amount, quote["from_token_id"], pre_internal
+        )
 
     async def _submit_input(
         self, quote: dict, input_nonce: int, input_signature: str
@@ -186,10 +241,28 @@ class LifiSwapPipeline:
             await asyncio.sleep(self._poll_interval_sec)
         raise RuntimeError(f"lifi execution status polling exhausted for {tx_hash}")
 
-    async def _deposit(
+    async def _deposit_with_retries(
         self, swap_id: str, quote: dict, to_info: Any, received: int
     ) -> None:
         self._update_swap(swap_id, step=LifiSwapStep.DEPOSIT.value)
+        last_error: Optional[Exception] = None
+        for attempt in range(self._deposit_max_retries):
+            try:
+                await self._deposit(swap_id, quote, to_info, received)
+                return
+            except Exception as exc:
+                last_error = exc
+                logger.warning(
+                    "lifi swap %s deposit attempt %d failed: %s", swap_id, attempt + 1, exc
+                )
+                await asyncio.sleep(self._poll_interval_sec)
+        raise RuntimeError(
+            f"deposit retries exhausted; output held at LP wallet: {last_error}"
+        )
+
+    async def _deposit(
+        self, swap_id: str, quote: dict, to_info: Any, received: int
+    ) -> None:
         deposit_address = await self.bridge.get_deposit_address()
         pre_internal = await self.bridge.lp_internal_balance(quote["to_token_id"])
         async with base_tx_lock:
@@ -203,9 +276,13 @@ class LifiSwapPipeline:
 
     async def _credit(self, quote: dict, received: int) -> int:
         credited, _ = calculate_fee(received, self.settings.fee_bps)
+        await self._lp_transfer(quote["user_address"], quote["to_token_id"], credited)
+        return credited
+
+    async def _lp_transfer(self, to_address: str, token_id: str, amount: int) -> None:
         client = await self._privana_factory()
         last_detail = None
-        for _ in range(CREDIT_MAX_RETRIES):
+        for _ in range(self._credit_max_retries):
             async with lp_transfer_lock:
                 lp_nonce = await self.accounting.get_transfer_nonce(
                     self.settings.liquidity_provider_address
@@ -214,22 +291,22 @@ class LifiSwapPipeline:
                     private_key=self.settings.liquidity_provider_secret_key,
                     chain_id=self.settings.accounting_chain_id,
                     verifying_contract=self.settings.accounting_contract_address,
-                    to_address=quote["user_address"],
-                    token_id=quote["to_token_id"],
-                    amount=credited,
+                    to_address=to_address,
+                    token_id=token_id,
+                    amount=amount,
                     nonce=lp_nonce,
                 )
                 submission = await client.transfer_funds(
                     TransferFundsRequest(
-                        to_address=quote["user_address"],
-                        token_id=quote["to_token_id"],
-                        amount=credited,
+                        to_address=to_address,
+                        token_id=token_id,
+                        amount=amount,
                         nonce=lp_nonce,
                         signature=signature,
                     )
                 )
             if submission.status in ACCEPTED_SUBMISSION_STATUSES:
-                return credited
+                return
             last_detail = submission.detail
             await asyncio.sleep(self._poll_interval_sec)
         raise RuntimeError(f"credit retries exhausted: {last_detail}")
@@ -266,6 +343,47 @@ class LifiSwapPipeline:
         if row is None:
             raise ValueError(f"Swap {swap_id} not found")
         return SwapRecord(**dict(row))
+
+
+async def recover_inflight_lifi_swaps(pipeline: Optional[LifiSwapPipeline] = None) -> None:
+    db = get_db()
+    rows = db.execute(
+        """SELECT * FROM swaps
+           WHERE venue = ? AND status IN (?, ?, ?)""",
+        (
+            SwapVenue.LIFI.value,
+            SwapStatus.PENDING.value,
+            SwapStatus.EXECUTING.value,
+            SwapStatus.REFUNDING.value,
+        ),
+    ).fetchall()
+    if not rows:
+        return
+
+    pipeline = pipeline or get_lifi_pipeline()
+    for row in rows:
+        swap = dict(row)
+        quote = {
+            "id": swap["quote_id"],
+            "user_address": swap["user_address"],
+            "from_token_id": swap["from_token_id"],
+            "to_token_id": swap["to_token_id"],
+            "from_amount": swap["from_amount"],
+            "to_amount_estimate": swap["to_amount_estimate"],
+        }
+        step = swap.get("step")
+        if step in (LifiSwapStep.DEPOSIT.value, LifiSwapStep.CREDIT.value):
+            pipeline._update_swap(
+                swap["id"],
+                status=SwapStatus.FAILED.value,
+                error=f"interrupted at step {step}; manual recovery required",
+            )
+            logger.warning("lifi swap %s parked for manual recovery (step=%s)", swap["id"], step)
+            continue
+        logger.info("lifi swap %s recovered into refund path (step=%s)", swap["id"], step)
+        await pipeline._refund(
+            swap["id"], quote, step, "service restarted mid-execution"
+        )
 
 
 _pipeline_instance: Optional[LifiSwapPipeline] = None

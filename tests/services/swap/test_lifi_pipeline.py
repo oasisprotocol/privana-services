@@ -167,6 +167,120 @@ class TestRun:
         assert privana.transfer_funds.await_count == 3
 
 
+class TestRefund:
+    async def _launch_and_run(self, pipeline, quote):
+        pipeline.spawn_background = MagicMock()
+        record = await pipeline.launch(quote, USER, 5, "0x" + "ab" * 65)
+        await pipeline._run(record.id, quote, 5)
+        return record.id
+
+    async def test_withdraw_failure_refunds_input(self, test_db, settings, insert_quote):
+        insert_quote("q_w", venue="lifi", user_address=USER,
+                     from_token_id=FROM_TOKEN, to_token_id=TO_TOKEN)
+        pipeline = _make_pipeline(settings)
+        pipeline.bridge.withdraw_to_chain = AsyncMock(side_effect=RuntimeError("relay down"))
+        pipeline.accounting.get_transfer_nonce = AsyncMock(side_effect=[6, 70])
+        swap_id = await self._launch_and_run(pipeline, _quote("q_w"))
+        row = dict(test_db.execute("SELECT * FROM swaps WHERE id=?", (swap_id,)).fetchone())
+        assert row["status"] == "refunded"
+        privana = await pipeline._privana_factory()
+        refund_call = privana.transfer_funds.await_args_list[-1].args[0]
+        assert refund_call.to_address == USER
+        assert refund_call.token_id == FROM_TOKEN
+        assert refund_call.amount == 1000000
+
+    async def test_lifi_execute_failure_redeposits_then_refunds(self, test_db, settings, insert_quote):
+        insert_quote("q_e", venue="lifi", user_address=USER,
+                     from_token_id=FROM_TOKEN, to_token_id=TO_TOKEN)
+        pipeline = _make_pipeline(settings)
+        pipeline.evm.send_transaction_request = MagicMock(side_effect=RuntimeError("revert"))
+        pipeline.evm.erc20_balance = MagicMock(side_effect=[0, 1000000])
+        pipeline.accounting.get_transfer_nonce = AsyncMock(side_effect=[6, 70])
+        pipeline.accounting.get_token_info = AsyncMock(
+            side_effect=[FROM_INFO, TO_INFO, FROM_INFO])
+        swap_id = await self._launch_and_run(pipeline, _quote("q_e"))
+        row = dict(test_db.execute("SELECT * FROM swaps WHERE id=?", (swap_id,)).fetchone())
+        assert row["status"] == "refunded"
+        pipeline.evm.transfer_erc20.assert_called_once()
+        pipeline.bridge.await_deposit_credit.assert_awaited_once()
+
+    async def test_deposit_exhaustion_fails_without_refund(self, test_db, settings, insert_quote):
+        insert_quote("q_d", venue="lifi", user_address=USER,
+                     from_token_id=FROM_TOKEN, to_token_id=TO_TOKEN)
+        pipeline = _make_pipeline(settings)
+        pipeline._deposit_max_retries = 2
+        pipeline.bridge.await_deposit_credit = AsyncMock(side_effect=RuntimeError("relay stuck"))
+        swap_id = await self._launch_and_run(pipeline, _quote("q_d"))
+        row = dict(test_db.execute("SELECT * FROM swaps WHERE id=?", (swap_id,)).fetchone())
+        assert row["status"] == "failed"
+        assert "deposit" in row["error"]
+        assert pipeline.bridge.await_deposit_credit.await_count == 2
+
+    async def test_credit_exhaustion_fails_without_refund(self, test_db, settings, insert_quote):
+        insert_quote("q_c", venue="lifi", user_address=USER,
+                     from_token_id=FROM_TOKEN, to_token_id=TO_TOKEN)
+        pipeline = _make_pipeline(settings)
+        pipeline._credit_max_retries = 2
+        privana = await pipeline._privana_factory()
+        privana.transfer_funds = AsyncMock(side_effect=[
+            MagicMock(status="submitted", detail=None),
+            MagicMock(status="rejected", detail="boom"),
+            MagicMock(status="rejected", detail="boom"),
+        ])
+        pipeline.accounting.get_transfer_nonce = AsyncMock(side_effect=[6, 70, 70])
+        swap_id = await self._launch_and_run(pipeline, _quote("q_c"))
+        row = dict(test_db.execute("SELECT * FROM swaps WHERE id=?", (swap_id,)).fetchone())
+        assert row["status"] == "failed"
+        assert "credit" in row["error"]
+
+
+class TestRecovery:
+    def _insert_swap(self, test_db, swap_id, step, status="executing"):
+        import time as _t
+        from src.core.db import db_write
+        now = int(_t.time())
+        db_write(
+            test_db,
+            """INSERT INTO swaps
+               (id, quote_id, user_address, from_token_id, to_token_id,
+                from_amount, to_amount_estimate, status, venue, step, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (swap_id, "q_rec", USER, FROM_TOKEN, TO_TOKEN,
+             "1000000", "57000", status, "lifi", step, now, now),
+        )
+
+    async def test_inflight_swaps_routed_to_refund_or_failed(self, test_db, settings):
+        from src.services.swap.lifi_pipeline import recover_inflight_lifi_swaps
+        self._insert_swap(test_db, "s_withdraw", "withdraw")
+        self._insert_swap(test_db, "s_credit", "credit")
+        pipeline = _make_pipeline(settings)
+        pipeline._refund = AsyncMock()
+        await recover_inflight_lifi_swaps(pipeline=pipeline)
+        refunded_ids = [c.args[0] for c in pipeline._refund.await_args_list]
+        assert "s_withdraw" in refunded_ids
+        credit_row = dict(test_db.execute("SELECT * FROM swaps WHERE id='s_credit'").fetchone())
+        assert credit_row["status"] == "failed"
+        assert "manual" in credit_row["error"]
+
+    async def test_internal_swaps_untouched(self, test_db, settings):
+        from src.services.swap.lifi_pipeline import recover_inflight_lifi_swaps
+        import time as _t
+        from src.core.db import db_write
+        now = int(_t.time())
+        db_write(
+            test_db,
+            """INSERT INTO swaps
+               (id, quote_id, user_address, from_token_id, to_token_id,
+                from_amount, to_amount_estimate, status, venue, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            ("s_int", "q_i", USER, FROM_TOKEN, TO_TOKEN, "1", "1", "pending", "internal", now, now),
+        )
+        pipeline = _make_pipeline(settings)
+        pipeline._refund = AsyncMock()
+        await recover_inflight_lifi_swaps(pipeline=pipeline)
+        pipeline._refund.assert_not_awaited()
+
+
 class TestExecutorDispatch:
     async def test_lifi_venue_routes_to_pipeline(self, test_db, settings, insert_quote):
         from unittest.mock import patch

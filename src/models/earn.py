@@ -81,6 +81,18 @@ class PoolListResponse(BaseModel):
     pools: list[PoolResponse]
 
 
+class ApyHistoryPoint(BaseModel):
+    timestamp: int = Field(..., description="Unix seconds")
+    apy_bps: int = Field(..., description="APY in basis points (500 = 5%), as in PoolResponse")
+
+
+class ApyHistoryResponse(BaseModel):
+    pool_id: str
+    # Oldest first. Empty when the pool's strategy has no historical source, which
+    # is a normal state — clients render no chart rather than treating it as an error.
+    points: list[ApyHistoryPoint]
+
+
 class DepositQuoteResponse(BaseModel):
     quote_id: str
     pool_id: str

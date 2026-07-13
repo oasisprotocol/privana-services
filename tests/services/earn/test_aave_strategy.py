@@ -1,5 +1,7 @@
 import asyncio
+import time
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -470,6 +472,95 @@ async def test_bridge_raises_after_max_poll_attempts(aave_client, privana) -> No
         await strategy.deposit_to_earn(1_000_000)
 
     aave_client.supply.assert_not_called()
+
+
+LLAMA_POOL = "7e0661bf-8cf3-45e6-9424-31916d4c7b84"
+
+
+def _chart_point(days_ago: int, apy: float) -> dict:
+    stamp = datetime.fromtimestamp(time.time() - days_ago * 86400, tz=timezone.utc)
+    return {"timestamp": stamp.isoformat().replace("+00:00", "Z"), "apy": apy}
+
+
+def _history_strategy(aave_client, privana, llama, pool_id=LLAMA_POOL):
+    from src.services.earn.strategies.aave import AaveStrategy
+
+    with patch("src.services.earn.strategies.aave.load_settings", return_value=_strategy_settings()):
+        return AaveStrategy(
+            client=aave_client,
+            asset_address=ASSET_ADDRESS,
+            token_id=TOKEN_ID,
+            privana_client=privana,
+            defillama_pool_id=pool_id,
+            defillama_client=llama,
+        )
+
+
+@pytest.mark.asyncio
+async def test_get_apy_history_is_empty_without_a_configured_pool(strategy) -> None:
+    # No DefiLlama pool configured is a normal state, not an error: no chart.
+    assert await strategy.get_apy_history() == []
+
+
+@pytest.mark.asyncio
+async def test_get_apy_history_converts_percent_to_bps(aave_client, privana) -> None:
+    llama = MagicMock()
+    llama.get_pool_chart = AsyncMock(return_value=[_chart_point(1, 3.14677)])
+
+    points = await _history_strategy(aave_client, privana, llama).get_apy_history()
+
+    assert [p.apy_bps for p in points] == [315]
+
+
+@pytest.mark.asyncio
+async def test_get_apy_history_windows_to_recent_days(aave_client, privana) -> None:
+    llama = MagicMock()
+    llama.get_pool_chart = AsyncMock(
+        return_value=[_chart_point(90, 5.0), _chart_point(10, 4.0), _chart_point(1, 3.0)]
+    )
+
+    windowed = await _history_strategy(aave_client, privana, llama).get_apy_history(days=30)
+    everything = await _history_strategy(aave_client, privana, llama).get_apy_history()
+
+    assert [p.apy_bps for p in windowed] == [400, 300]
+    assert [p.apy_bps for p in everything] == [500, 400, 300]
+
+
+@pytest.mark.asyncio
+async def test_get_apy_history_returns_oldest_first(aave_client, privana) -> None:
+    llama = MagicMock()
+    llama.get_pool_chart = AsyncMock(
+        return_value=[_chart_point(1, 3.0), _chart_point(20, 5.0), _chart_point(10, 4.0)]
+    )
+
+    points = await _history_strategy(aave_client, privana, llama).get_apy_history()
+
+    assert [p.apy_bps for p in points] == [500, 400, 300]
+
+
+@pytest.mark.asyncio
+async def test_get_apy_history_degrades_when_defillama_fails(aave_client, privana) -> None:
+    # The chart is decoration on a working pool; a dead third party must not take
+    # the pool's endpoint down with it.
+    llama = MagicMock()
+    llama.get_pool_chart = AsyncMock(side_effect=RuntimeError("llama down"))
+
+    assert await _history_strategy(aave_client, privana, llama).get_apy_history() == []
+
+
+@pytest.mark.asyncio
+async def test_get_apy_history_skips_points_missing_apy(aave_client, privana) -> None:
+    llama = MagicMock()
+    llama.get_pool_chart = AsyncMock(
+        return_value=[
+            _chart_point(2, 3.0),
+            {"timestamp": _chart_point(1, 0)["timestamp"], "apy": None},
+        ]
+    )
+
+    points = await _history_strategy(aave_client, privana, llama).get_apy_history()
+
+    assert [p.apy_bps for p in points] == [300]
 
 
 _ = asyncio

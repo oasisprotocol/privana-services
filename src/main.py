@@ -59,7 +59,9 @@ async def lifespan(_app: FastAPI):
 
     try:
         registered = await register_aave_strategies_from_config(
-            get_strategy_registry(), settings.aave_pool_assets,
+            get_strategy_registry(),
+            settings.aave_pool_assets,
+            settings.defillama_pool_ids,
         )
         if registered:
             logger.info("Earn strategy registry: %d Aave pool(s) registered", registered)

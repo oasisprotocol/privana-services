@@ -113,10 +113,8 @@ def _stub_executor(settings):
 
 
 async def _drain_background(pipeline):
-    for _ in range(50):
-        await asyncio.sleep(0)
-        if not pipeline._tasks:
-            return
+    while pipeline._tasks:
+        await asyncio.gather(*list(pipeline._tasks), return_exceptions=True)
 
 
 class TestLifiSwapEndToEnd:

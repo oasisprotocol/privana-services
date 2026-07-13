@@ -138,10 +138,9 @@ async def deposit(payload: DepositRequest) -> DepositResponse:
             nonce=payload.nonce,
             signature=payload.signature,
         )
-        return DepositResponse(
-            deposit_id=result.get("tx_hash", ""),
-            **result,
-        )
+        # An on-chain revert is a settled outcome, reported as status="failed" on a
+        # 200. Only a request we could not act on at all is an HTTP error.
+        return DepositResponse(**result)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -157,10 +156,7 @@ async def withdraw(payload: WithdrawRequest) -> WithdrawResponse:
             nonce=payload.nonce,
             signature=payload.signature,
         )
-        return WithdrawResponse(
-            withdraw_id=result.get("tx_hash", ""),
-            **result,
-        )
+        return WithdrawResponse(**result)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

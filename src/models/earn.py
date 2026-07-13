@@ -102,6 +102,7 @@ class DepositRequest(BaseModel):
 
 
 class DepositResponse(BaseModel):
+    # Same value GET /v1/operations/unsettled reports as operation_id, not a tx hash.
     deposit_id: str
     pool_id: str
     amount: str
@@ -109,6 +110,7 @@ class DepositResponse(BaseModel):
     exchange_rate: Optional[str] = None
     tx_hash: Optional[str] = None
     status: str
+    error: Optional[str] = None
 
 
 class WithdrawRequest(BaseModel):
@@ -132,6 +134,7 @@ class WithdrawRequest(BaseModel):
 
 
 class WithdrawResponse(BaseModel):
+    # Same value GET /v1/operations/unsettled reports as operation_id, not a tx hash.
     withdraw_id: str
     pool_id: str
     amount: str
@@ -139,6 +142,7 @@ class WithdrawResponse(BaseModel):
     exchange_rate: Optional[str] = None
     tx_hash: Optional[str] = None
     status: str
+    error: Optional[str] = None
 
 
 class BalanceResponse(BaseModel):

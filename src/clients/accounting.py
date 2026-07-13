@@ -42,6 +42,14 @@ async def _request_with_retry(client: httpx.AsyncClient, method: str, url: str, 
                 raise
             logger.warning(f"Accounting API request failed (attempt {attempt + 1}), retrying: {exc}")
             await asyncio.sleep(RETRY_DELAY * (attempt + 1))
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code < 500 or attempt == MAX_RETRIES - 1:
+                raise
+            logger.warning(
+                f"Accounting API returned {exc.response.status_code} "
+                f"(attempt {attempt + 1}), retrying"
+            )
+            await asyncio.sleep(RETRY_DELAY * (attempt + 1))
 
 
 class AccountingClient:
@@ -98,18 +106,26 @@ class AccountingClient:
 
     async def _authenticated_request(self, method: str, url: str) -> httpx.Response:
         await self._ensure_authenticated()
-        response = await self.client.request(method, url, headers=self._auth_headers())
-        is_auth_error = response.status_code == 401 or (
-            response.status_code == 400 and "SIWE" in response.text
-        )
-        if is_auth_error:
-            self._siwe_token = None
-            self._jwt_token = None
-            self._auth_timestamp = None
-            await self._ensure_authenticated()
+        for attempt in range(MAX_RETRIES):
             response = await self.client.request(method, url, headers=self._auth_headers())
-        response.raise_for_status()
-        return response
+            is_auth_error = response.status_code == 401 or (
+                response.status_code == 400 and "SIWE" in response.text
+            )
+            if is_auth_error:
+                self._siwe_token = None
+                self._jwt_token = None
+                self._auth_timestamp = None
+                await self._ensure_authenticated()
+                response = await self.client.request(method, url, headers=self._auth_headers())
+            if response.status_code >= 500 and attempt < MAX_RETRIES - 1:
+                logger.warning(
+                    f"Accounting API returned {response.status_code} "
+                    f"(attempt {attempt + 1}), retrying"
+                )
+                await asyncio.sleep(RETRY_DELAY * (attempt + 1))
+                continue
+            response.raise_for_status()
+            return response
 
     async def get_lp_balance(self, token_id: str) -> Balance:
         response = await self._authenticated_request(

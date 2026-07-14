@@ -2,9 +2,6 @@ import time
 from dataclasses import replace
 from unittest.mock import AsyncMock, MagicMock
 
-import pytest
-
-from src.core.config import load_settings
 from src.core.fees import calculate_fee
 from src.models.common import TokenInfo
 
@@ -237,6 +234,7 @@ class TestRefund:
 class TestRecovery:
     def _insert_swap(self, test_db, swap_id, step, status="executing"):
         import time as _t
+
         from src.core.db import db_write
         now = int(_t.time())
         db_write(
@@ -263,9 +261,10 @@ class TestRecovery:
         assert "manual" in credit_row["error"]
 
     async def test_internal_swaps_untouched(self, test_db, settings):
-        from src.services.swap.lifi_pipeline import recover_inflight_lifi_swaps
         import time as _t
+
         from src.core.db import db_write
+        from src.services.swap.lifi_pipeline import recover_inflight_lifi_swaps
         now = int(_t.time())
         db_write(
             test_db,
@@ -284,8 +283,24 @@ class TestRecovery:
 class TestExecutorDispatch:
     async def test_lifi_venue_routes_to_pipeline(self, test_db, settings, insert_quote):
         from unittest.mock import patch
-        insert_quote("q_disp", venue="lifi", user_address=USER,
+
+        from eth_account import Account
+
+        from src.core.eip712 import sign_transfer
+
+        signer_key = "0x" + "22" * 32
+        signer = Account.from_key(signer_key).address
+        insert_quote("q_disp", venue="lifi", user_address=signer.lower(),
                      from_token_id=FROM_TOKEN, to_token_id=TO_TOKEN)
+        sig = sign_transfer(
+            private_key=signer_key,
+            chain_id=settings.accounting_chain_id,
+            verifying_contract=settings.accounting_contract_address,
+            to_address=settings.liquidity_provider_address,
+            token_id=FROM_TOKEN,
+            amount=1000000,
+            nonce=5,
+        )
         fake_record = MagicMock()
         fake_pipeline = MagicMock()
         fake_pipeline.launch = AsyncMock(return_value=fake_record)
@@ -295,6 +310,6 @@ class TestExecutorDispatch:
              patch("src.services.swap.executor.get_lifi_pipeline", return_value=fake_pipeline):
             from src.services.swap.executor import SwapExecutor
             executor = SwapExecutor()
-            result = await executor.execute_swap("q_disp", USER, 5, "0x" + "ab" * 65)
+            result = await executor.execute_swap("q_disp", 5, sig)
         assert result is fake_record
         fake_pipeline.launch.assert_awaited_once()

@@ -1,10 +1,7 @@
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
-
 from src.models.api import QuoteResponse
-from src.models.swap import SwapRecord, SwapStatus
-
+from src.models.swap import SwapRecord
 
 USDC_TOKEN_ID = "0x330ba47d00c7ce3018deee017b319fd7cc6473a2ddc9e6eba6ebb4207be15279"
 WETH_TOKEN_ID = "0x335b5cccd1e63b2fe79863a0db73fce430e4e66902e2b78424f8662621e29fb7"
@@ -128,7 +125,6 @@ class TestSwapRoute:
 
             r = await api_client.post("/v1/swap", json={
                 "quote_id": "quote-123",
-                "user_address": USER_ADDRESS,
                 "input_nonce": 0,
                 "input_signature": "0x" + "aa" * 65,
             })
@@ -147,7 +143,6 @@ class TestSwapRoute:
 
             r = await api_client.post("/v1/swap", json={
                 "quote_id": "expired-quote",
-                "user_address": USER_ADDRESS,
                 "input_nonce": 0,
                 "input_signature": "0x" + "aa" * 65,
             })
@@ -162,7 +157,6 @@ class TestSwapRoute:
 
             r = await api_client.post("/v1/swap", json={
                 "quote_id": "quote-123",
-                "user_address": USER_ADDRESS,
                 "input_nonce": 0,
                 "input_signature": "0x" + "aa" * 65,
             })
@@ -179,7 +173,6 @@ class TestSwapRoute:
 
             r = await api_client.post("/v1/swap", json={
                 "quote_id": "quote-123",
-                "user_address": USER_ADDRESS,
                 "input_nonce": 0,
                 "input_signature": "0x" + "aa" * 65,
             })

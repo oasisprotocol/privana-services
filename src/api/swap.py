@@ -8,8 +8,8 @@ from src.models.api import (
     SwapResponse,
     SwapStatusResponse,
 )
-from src.services.swap.quote_service import get_quote_service
 from src.services.swap.executor import get_swap_executor
+from src.services.swap.quote_service import get_quote_service
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +46,6 @@ async def execute_swap(payload: SwapRequest) -> SwapResponse:
         executor = get_swap_executor()
         swap = await executor.execute_swap(
             quote_id=payload.quote_id,
-            user_address=payload.user_address,
             input_nonce=payload.input_nonce,
             input_signature=payload.input_signature,
         )

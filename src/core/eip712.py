@@ -1,5 +1,5 @@
 from eth_account import Account
-
+from eth_account.messages import encode_typed_data
 
 EIP712_DOMAIN_TYPE = {
     "EIP712Domain": [
@@ -73,6 +73,43 @@ def sign_transfer(
     )
 
     return "0x" + signed.signature.hex()
+
+
+def recover_transfer_signer(
+    chain_id: int,
+    verifying_contract: str,
+    to_address: str,
+    token_id: str,
+    amount: int,
+    nonce: int,
+    signature: str,
+) -> str:
+    """Recover the signer of an EIP-712 ``Transfer`` message.
+
+    The accounting contract derives the sender from the signature rather
+    than trusting a caller-supplied address, so the API does the same:
+    whoever signed the input transfer IS the user.
+    """
+    domain_data = {
+        "name": "AccountingModule",
+        "version": "1",
+        "chainId": chain_id,
+        "verifyingContract": verifying_contract,
+    }
+
+    message_data = {
+        "toAddress": to_address,
+        "tokenId": _to_bytes32(token_id),
+        "amount": amount,
+        "nonce": nonce,
+    }
+
+    signable = encode_typed_data(
+        domain_data=domain_data,
+        message_types=TRANSFER_TYPES,
+        message_data=message_data,
+    )
+    return Account.recover_message(signable, signature=signature)
 
 
 def sign_withdraw_consent(

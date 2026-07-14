@@ -34,7 +34,6 @@ class QuoteResponse(BaseModel):
 
 class SwapRequest(BaseModel):
     quote_id: str = Field(..., description="Quote ID from GET /v1/quote")
-    user_address: str = Field(..., description="User wallet address")
     input_nonce: int = Field(..., description="Transfer nonce for input token")
     input_signature: str = Field(..., description="EIP-712 transfer signature from user")
 

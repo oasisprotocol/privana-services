@@ -2,14 +2,31 @@ import asyncio
 from dataclasses import replace
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
+from eth_account import Account
 
 from src.core.config import load_settings
+from src.core.eip712 import sign_transfer
 from src.models.common import Balance, TokenInfo
 
-USER = "0x" + "a" * 40
+USER_SK = "0x" + "11" * 32
+USER = Account.from_key(USER_SK).address
+LP_ADDRESS = "0x152E6a7125665764a4F1F1df80E8f5D49Bf0239c"
 FROM_TOKEN = "0x" + "aa" * 32
 TO_TOKEN = "0x" + "bb" * 32
+
+
+def _sign_input(settings):
+    return sign_transfer(
+        private_key=USER_SK,
+        chain_id=settings.accounting_chain_id,
+        verifying_contract=settings.accounting_contract_address,
+        to_address=LP_ADDRESS,
+        token_id=FROM_TOKEN,
+        amount=1000000,
+        nonce=5,
+    )
+
+
 LOW_BALANCE = Balance(user_address="0xlp", token_id=TO_TOKEN, balance="1")
 FROM_INFO = TokenInfo(
     token_id=FROM_TOKEN, token_type=1, token_type_name="ERC20", data="0x00",
@@ -47,7 +64,7 @@ def _stub_quote_service(lifi_enabled=True):
         load_settings(),
         fee_bps=10,
         quote_ttl=300,
-        liquidity_provider_address="0x152E6a7125665764a4F1F1df80E8f5D49Bf0239c",
+        liquidity_provider_address=LP_ADDRESS,
         lifi_execution_enabled=lifi_enabled,
         lifi_max_swap_amount_usd=0,
     )
@@ -148,8 +165,8 @@ class TestLifiSwapEndToEnd:
         quote_id = quote_resp.json()["quote_id"]
 
         swap_resp = await api_client.post("/v1/swap", json={
-            "quote_id": quote_id, "user_address": USER,
-            "input_nonce": 5, "input_signature": "0x" + "ab" * 65,
+            "quote_id": quote_id,
+            "input_nonce": 5, "input_signature": _sign_input(settings),
         })
         assert swap_resp.status_code == 200
         body = swap_resp.json()
@@ -175,8 +192,8 @@ class TestLifiSwapEndToEnd:
         quote_id = quote_resp.json()["quote_id"]
 
         swap_resp = await api_client.post("/v1/swap", json={
-            "quote_id": quote_id, "user_address": USER,
-            "input_nonce": 5, "input_signature": "0x" + "ab" * 65,
+            "quote_id": quote_id,
+            "input_nonce": 5, "input_signature": _sign_input(settings),
         })
         assert swap_resp.json()["status"] == "executing"
 

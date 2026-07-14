@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from datetime import datetime
 from typing import Awaitable, Callable, Optional, TypeVar
 
 from eth_account import Account
@@ -42,19 +41,6 @@ DEFAULT_POLL_INTERVAL_SEC = 3.0
 DEFAULT_MAX_BRIDGE_POLL_ATTEMPTS = 200
 
 _ACCEPTED_SUBMISSION_STATUSES = frozenset({"success", "pending", "accepted", "ok", "submitted"})
-
-
-def _parse_timestamp(value: object) -> Optional[int]:
-    """DefiLlama stamps points as ISO-8601 ('2026-07-13T10:01:32.796Z'). Accept a
-    raw epoch too, so a future source change doesn't silently drop every point."""
-    if isinstance(value, (int, float)):
-        return int(value)
-    if isinstance(value, str):
-        try:
-            return int(datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp())
-        except ValueError:
-            return None
-    return None
 
 
 def _network_for_chain(chain_id: int) -> Network:
@@ -168,19 +154,11 @@ class AaveStrategy(BaseStrategy):
         if days is not None:
             cutoff = int(time.time()) - days * 86400
 
-        points: list[ApyPoint] = []
-        for entry in raw:
-            timestamp = _parse_timestamp(entry.get("timestamp"))
-            apy = entry.get("apy")
-            if timestamp is None or apy is None or timestamp < cutoff:
-                continue
-            # DefiLlama reports apy as percent in float (e.g. 3.14159); the rest of the
-            # system speaks integer bps, and the UI rounds to 2 decimal points
-            # which is exactly 1 bps, so there is no rounding error here.
-            points.append(ApyPoint(timestamp=timestamp, apy_bps=round(apy * 100)))
-
-        points.sort(key=lambda p: p.timestamp)
-        return points
+        return [
+            ApyPoint(timestamp=p.timestamp, apy_bps=p.apy_bps)
+            for p in raw
+            if p.timestamp >= cutoff
+        ]
 
     async def deposit_to_earn(self, amount: int) -> None:
         """Bridge `amount` from accounting on Sapphire to the LP EOA on Base,

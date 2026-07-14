@@ -1,4 +1,4 @@
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
@@ -44,12 +44,56 @@ def client():
 
 
 class TestGetPoolChart:
-    async def test_returns_points_oldest_first(self, client):
+    async def test_converts_percent_to_bps(self, client):
         client.client.get.return_value = _response(SAMPLE_CHART)
 
         points = await client.get_pool_chart(POOL_UUID)
 
-        assert [p["apy"] for p in points] == [3.2, 3.14677]
+        # DefiLlama speaks percent floats; everything downstream speaks integer bps.
+        assert [p.apy_bps for p in points] == [320, 315]
+
+    async def test_returns_points_oldest_first(self, client):
+        client.client.get.return_value = _response(
+            {
+                "status": "success",
+                "data": [
+                    {"timestamp": "2026-07-12T23:01:20.944Z", "apy": 3.14677},
+                    {"timestamp": "2026-07-11T23:01:20.944Z", "apy": 3.2},
+                ],
+            }
+        )
+
+        points = await client.get_pool_chart(POOL_UUID)
+
+        assert [p.apy_bps for p in points] == [320, 315]
+        assert points[0].timestamp < points[1].timestamp
+
+    async def test_accepts_a_raw_epoch_timestamp(self, client):
+        # A source that switches from ISO-8601 to epoch must not silently drop
+        # every point.
+        client.client.get.return_value = _response(
+            {"status": "success", "data": [{"timestamp": 1752278480, "apy": 3.2}]}
+        )
+
+        points = await client.get_pool_chart(POOL_UUID)
+
+        assert [(p.timestamp, p.apy_bps) for p in points] == [(1752278480, 320)]
+
+    async def test_skips_points_missing_apy_or_timestamp(self, client):
+        client.client.get.return_value = _response(
+            {
+                "status": "success",
+                "data": [
+                    {"timestamp": "2026-07-11T23:01:20.944Z", "apy": 3.2},
+                    {"timestamp": "2026-07-12T23:01:20.944Z", "apy": None},
+                    {"timestamp": "not-a-date", "apy": 4.0},
+                ],
+            }
+        )
+
+        points = await client.get_pool_chart(POOL_UUID)
+
+        assert [p.apy_bps for p in points] == [320]
 
     async def test_caches_between_calls(self, client):
         client.client.get.return_value = _response(SAMPLE_CHART)

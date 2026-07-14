@@ -1,5 +1,7 @@
 import logging
 import time
+from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Optional
 
 import httpx
@@ -15,6 +17,32 @@ CHART_TTL_SEC = 3600
 META_TTL_SEC = 24 * 3600
 
 
+@dataclass(frozen=True, slots=True)
+class ChartPoint:
+    """One point of a pool's APY chart, in the units the rest of the system uses.
+
+    Kept instead of DefiLlama's raw row: of its eight fields we read two, and the
+    cache holds the full series per pool for an hour, so the raw dicts cost ~15x
+    what this does.
+    """
+
+    timestamp: int  # unix seconds
+    apy_bps: int
+
+
+def _parse_timestamp(value: object) -> Optional[int]:
+    """DefiLlama stamps points as ISO-8601 ('2026-07-13T10:01:32.796Z'). Accept a
+    raw epoch too, so a future source change doesn't silently drop every point."""
+    if isinstance(value, (int, float)):
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp())
+        except ValueError:
+            return None
+    return None
+
+
 class DefiLlamaClient:
     """Read-only client for DefiLlama's yields API.
 
@@ -26,9 +54,7 @@ class DefiLlamaClient:
 
     def __init__(self, base_url: str = DEFILLAMA_YIELDS_URL) -> None:
         self.base_url = base_url.rstrip("/")
-        self.client = httpx.AsyncClient(
-            timeout=15.0, headers={"accept": "application/json"}
-        )
+        self.client = httpx.AsyncClient(timeout=15.0, headers={"accept": "application/json"})
         self._cache: dict[str, tuple[float, Any]] = {}
 
     def _cached(self, key: str, ttl: int) -> Optional[Any]:
@@ -44,11 +70,13 @@ class DefiLlamaClient:
     def _store(self, key: str, value: Any) -> None:
         self._cache[key] = (time.monotonic(), value)
 
-    async def get_pool_chart(self, pool_uuid: str) -> list[dict]:
+    async def get_pool_chart(self, pool_uuid: str) -> list[ChartPoint]:
         """Daily APY history for a DefiLlama pool, oldest first.
 
-        Each point is ``{timestamp, apy, apyBase, apyReward, tvlUsd}`` with apy
-        as a percent float (3.14677 = 3.14677%).
+        DefiLlama reports apy as a percent float (3.14677 = 3.14677%); the rest of
+        the system speaks integer bps, and the UI rounds to two decimals which is
+        exactly 1 bps, so nothing is lost in the conversion. Points DefiLlama
+        reports without a usable timestamp or apy are dropped.
         """
         cache_key = f"chart:{pool_uuid}"
         cached = self._cached(cache_key, CHART_TTL_SEC)
@@ -61,7 +89,15 @@ class DefiLlamaClient:
         if body.get("status") != "success":
             raise ValueError(f"DefiLlama chart for {pool_uuid} returned {body.get('status')}")
 
-        points = body.get("data") or []
+        points = []
+        for entry in body.get("data") or []:
+            timestamp = _parse_timestamp(entry.get("timestamp"))
+            apy = entry.get("apy")
+            if timestamp is None or apy is None:
+                continue
+            points.append(ChartPoint(timestamp=timestamp, apy_bps=round(apy * 100)))
+
+        points.sort(key=lambda p: p.timestamp)
         self._store(cache_key, points)
         return points
 

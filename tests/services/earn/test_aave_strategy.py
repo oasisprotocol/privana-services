@@ -1,14 +1,13 @@
 import asyncio
 import time
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from src.clients.defillama import ChartPoint
 from src.core.config import load_settings
 from src.models.settings import Settings
-
 
 ASSET_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
 TOKEN_ID = "0xc719650e9f4b0f27d956638c54518932ef9d15e720a1a2b2850250bcd0816514"
@@ -138,7 +137,9 @@ def privana():
 def strategy(aave_client, privana):
     from src.services.earn.strategies.aave import AaveStrategy
 
-    with patch("src.services.earn.strategies.aave.load_settings", return_value=_strategy_settings()):
+    with patch(
+        "src.services.earn.strategies.aave.load_settings", return_value=_strategy_settings()
+    ):
         return AaveStrategy(
             client=aave_client,
             asset_address=ASSET_ADDRESS,
@@ -202,7 +203,9 @@ async def test_deposit_to_earn_bridges_then_supplies(strategy, aave_client, priv
         ),
     ]
     privana.get_withdrawal_info.return_value = _WithdrawalInfo(
-        index=42, resolved=True, tx_identifier="0xresolved",
+        index=42,
+        resolved=True,
+        tx_identifier="0xresolved",
     )
     aave_client.get_allowance.return_value = 0
     aave_client.supply.return_value = "0xsupply"
@@ -234,7 +237,9 @@ async def test_deposit_to_earn_skips_approve_when_allowance_sufficient(
         ),
     ]
     privana.get_withdrawal_info.return_value = _WithdrawalInfo(
-        index=10, resolved=True, tx_identifier="0xresolved",
+        index=10,
+        resolved=True,
+        tx_identifier="0xresolved",
     )
     aave_client.get_allowance.return_value = 10_000_000_000
     aave_client.supply.return_value = "0xsupply"
@@ -313,7 +318,9 @@ async def test_withdraw_from_earn_redeems_transfers_and_polls_until_credited(
     assert address_request.chain_type == "evm"
 
     aave_client.transfer_erc20.assert_called_once_with(
-        ASSET_ADDRESS, DEPOSIT_ADDRESS_BASE, 1_000_000,
+        ASSET_ADDRESS,
+        DEPOSIT_ADDRESS_BASE,
+        1_000_000,
     )
 
     privana.check_deposit.assert_awaited_once()
@@ -326,9 +333,7 @@ async def test_withdraw_from_earn_redeems_transfers_and_polls_until_credited(
 
 
 @pytest.mark.asyncio
-async def test_withdraw_from_earn_uses_pre_balance_baseline(
-    strategy, aave_client, privana
-) -> None:
+async def test_withdraw_from_earn_uses_pre_balance_baseline(strategy, aave_client, privana) -> None:
     aave_client.withdraw.return_value = "0xredeem"
     aave_client.transfer_erc20.return_value = "0xtransfer"
     privana.get_balance.side_effect = [
@@ -355,9 +360,7 @@ async def test_withdraw_from_earn_rejects_non_positive_amount(strategy, aave_cli
 
 
 @pytest.mark.asyncio
-async def test_withdraw_from_earn_propagates_aave_failure(
-    strategy, aave_client, privana
-) -> None:
+async def test_withdraw_from_earn_propagates_aave_failure(strategy, aave_client, privana) -> None:
     aave_client.withdraw.side_effect = RuntimeError("aave reverted")
 
     with pytest.raises(RuntimeError, match="aave reverted"):
@@ -393,11 +396,13 @@ async def test_is_healthy_false_when_rate_read_raises(strategy, aave_client) -> 
 async def test_retry_on_network_error_recovers_from_transient_drop(strategy) -> None:
     from privana.client.errors import NetworkError
 
-    factory = MagicMock(side_effect=[
-        NetworkError("Server disconnected"),
-        NetworkError("Server disconnected again"),
-        "ok",
-    ])
+    factory = MagicMock(
+        side_effect=[
+            NetworkError("Server disconnected"),
+            NetworkError("Server disconnected again"),
+            "ok",
+        ]
+    )
 
     async def call() -> str:
         return factory()
@@ -409,11 +414,10 @@ async def test_retry_on_network_error_recovers_from_transient_drop(strategy) -> 
 
 
 @pytest.mark.asyncio
-async def test_bridge_fails_fast_when_request_rejected(
-    strategy, aave_client, privana
-) -> None:
+async def test_bridge_fails_fast_when_request_rejected(strategy, aave_client, privana) -> None:
     privana.request_withdrawal.return_value = _TxSubmission(
-        submission_id="sub-x", status="rejected",
+        submission_id="sub-x",
+        status="rejected",
     )
 
     with pytest.raises(RuntimeError, match="Withdrawal request rejected.*rejected"):
@@ -438,7 +442,9 @@ async def test_bridge_survives_transient_network_error_mid_poll(
         ),
     ]
     privana.get_withdrawal_info.return_value = _WithdrawalInfo(
-        index=99, resolved=True, tx_identifier="0xresolved",
+        index=99,
+        resolved=True,
+        tx_identifier="0xresolved",
     )
     aave_client.get_allowance.return_value = 10_000_000
 
@@ -454,11 +460,14 @@ async def test_bridge_raises_after_max_poll_attempts(aave_client, privana) -> No
 
     privana.get_pending_withdrawals = AsyncMock(
         return_value=_PendingWithdrawalsResponse(
-            user_address=POOL_ADDRESS, pending_withdrawals=[],
+            user_address=POOL_ADDRESS,
+            pending_withdrawals=[],
         ),
     )
 
-    with patch("src.services.earn.strategies.aave.load_settings", return_value=_strategy_settings()):
+    with patch(
+        "src.services.earn.strategies.aave.load_settings", return_value=_strategy_settings()
+    ):
         strategy = AaveStrategy(
             client=aave_client,
             asset_address=ASSET_ADDRESS,
@@ -477,15 +486,18 @@ async def test_bridge_raises_after_max_poll_attempts(aave_client, privana) -> No
 LLAMA_POOL = "7e0661bf-8cf3-45e6-9424-31916d4c7b84"
 
 
-def _chart_point(days_ago: int, apy: float) -> dict:
-    stamp = datetime.fromtimestamp(time.time() - days_ago * 86400, tz=timezone.utc)
-    return {"timestamp": stamp.isoformat().replace("+00:00", "Z"), "apy": apy}
+def _chart_point(days_ago: int, apy_bps: int) -> ChartPoint:
+    # The client already parsed DefiLlama's wire format; the strategy only ever
+    # sees points in bps.
+    return ChartPoint(timestamp=int(time.time() - days_ago * 86400), apy_bps=apy_bps)
 
 
 def _history_strategy(aave_client, privana, llama, pool_id=LLAMA_POOL):
     from src.services.earn.strategies.aave import AaveStrategy
 
-    with patch("src.services.earn.strategies.aave.load_settings", return_value=_strategy_settings()):
+    with patch(
+        "src.services.earn.strategies.aave.load_settings", return_value=_strategy_settings()
+    ):
         return AaveStrategy(
             client=aave_client,
             asset_address=ASSET_ADDRESS,
@@ -503,20 +515,10 @@ async def test_get_apy_history_is_empty_without_a_configured_pool(strategy) -> N
 
 
 @pytest.mark.asyncio
-async def test_get_apy_history_converts_percent_to_bps(aave_client, privana) -> None:
-    llama = MagicMock()
-    llama.get_pool_chart = AsyncMock(return_value=[_chart_point(1, 3.14677)])
-
-    points = await _history_strategy(aave_client, privana, llama).get_apy_history()
-
-    assert [p.apy_bps for p in points] == [315]
-
-
-@pytest.mark.asyncio
 async def test_get_apy_history_windows_to_recent_days(aave_client, privana) -> None:
     llama = MagicMock()
     llama.get_pool_chart = AsyncMock(
-        return_value=[_chart_point(90, 5.0), _chart_point(10, 4.0), _chart_point(1, 3.0)]
+        return_value=[_chart_point(90, 500), _chart_point(10, 400), _chart_point(1, 300)]
     )
 
     windowed = await _history_strategy(aave_client, privana, llama).get_apy_history(days=30)
@@ -527,18 +529,6 @@ async def test_get_apy_history_windows_to_recent_days(aave_client, privana) -> N
 
 
 @pytest.mark.asyncio
-async def test_get_apy_history_returns_oldest_first(aave_client, privana) -> None:
-    llama = MagicMock()
-    llama.get_pool_chart = AsyncMock(
-        return_value=[_chart_point(1, 3.0), _chart_point(20, 5.0), _chart_point(10, 4.0)]
-    )
-
-    points = await _history_strategy(aave_client, privana, llama).get_apy_history()
-
-    assert [p.apy_bps for p in points] == [500, 400, 300]
-
-
-@pytest.mark.asyncio
 async def test_get_apy_history_degrades_when_defillama_fails(aave_client, privana) -> None:
     # The chart is decoration on a working pool; a dead third party must not take
     # the pool's endpoint down with it.
@@ -546,21 +536,6 @@ async def test_get_apy_history_degrades_when_defillama_fails(aave_client, privan
     llama.get_pool_chart = AsyncMock(side_effect=RuntimeError("llama down"))
 
     assert await _history_strategy(aave_client, privana, llama).get_apy_history() == []
-
-
-@pytest.mark.asyncio
-async def test_get_apy_history_skips_points_missing_apy(aave_client, privana) -> None:
-    llama = MagicMock()
-    llama.get_pool_chart = AsyncMock(
-        return_value=[
-            _chart_point(2, 3.0),
-            {"timestamp": _chart_point(1, 0)["timestamp"], "apy": None},
-        ]
-    )
-
-    points = await _history_strategy(aave_client, privana, llama).get_apy_history()
-
-    assert [p.apy_bps for p in points] == [300]
 
 
 _ = asyncio

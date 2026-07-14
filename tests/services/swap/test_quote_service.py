@@ -204,3 +204,129 @@ class TestGetQuote:
         assert call_kwargs.kwargs["to_chain_id"] == 84532
         assert call_kwargs.kwargs["from_token_address"] == "0x8eEDCff0b07609Cfb5e2775dFf21EDbACc30D0df"
         assert call_kwargs.kwargs["to_token_address"] == "0xA9B8D8039cb3FF9d9Fff6decD18EA7bb792e51D3"
+
+
+class TestVenueSelection(TestGetQuote):
+    LOW_BALANCE = Balance(user_address="0xlp", token_id="0xbbb", balance="1")
+
+    async def test_flag_off_lp_short_raises(self, test_db):
+        service = self._make_service()
+        service.settings = replace(service.settings, lifi_execution_enabled=False)
+        service.accounting.get_lp_balance = AsyncMock(return_value=self.LOW_BALANCE)
+        with pytest.raises(ValueError, match="Insufficient liquidity"):
+            await service.get_quote(
+                from_token_id="0xaaa",
+                to_token_id="0xbbb",
+                from_amount="1000000",
+                user_address="0x" + "a" * 40,
+            )
+        assert service.lifi.get_routes.call_count == 1
+
+    async def test_lp_covers_internal_venue_without_extra_lifi_call(self, test_db):
+        service = self._make_service()
+        service.settings = replace(service.settings, lifi_execution_enabled=True)
+        result = await service.get_quote(
+            from_token_id="0xaaa",
+            to_token_id="0xbbb",
+            from_amount="1000000",
+            user_address="0x" + "a" * 40,
+        )
+        assert result.venue == "internal"
+        assert service.lifi.get_routes.call_count == 1
+
+    async def test_lp_short_lifi_routable_selects_lifi_venue(self, test_db):
+        service = self._make_service()
+        service.settings = replace(service.settings, lifi_execution_enabled=True)
+        service._token_map = {"84532": {"chain_id": 1, "tokens": {
+            "0x8eEDCff0b07609Cfb5e2775dFf21EDbACc30D0df": "0xMAINNETUSDC",
+            "0xA9B8D8039cb3FF9d9Fff6decD18EA7bb792e51D3": "0xMAINNETWETH",
+        }}}
+        service.accounting.get_lp_balance = AsyncMock(return_value=self.LOW_BALANCE)
+        result = await service.get_quote(
+            from_token_id="0xaaa",
+            to_token_id="0xbbb",
+            from_amount="1000000",
+            user_address="0x" + "a" * 40,
+        )
+        assert result.venue == "lifi"
+        assert service.lifi.get_routes.call_count == 2
+        real_call = service.lifi.get_routes.call_args_list[1]
+        assert real_call.kwargs["from_chain_id"] == 84532
+        assert real_call.kwargs["from_token_address"] == "0x8eEDCff0b07609Cfb5e2775dFf21EDbACc30D0df"
+        assert real_call.kwargs["to_token_address"] == "0xA9B8D8039cb3FF9d9Fff6decD18EA7bb792e51D3"
+
+    async def test_lp_short_no_lifi_route_raises(self, test_db):
+        service = self._make_service()
+        service.settings = replace(service.settings, lifi_execution_enabled=True)
+        service.accounting.get_lp_balance = AsyncMock(return_value=self.LOW_BALANCE)
+        pricing_routes = {
+            "routes": [{"toAmount": "2000000000000000000",
+                        "toAmountMin": "1950000000000000000",
+                        "steps": [{"tool": "uniswap"}]}]
+        }
+        service.lifi.get_routes = AsyncMock(side_effect=[pricing_routes, {"routes": []}])
+        with pytest.raises(ValueError, match="Insufficient liquidity"):
+            await service.get_quote(
+                from_token_id="0xaaa",
+                to_token_id="0xbbb",
+                from_amount="1000000",
+                user_address="0x" + "a" * 40,
+            )
+
+    async def test_lifi_swap_over_usd_cap_raises(self, test_db):
+        service = self._make_service()
+        service.settings = replace(
+            service.settings, lifi_execution_enabled=True, lifi_max_swap_amount_usd=100
+        )
+        service.accounting.get_lp_balance = AsyncMock(return_value=self.LOW_BALANCE)
+        routes_with_usd = {
+            "routes": [{"toAmount": "2000000000000000000",
+                        "toAmountMin": "1950000000000000000",
+                        "fromAmountUSD": "250.00",
+                        "steps": [{"tool": "uniswap"}]}]
+        }
+        service.lifi.get_routes = AsyncMock(return_value=routes_with_usd)
+        with pytest.raises(ValueError, match="exceeds LiFi routing limit"):
+            await service.get_quote(
+                from_token_id="0xaaa",
+                to_token_id="0xbbb",
+                from_amount="1000000",
+                user_address="0x" + "a" * 40,
+            )
+
+    async def test_lifi_swap_cap_disabled_when_zero(self, test_db):
+        service = self._make_service()
+        service.settings = replace(
+            service.settings, lifi_execution_enabled=True, lifi_max_swap_amount_usd=0
+        )
+        service.accounting.get_lp_balance = AsyncMock(return_value=self.LOW_BALANCE)
+        routes_with_usd = {
+            "routes": [{"toAmount": "2000000000000000000",
+                        "toAmountMin": "1950000000000000000",
+                        "fromAmountUSD": "250.00",
+                        "steps": [{"tool": "uniswap"}]}]
+        }
+        service.lifi.get_routes = AsyncMock(return_value=routes_with_usd)
+        result = await service.get_quote(
+            from_token_id="0xaaa",
+            to_token_id="0xbbb",
+            from_amount="1000000",
+            user_address="0x" + "a" * 40,
+        )
+        assert result.venue == "lifi"
+
+    async def test_lifi_venue_persisted_and_returned_on_dedup(self, test_db):
+        service = self._make_service()
+        service.settings = replace(service.settings, lifi_execution_enabled=True)
+        service.accounting.get_lp_balance = AsyncMock(return_value=self.LOW_BALANCE)
+        user = "0x" + "a" * 40
+        first = await service.get_quote(
+            from_token_id="0xaaa",
+            to_token_id="0xbbb",
+            from_amount="1000000",
+            user_address=user,
+        )
+        assert first.venue == "lifi"
+        existing = await service._find_existing_quote(user, "0xaaa", "0xbbb", "1000000")
+        assert existing is not None
+        assert existing.venue == "lifi"

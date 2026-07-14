@@ -43,3 +43,6 @@ class Settings:
     # Pool id -> DefiLlama pool UUID, for strategies whose APY history we source
     # from DefiLlama. Pools left out simply have no history.
     defillama_pool_ids: str
+
+    lifi_execution_enabled: bool = False
+    lifi_max_swap_amount_usd: int = 0

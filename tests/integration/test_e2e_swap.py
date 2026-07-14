@@ -34,8 +34,8 @@ async def api_client():
     import src.clients.accounting as acct_mod
     import src.clients.lifi as lifi_mod
     import src.clients.sapphire as saph_mod
-    import src.services.swap.quote_service as qs_mod
     import src.services.swap.executor as se_mod
+    import src.services.swap.quote_service as qs_mod
     acct_mod._client_instance = None
     lifi_mod._client_instance = None
     saph_mod._client_instance = None
@@ -136,7 +136,6 @@ class TestSwapEndpoint:
 
         r = await api_client.post("/v1/swap", json={
             "quote_id": quote["quote_id"],
-            "user_address": TEST_USER_ADDRESS,
             "input_nonce": quote["transfer_nonce"],
             "input_signature": sig,
         })
@@ -171,7 +170,6 @@ class TestSwapEndpoint:
 
         r = await api_client.post("/v1/swap", json={
             "quote_id": quote["quote_id"],
-            "user_address": TEST_USER_ADDRESS,
             "input_nonce": quote["transfer_nonce"],
             "input_signature": sig,
         })
@@ -184,7 +182,6 @@ class TestSwapEndpoint:
     async def test_expired_quote_returns_400(self, api_client):
         r = await api_client.post("/v1/swap", json={
             "quote_id": "nonexistent-quote-id",
-            "user_address": TEST_USER_ADDRESS,
             "input_nonce": 0,
             "input_signature": "0x" + "aa" * 65,
         })
@@ -203,7 +200,6 @@ class TestSwapEndpoint:
 
         r = await api_client.post("/v1/swap", json={
             "quote_id": quote["quote_id"],
-            "user_address": TEST_USER_ADDRESS,
             "input_nonce": 0,
             "input_signature": "0xbad",
         })
@@ -234,7 +230,6 @@ class TestSwapStatus:
 
         r = await api_client.post("/v1/swap", json={
             "quote_id": quote["quote_id"],
-            "user_address": TEST_USER_ADDRESS,
             "input_nonce": quote["transfer_nonce"],
             "input_signature": sig,
         })

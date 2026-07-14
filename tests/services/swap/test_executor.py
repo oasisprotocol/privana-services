@@ -3,10 +3,15 @@ import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from eth_account import Account
 from web3 import Web3
 
+from src.core.eip712 import sign_transfer
 from src.models.common import Balance
 from src.models.swap import SwapStatus
+
+USER_SK = "0x" + "11" * 32
+USER_ADDRESS = Account.from_key(USER_SK).address
 
 SUFFICIENT_BALANCE = Balance(
     user_address="0xlp", token_id="0xbbbb", balance="999999999999999999999"
@@ -34,17 +39,8 @@ def _make_executor(settings):
 
 
 class TestSwapStatus:
-    def test_only_three_states(self):
-        assert len(SwapStatus) == 3
-
-    def test_pending_state(self):
-        assert SwapStatus.PENDING.value == "pending"
-
-    def test_completed_state(self):
-        assert SwapStatus.COMPLETED.value == "completed"
-
-    def test_failed_state(self):
-        assert SwapStatus.FAILED.value == "failed"
+    def test_six_states(self):
+        assert len(SwapStatus) == 6
 
 
 class TestValidateQuote:
@@ -52,31 +48,12 @@ class TestValidateQuote:
         insert_quote("expired_q", expires_at=int(time.time()) - 10, user_address="0xuser")
         executor = _make_executor(settings)
         with pytest.raises(ValueError, match="Quote has expired"):
-            executor._validate_quote("expired_q", "0xuser")
+            executor._validate_quote("expired_q")
 
     def test_missing_quote_raises(self, test_db, settings):
         executor = _make_executor(settings)
         with pytest.raises(ValueError, match="Quote not found"):
-            executor._validate_quote("nonexistent", "0xuser")
-
-    def test_wrong_user_raises(self, test_db, settings, insert_quote):
-        insert_quote(
-            "q_wrong_user",
-            user_address="0xd8991364507fafc256eaff950d28618735753476",
-            from_token_id="0xaaaa",
-            to_token_id="0xbbbb",
-            from_amount="1000000",
-            to_amount_gross="45000000000000000",
-            to_amount_estimate="44000000000000000",
-            to_amount_min="43000000000000000",
-            route_tool="okx",
-        )
-        executor = _make_executor(settings)
-        with pytest.raises(ValueError, match="Quote was not created for this user"):
-            executor._validate_quote(
-                "q_wrong_user",
-                "0x0000000000000000000000000000000000000001",
-            )
+            executor._validate_quote("nonexistent")
 
     def test_valid_quote_returns_dict(self, test_db, settings, insert_quote):
         user = "0xd8991364507fafC256EafF950d28618735753476"
@@ -92,7 +69,7 @@ class TestValidateQuote:
             route_tool="okx",
         )
         executor = _make_executor(settings)
-        result = executor._validate_quote("q_valid", user)
+        result = executor._validate_quote("q_valid")
         assert isinstance(result, dict)
         assert result["id"] == "q_valid"
 
@@ -100,11 +77,37 @@ class TestValidateQuote:
 class TestExecuteSwap:
     @pytest.fixture
     def user_address(self):
-        return "0xd8991364507fafC256EafF950d28618735753476"
+        return USER_ADDRESS
 
     @pytest.fixture
-    def input_signature(self):
-        return "0x" + "aa" * 65
+    def input_signature(self, settings):
+        return sign_transfer(
+            private_key=USER_SK,
+            chain_id=settings.accounting_chain_id,
+            verifying_contract=settings.accounting_contract_address,
+            to_address=settings.liquidity_provider_address,
+            token_id="0xaaaa",
+            amount=1000000,
+            nonce=0,
+        )
+
+    async def test_signer_mismatch_rejected(
+        self, test_db, settings, insert_quote, user_address, input_signature
+    ):
+        insert_quote(
+            "q_stranger",
+            user_address="0x" + "9" * 40,
+            from_token_id="0xaaaa",
+            to_token_id="0xbbbb",
+            from_amount="1000000",
+            to_amount_gross="45000000000000000",
+            to_amount_estimate="44000000000000000",
+            to_amount_min="43000000000000000",
+            route_tool="okx",
+        )
+        executor = _make_executor(settings)
+        with pytest.raises(ValueError, match="Quote was not created for this user"):
+            await executor.execute_swap("q_stranger", 0, input_signature)
 
     async def test_successful_swap(self, test_db, settings, insert_quote, user_address, input_signature):
         insert_quote(
@@ -119,7 +122,7 @@ class TestExecuteSwap:
             route_tool="okx",
         )
         executor = _make_executor(settings)
-        result = await executor.execute_swap("q_success", user_address, 0, input_signature)
+        result = await executor.execute_swap("q_success", 0, input_signature)
         assert result.status == SwapStatus.COMPLETED.value
         assert result.swap_tx_hash == "0x" + "ff" * 32
 
@@ -139,7 +142,7 @@ class TestExecuteSwap:
         executor.sapphire.execute_contract_call = MagicMock(
             side_effect=RuntimeError("tx reverted")
         )
-        result = await executor.execute_swap("q_fail", user_address, 0, input_signature)
+        result = await executor.execute_swap("q_fail", 0, input_signature)
         assert result.status == SwapStatus.FAILED.value
         assert "reverted" in result.error.lower()
 
@@ -161,7 +164,7 @@ class TestExecuteSwap:
         low_balance = Balance(user_address="0xlp", token_id="0xbbbb", balance="1")
         executor.accounting.get_lp_balance = AsyncMock(return_value=low_balance)
         with pytest.raises(ValueError, match="Insufficient liquidity"):
-            await executor.execute_swap("q_no_liq", user_address, 0, input_signature)
+            await executor.execute_swap("q_no_liq", 0, input_signature)
 
     async def test_creates_swap_record_before_calling_sapphire(
         self, test_db, settings, insert_quote, user_address, input_signature
@@ -189,7 +192,7 @@ class TestExecuteSwap:
             return original_execute(*args, **kwargs)
 
         executor.sapphire.execute_contract_call = MagicMock(side_effect=check_record_exists)
-        await executor.execute_swap("q_record", user_address, 0, input_signature)
+        await executor.execute_swap("q_record", 0, input_signature)
 
     async def test_passes_correct_params_to_sapphire(
         self, test_db, settings, insert_quote, user_address, input_signature
@@ -206,7 +209,7 @@ class TestExecuteSwap:
             route_tool="okx",
         )
         executor = _make_executor(settings)
-        await executor.execute_swap("q_params", user_address, 0, input_signature)
+        await executor.execute_swap("q_params", 0, input_signature)
 
         call_kwargs = executor.sapphire.execute_contract_call.call_args
         assert call_kwargs.kwargs["function_name"] == "swap"
@@ -253,7 +256,7 @@ class TestExecuteSwap:
 
             from src.services.swap.executor import SwapExecutor
             executor = SwapExecutor()
-            await executor.execute_swap("q_sign", user_address, 0, input_signature)
+            await executor.execute_swap("q_sign", 0, input_signature)
 
             mock_sign.assert_called_once_with(
                 private_key=settings.liquidity_provider_secret_key,
@@ -304,8 +307,8 @@ class TestExecuteSwap:
         executor.accounting.get_transfer_nonce = AsyncMock(side_effect=tracked_get_nonce)
 
         await asyncio.gather(
-            executor.execute_swap("q_lock1", user_address, 0, input_signature),
-            executor.execute_swap("q_lock2", user_address, 0, input_signature),
+            executor.execute_swap("q_lock1", 0, input_signature),
+            executor.execute_swap("q_lock2", 0, input_signature),
         )
 
         assert len(nonce_call_times) == 2

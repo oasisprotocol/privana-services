@@ -11,9 +11,10 @@ from src.clients.sapphire import get_sapphire_client
 from src.core.abi import load_abi
 from src.core.config import load_settings
 from src.core.db import db_write, get_db
-from src.core.eip712 import sign_transfer
+from src.core.eip712 import recover_transfer_signer, sign_transfer
 from src.core.validation import sanitize_error, validate_signature
-from src.models.swap import SwapRecord, SwapStatus
+from src.models.swap import SwapRecord, SwapStatus, SwapVenue
+from src.services.swap.lifi_pipeline import get_lifi_pipeline
 
 logger = logging.getLogger(__name__)
 
@@ -30,13 +31,31 @@ class SwapExecutor:
     async def execute_swap(
         self,
         quote_id: str,
+        input_nonce: int,
+        input_signature: str,
+    ) -> SwapRecord:
+        quote = self._validate_quote(quote_id)
+        validate_signature(input_signature, "input_signature")
+        user_address = self._recover_signer(quote, input_nonce, input_signature)
+        if quote["user_address"] != user_address.lower():
+            raise ValueError("Quote was not created for this user")
+
+        if quote.get("venue") == SwapVenue.LIFI.value:
+            return await get_lifi_pipeline().launch(
+                quote, user_address, input_nonce, input_signature
+            )
+
+        return await self.execute_swap_internal(
+            quote, user_address, input_nonce, input_signature
+        )
+
+    async def execute_swap_internal(
+        self,
+        quote: dict,
         user_address: str,
         input_nonce: int,
         input_signature: str,
     ) -> SwapRecord:
-        quote = self._validate_quote(quote_id, user_address)
-        validate_signature(input_signature, "input_signature")
-
         lp_balance = await self.accounting.get_lp_balance(quote["to_token_id"])
         if int(lp_balance.balance) < int(quote["to_amount_estimate"]):
             raise ValueError("Insufficient liquidity for this swap")
@@ -51,7 +70,7 @@ class SwapExecutor:
                 from_amount, to_amount_estimate, status, created_at, updated_at)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
-                swap_id, quote_id, user_address.lower(),
+                swap_id, quote["id"], user_address.lower(),
                 quote["from_token_id"], quote["to_token_id"],
                 quote["from_amount"], quote["to_amount_estimate"],
                 SwapStatus.PENDING.value, now, now,
@@ -120,7 +139,7 @@ class SwapExecutor:
 
         return self._get_swap(swap_id)
 
-    def _validate_quote(self, quote_id: str, user_address: str) -> dict:
+    def _validate_quote(self, quote_id: str) -> dict:
         db = get_db()
         row = db.execute("SELECT * FROM quotes WHERE id = ?", (quote_id,)).fetchone()
         if row is None:
@@ -131,10 +150,21 @@ class SwapExecutor:
         if int(time.time()) > quote["expires_at"]:
             raise ValueError("Quote has expired")
 
-        if quote["user_address"] != user_address.lower():
-            raise ValueError("Quote was not created for this user")
-
         return quote
+
+    def _recover_signer(self, quote: dict, input_nonce: int, input_signature: str) -> str:
+        try:
+            return recover_transfer_signer(
+                chain_id=self.settings.accounting_chain_id,
+                verifying_contract=self.settings.accounting_contract_address,
+                to_address=quote["liquidity_provider"],
+                token_id=quote["from_token_id"],
+                amount=int(quote["from_amount"]),
+                nonce=input_nonce,
+                signature=input_signature,
+            )
+        except Exception as exc:
+            raise ValueError("input_signature does not match the quoted transfer") from exc
 
     def _get_swap(self, swap_id: str) -> SwapRecord:
         db = get_db()

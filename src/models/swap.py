@@ -8,8 +8,24 @@ from pydantic import BaseModel
 
 class SwapStatus(str, Enum):
     PENDING = "pending"
+    EXECUTING = "executing"
     COMPLETED = "completed"
     FAILED = "failed"
+    REFUNDING = "refunding"
+    REFUNDED = "refunded"
+
+
+class SwapVenue(str, Enum):
+    INTERNAL = "internal"
+    LIFI = "lifi"
+
+
+class LifiSwapStep(str, Enum):
+    INPUT_TRANSFER = "input_transfer"
+    WITHDRAW = "withdraw"
+    LIFI_EXECUTE = "lifi_execute"
+    DEPOSIT = "deposit"
+    CREDIT = "credit"
 
 
 class QuoteRecord(BaseModel):
@@ -27,6 +43,7 @@ class QuoteRecord(BaseModel):
     liquidity_provider: str
     expires_at: int
     created_at: int
+    venue: str = "internal"
 
 
 class SwapRecord(BaseModel):
@@ -43,3 +60,8 @@ class SwapRecord(BaseModel):
     error: Optional[str] = None
     created_at: int
     updated_at: int
+    venue: str = "internal"
+    step: Optional[str] = None
+    withdrawal_index: Optional[int] = None
+    lifi_tx_hash: Optional[str] = None
+    deposit_tx_hash: Optional[str] = None

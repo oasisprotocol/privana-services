@@ -49,6 +49,7 @@ def insert_quote(test_db):
             "route_tool": "uniswap",
             "liquidity_provider": _settings.liquidity_provider_address,
             "created_at": now,
+            "venue": "internal",
         }
         defaults.update(overrides)
         db_write(
@@ -56,15 +57,15 @@ def insert_quote(test_db):
             """INSERT INTO quotes
                (id, user_address, from_token_id, to_token_id, from_chain_id, to_chain_id,
                 from_amount, to_amount_gross, to_amount_estimate, to_amount_min,
-                route_tool, liquidity_provider, expires_at, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                route_tool, liquidity_provider, expires_at, created_at, venue)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 quote_id, defaults["user_address"], defaults["from_token_id"],
                 defaults["to_token_id"], defaults["from_chain_id"], defaults["to_chain_id"],
                 defaults["from_amount"], defaults["to_amount_gross"],
                 defaults["to_amount_estimate"], defaults["to_amount_min"],
                 defaults["route_tool"], defaults["liquidity_provider"],
-                expires_at, defaults["created_at"],
+                expires_at, defaults["created_at"], defaults["venue"],
             ),
         )
     return _insert
@@ -73,16 +74,20 @@ def insert_quote(test_db):
 @pytest.fixture
 async def api_client():
     import src.clients.accounting as acct_mod
+    import src.clients.base_evm as evm_mod
     import src.clients.lifi as lifi_mod
     import src.clients.sapphire as saph_mod
     import src.services.earn.vault_service as vs_mod
     import src.services.swap.executor as se_mod
+    import src.services.swap.lifi_pipeline as lp_mod
     import src.services.swap.quote_service as qs_mod
     acct_mod._client_instance = None
+    evm_mod._client_instance = None
     lifi_mod._client_instance = None
     saph_mod._client_instance = None
     qs_mod._service_instance = None
     se_mod._executor_instance = None
+    lp_mod._pipeline_instance = None
     vs_mod._service_instance = None
 
     from src.main import app
@@ -91,8 +96,10 @@ async def api_client():
         yield c
 
     acct_mod._client_instance = None
+    evm_mod._client_instance = None
     lifi_mod._client_instance = None
     saph_mod._client_instance = None
     qs_mod._service_instance = None
     se_mod._executor_instance = None
+    lp_mod._pipeline_instance = None
     vs_mod._service_instance = None

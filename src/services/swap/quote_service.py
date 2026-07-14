@@ -10,6 +10,7 @@ from src.core.config import load_settings
 from src.core.db import db_write, get_db
 from src.core.fees import calculate_fee
 from src.models.api import QuoteResponse
+from src.models.swap import SwapVenue
 from src.core.validation import validate_address, validate_amount, validate_token_id
 
 logger = logging.getLogger(__name__)
@@ -106,8 +107,11 @@ class QuoteService:
 
         liquidity_provider = self.settings.liquidity_provider_address
         lp_balance = await self.accounting.get_lp_balance(to_token_id)
+        venue = SwapVenue.INTERNAL.value
         if int(lp_balance.balance) < to_amount_after_fee:
-            raise ValueError("Insufficient liquidity for this swap")
+            venue = await self._select_lifi_venue_or_raise(
+                from_chain_id, to_chain_id, from_on_chain, to_on_chain, from_amount
+            )
 
         transfer_nonce = await self.accounting.get_transfer_nonce(user_address)
 
@@ -121,13 +125,13 @@ class QuoteService:
             """INSERT INTO quotes
                (id, user_address, from_token_id, to_token_id, from_chain_id, to_chain_id,
                 from_amount, to_amount_gross, to_amount_estimate, to_amount_min,
-                route_tool, liquidity_provider, expires_at, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                route_tool, liquidity_provider, expires_at, created_at, venue)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 quote_id, user_address.lower(), from_token_id.lower(), to_token_id.lower(),
                 from_chain_id, to_chain_id,
                 from_amount, to_amount_str, str(to_amount_after_fee), str(max(to_amount_min, 0)),
-                route_tool, liquidity_provider, expires_at, now,
+                route_tool, liquidity_provider, expires_at, now, venue,
             ),
         )
 
@@ -147,7 +151,33 @@ class QuoteService:
             liquidity_provider=liquidity_provider,
             transfer_nonce=transfer_nonce,
             expires_at=expires_at,
+            venue=venue,
         )
+
+    async def _select_lifi_venue_or_raise(
+        self,
+        from_chain_id: int,
+        to_chain_id: int,
+        from_token_address: str,
+        to_token_address: str,
+        from_amount: str,
+    ) -> str:
+        if not self.settings.lifi_execution_enabled:
+            raise ValueError("Insufficient liquidity for this swap")
+        real_routes = await self.lifi.get_routes(
+            from_chain_id=from_chain_id,
+            to_chain_id=to_chain_id,
+            from_token_address=from_token_address,
+            to_token_address=to_token_address,
+            from_amount=from_amount,
+        )
+        if not real_routes.get("routes"):
+            raise ValueError("Insufficient liquidity for this swap")
+        cap = self.settings.lifi_max_swap_amount_usd
+        from_amount_usd = real_routes["routes"][0].get("fromAmountUSD")
+        if cap > 0 and from_amount_usd is not None and float(from_amount_usd) > cap:
+            raise ValueError("Swap size exceeds LiFi routing limit")
+        return SwapVenue.LIFI.value
 
     async def _find_existing_quote(
         self,
@@ -190,6 +220,7 @@ class QuoteService:
             liquidity_provider=quote["liquidity_provider"],
             transfer_nonce=transfer_nonce,
             expires_at=quote["expires_at"],
+            venue=quote["venue"],
         )
 
     def cleanup_expired_quotes(self) -> int:

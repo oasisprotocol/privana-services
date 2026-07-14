@@ -15,6 +15,7 @@ from src.core.db import db_write, get_db
 from src.core.eip712 import sign_transfer
 from src.core.validation import sanitize_error, validate_address, validate_amount, validate_signature
 from src.services.earn.registry import StrategyRegistry, get_strategy_registry
+from src.services.earn.strategies.base import ApyPoint
 
 logger = logging.getLogger(__name__)
 
@@ -217,6 +218,25 @@ class VaultService:
             )
             return None
 
+    async def strategy_apy_history_safe(
+        self, pool_id_hex: str, days: Optional[int] = None
+    ) -> list[ApyPoint]:
+        """Best-effort APY history for the configured strategy, oldest first.
+
+        Empty is a normal answer, not an error: most strategies have no historical
+        source. Degrades to empty on failure too, so a flaky external read renders
+        no chart rather than 500ing the endpoint.
+        """
+        strategy = self._registry.get(pool_id_hex)
+        try:
+            return await strategy.get_apy_history(days)
+        except Exception:
+            logger.exception(
+                "strategy_apy_history_safe failed pool=%s strategy=%s",
+                pool_id_hex, strategy.name,
+            )
+            return []
+
     async def strategy_apy_bps_safe(self, pool_id_hex: str) -> int:
         """Best-effort APY read for the configured strategy.
 
@@ -295,14 +315,17 @@ class VaultService:
                 )
             except Exception as exc:
                 logger.exception("Earn deposit %s failed", tx_id)
-                self._update_transaction(tx_id, status=EARN_STATUS_FAILED, error=sanitize_error(str(exc)))
+                error = sanitize_error(str(exc))
+                self._update_transaction(tx_id, status=EARN_STATUS_FAILED, error=error)
                 return {
+                    "deposit_id": tx_id,
                     "pool_id": pool_id_hex,
                     "amount": amount,
                     "shares_minted": None,
                     "exchange_rate": None,
                     "tx_hash": None,
                     "status": "failed",
+                    "error": error,
                 }
 
             self._update_transaction(tx_id, status=EARN_STATUS_COMPLETED, tx_hash=tx_hash)
@@ -320,6 +343,7 @@ class VaultService:
             pool_after = self.get_pool(pool_id)
             effective_assets = await self.effective_total_assets(pool_id_hex, pool_after["total_assets"])
             return {
+                "deposit_id": tx_id,
                 "pool_id": pool_id_hex,
                 "amount": amount,
                 # shares_minted is None: per-user share state is private. Clients
@@ -328,16 +352,19 @@ class VaultService:
                 "exchange_rate": _exchange_rate(effective_assets, pool_after["total_shares"]),
                 "tx_hash": tx_hash,
                 "status": "completed",
+                "error": None,
             }
         except Exception:
             logger.warning("Post-tx read failed for deposit %s, returning degraded response", tx_id)
             return {
+                "deposit_id": tx_id,
                 "pool_id": pool_id_hex,
                 "amount": amount,
                 "shares_minted": None,
                 "exchange_rate": None,
                 "tx_hash": tx_hash,
                 "status": "completed",
+                "error": None,
             }
 
     async def withdraw(
@@ -425,14 +452,17 @@ class VaultService:
             except Exception as exc:
                 logger.exception("Earn withdraw %s failed", tx_id)
                 await self._rollback_reclaim(pool_id_hex, int(amount), tx_id)
-                self._update_transaction(tx_id, status=EARN_STATUS_FAILED, error=sanitize_error(str(exc)))
+                error = sanitize_error(str(exc))
+                self._update_transaction(tx_id, status=EARN_STATUS_FAILED, error=error)
                 return {
+                    "withdraw_id": tx_id,
                     "pool_id": pool_id_hex,
                     "amount": amount,
                     "shares_burned": None,
                     "exchange_rate": None,
                     "tx_hash": None,
                     "status": "failed",
+                    "error": error,
                 }
 
         self._update_transaction(tx_id, status=EARN_STATUS_COMPLETED, tx_hash=tx_hash)
@@ -441,6 +471,7 @@ class VaultService:
             pool_after = self.get_pool(pool_id)
             effective_assets = await self.effective_total_assets(pool_id_hex, pool_after["total_assets"])
             return {
+                "withdraw_id": tx_id,
                 "pool_id": pool_id_hex,
                 "amount": amount,
                 # shares_burned is None: per-user share state is private. Clients
@@ -449,16 +480,19 @@ class VaultService:
                 "exchange_rate": _exchange_rate(effective_assets, pool_after["total_shares"]),
                 "tx_hash": tx_hash,
                 "status": "completed",
+                "error": None,
             }
         except Exception:
             logger.warning("Post-tx read failed for withdraw %s, returning degraded response", tx_id)
             return {
+                "withdraw_id": tx_id,
                 "pool_id": pool_id_hex,
                 "amount": amount,
                 "shares_burned": None,
                 "exchange_rate": None,
                 "tx_hash": tx_hash,
                 "status": "completed",
+                "error": None,
             }
 
     async def effective_total_assets(self, pool_id_hex: str, on_chain_total: int) -> int:

@@ -1,11 +1,14 @@
 import asyncio
 import logging
+from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
 from src.api._auth import auth_error, bearer_token, resolve_via_accounting
 from src.clients.accounting import get_accounting_client
 from src.models.earn import (
+    ApyHistoryPoint,
+    ApyHistoryResponse,
     BalanceListResponse,
     BalanceResponse,
     DepositQuoteResponse,
@@ -110,6 +113,33 @@ async def get_pool(pool_id: str) -> PoolDetailResponse:
         raise HTTPException(status_code=500, detail="Failed to get pool") from exc
 
 
+@router.get("/pools/{pool_id}/apy-history", response_model=ApyHistoryResponse)
+async def get_pool_apy_history(
+    pool_id: str,
+    days: Optional[int] = Query(
+        default=None,
+        ge=1,
+        description=(
+            "Limit the series to the most recent N days. Omit it to get everything "
+            "the source has, which is what a client should send for an 'All' range."
+        ),
+    ),
+) -> ApyHistoryResponse:
+    """APY over time for a pool, oldest first.
+
+    Empty `points` is a normal answer, not an error: a pool whose strategy has no
+    historical source simply has no chart to draw. The same goes for a failed read
+    upstream — the history is decoration on a pool that works either way, so it
+    degrades to empty rather than failing the request.
+    """
+    service = get_vault_service()
+    points = await service.strategy_apy_history_safe(pool_id, days)
+    return ApyHistoryResponse(
+        pool_id=pool_id,
+        points=[ApyHistoryPoint(timestamp=p.timestamp, apy_bps=p.apy_bps) for p in points],
+    )
+
+
 @router.get("/quote", response_model=DepositQuoteResponse)
 async def get_deposit_quote(
     pool_id: str = Query(..., description="Earn pool ID (hex)"),
@@ -138,10 +168,9 @@ async def deposit(payload: DepositRequest) -> DepositResponse:
             nonce=payload.nonce,
             signature=payload.signature,
         )
-        return DepositResponse(
-            deposit_id=result.get("tx_hash", ""),
-            **result,
-        )
+        # An on-chain revert is a settled outcome, reported as status="failed" on a
+        # 200. Only a request we could not act on at all is an HTTP error.
+        return DepositResponse(**result)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -157,10 +186,7 @@ async def withdraw(payload: WithdrawRequest) -> WithdrawResponse:
             nonce=payload.nonce,
             signature=payload.signature,
         )
-        return WithdrawResponse(
-            withdraw_id=result.get("tx_hash", ""),
-            **result,
-        )
+        return WithdrawResponse(**result)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

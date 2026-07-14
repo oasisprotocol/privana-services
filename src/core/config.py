@@ -66,6 +66,7 @@ def load_settings(refresh: bool = False) -> Settings:
             midas_oracle_heartbeat_sec=_get_int("MIDAS_ORACLE_HEARTBEAT_SEC"),
             midas_apy_bps=_get_int("MIDAS_APY_BPS"),
             midas_pool_assets=os.getenv("MIDAS_POOL_ASSETS"),
+            defillama_pool_ids=os.getenv("DEFILLAMA_POOL_IDS", ""),
             lifi_execution_enabled=os.getenv("LIFI_EXECUTION_ENABLED", "false").lower() == "true",
             lifi_max_swap_amount_usd=int(os.getenv("LIFI_MAX_SWAP_AMOUNT_USD", "0")),
         )

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Awaitable, Callable, Optional, TypeVar
 
 from eth_account import Account
@@ -18,12 +19,13 @@ from privana.client.errors import NetworkError
 from privana.types.common import Network
 
 from src.clients.aave import AaveClient
+from src.clients.defillama import DefiLlamaClient, get_defillama_client
 from src.clients.privana import (
     get_authenticated_privana_client,
     get_privana_client,
 )
 from src.core.config import load_settings
-from src.services.earn.strategies.base import BaseStrategy
+from src.services.earn.strategies.base import ApyPoint, BaseStrategy
 
 logger = logging.getLogger(__name__)
 
@@ -77,10 +79,17 @@ class AaveStrategy(BaseStrategy):
         privana_client: Optional[PrivanaClient] = None,
         poll_interval_sec: float = DEFAULT_POLL_INTERVAL_SEC,
         max_bridge_poll_attempts: int = DEFAULT_MAX_BRIDGE_POLL_ATTEMPTS,
+        defillama_pool_id: Optional[str] = None,
+        defillama_client: Optional[DefiLlamaClient] = None,
     ) -> None:
         self._client = client
         self._asset_address = asset_address
         self._token_id = token_id
+        # Aave publishes only a *current* rate on-chain; the history behind it is
+        # not readable without indexing ReserveDataUpdated. Absent a configured
+        # DefiLlama pool we simply have no history, and get_apy_history says so.
+        self._defillama_pool_id = defillama_pool_id
+        self._defillama = defillama_client
 
         settings = load_settings()
         self._pool_address = pool_address or settings.liquidity_provider_address
@@ -123,6 +132,33 @@ class AaveStrategy(BaseStrategy):
 
     async def get_apy_bps(self) -> int:
         return self._client.get_supply_apy_bps(self._asset_address)
+
+    async def get_apy_history(self, days: Optional[int] = None) -> list[ApyPoint]:
+        if not self._defillama_pool_id:
+            return []
+
+        client = self._defillama or get_defillama_client()
+        try:
+            raw = await client.get_pool_chart(self._defillama_pool_id)
+        except Exception:
+            # A chart is decoration on top of a working pool. Degrade to "no
+            # history" rather than failing the request, same as the other
+            # *_safe reads around the earn service.
+            logger.exception(
+                "AaveStrategy: DefiLlama chart failed pool=%s; serving no history",
+                self._defillama_pool_id,
+            )
+            return []
+
+        cutoff = 0
+        if days is not None:
+            cutoff = int(time.time()) - days * 86400
+
+        return [
+            ApyPoint(timestamp=p.timestamp, apy_bps=p.apy_bps)
+            for p in raw
+            if p.timestamp >= cutoff
+        ]
 
     async def deposit_to_earn(self, amount: int) -> None:
         """Bridge `amount` from accounting on Sapphire to the LP EOA on Base,

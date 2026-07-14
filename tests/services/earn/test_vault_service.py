@@ -176,6 +176,7 @@ class TestDeposit:
         assert row["signature"] == "0x" + "aa" * 65
         assert row["status"] == "completed"
         assert row["tx_hash"] == "0x" + "ff" * 32
+        assert result["deposit_id"] == row["id"]
 
     async def test_failed_deposit_returns_failed_status(self, test_db):
         service, contract, saph, _ = _make_service()
@@ -192,10 +193,14 @@ class TestDeposit:
         )
         assert result["status"] == "failed"
         assert result["tx_hash"] is None
+        assert result["error"] is not None
 
         row = test_db.execute("SELECT * FROM earn_transactions").fetchone()
         assert row["status"] == "failed"
         assert "onchain revert" in row["error"]
+        # /v1/operations/unsettled reports this row's id as operation_id, so
+        # deposit_id has to be that same id for the two endpoints to agree.
+        assert result["deposit_id"] == row["id"]
 
 
 class TestWithdraw:
@@ -220,6 +225,7 @@ class TestWithdraw:
         assert row["signer_address"] == POOL_ADDRESS.lower()
         assert row["nonce"] == 7
         assert row["status"] == "completed"
+        assert result["withdraw_id"] == row["id"]
 
     async def test_failed_withdraw_returns_failed_status(self, test_db):
         service, contract, saph, acct = _make_service()
@@ -235,10 +241,12 @@ class TestWithdraw:
 
         assert result["status"] == "failed"
         assert result["tx_hash"] is None
+        assert result["error"] == "Insufficient gas funds for transaction"
 
         row = test_db.execute("SELECT * FROM earn_transactions").fetchone()
         assert row["status"] == "failed"
         assert row["error"] == "Insufficient gas funds for transaction"
+        assert result["withdraw_id"] == row["id"]
 
 
 class TestExchangeRateZeroShares:

@@ -39,3 +39,7 @@ class Settings:
     midas_oracle_heartbeat_sec: int
     midas_apy_bps: int
     midas_pool_assets: str
+
+    # Pool id -> DefiLlama pool UUID, for strategies whose APY history we source
+    # from DefiLlama. Pools left out simply have no history.
+    defillama_pool_ids: str

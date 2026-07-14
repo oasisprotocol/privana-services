@@ -140,6 +140,59 @@ class TestGetPoolRoute:
             assert r.status_code == 404
 
 
+class TestApyHistoryRoute:
+    async def test_returns_points_oldest_first(self, api_client):
+        from src.services.earn.strategies.base import ApyPoint
+
+        with patch("src.api.earn.get_vault_service") as mock_svc:
+            svc = MagicMock()
+            svc.strategy_apy_history_safe = AsyncMock(return_value=[
+                ApyPoint(timestamp=1781136000, apy_bps=320),
+                ApyPoint(timestamp=1781222400, apy_bps=315),
+            ])
+            mock_svc.return_value = svc
+
+            r = await api_client.get(f"/v1/earn/pools/{POOL_ID}/apy-history")
+
+            assert r.status_code == 200
+            body = r.json()
+            assert body["pool_id"] == POOL_ID
+            assert [p["apy_bps"] for p in body["points"]] == [320, 315]
+            svc.strategy_apy_history_safe.assert_awaited_once_with(POOL_ID, None)
+
+    async def test_days_is_passed_through(self, api_client):
+        with patch("src.api.earn.get_vault_service") as mock_svc:
+            svc = MagicMock()
+            svc.strategy_apy_history_safe = AsyncMock(return_value=[])
+            mock_svc.return_value = svc
+
+            r = await api_client.get(f"/v1/earn/pools/{POOL_ID}/apy-history?days=30")
+
+            assert r.status_code == 200
+            svc.strategy_apy_history_safe.assert_awaited_once_with(POOL_ID, 30)
+
+    async def test_no_history_is_an_empty_200_not_an_error(self, api_client):
+        # A strategy without a historical source has no chart to draw. That is a
+        # normal state, so clients get an empty series rather than a failure.
+        with patch("src.api.earn.get_vault_service") as mock_svc:
+            svc = MagicMock()
+            svc.strategy_apy_history_safe = AsyncMock(return_value=[])
+            mock_svc.return_value = svc
+
+            r = await api_client.get(f"/v1/earn/pools/{POOL_ID}/apy-history")
+
+            assert r.status_code == 200
+            assert r.json()["points"] == []
+
+    async def test_rejects_non_positive_days(self, api_client):
+        with patch("src.api.earn.get_vault_service") as mock_svc:
+            mock_svc.return_value = MagicMock()
+
+            r = await api_client.get(f"/v1/earn/pools/{POOL_ID}/apy-history?days=0")
+
+            assert r.status_code == 422
+
+
 class TestDepositQuoteRoute:
     async def test_returns_200_with_quote(self, api_client):
         with patch("src.api.earn.get_vault_service") as mock_svc:

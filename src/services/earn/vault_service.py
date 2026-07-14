@@ -15,6 +15,7 @@ from src.core.db import db_write, get_db
 from src.core.eip712 import sign_transfer
 from src.core.validation import sanitize_error, validate_address, validate_amount, validate_signature
 from src.services.earn.registry import StrategyRegistry, get_strategy_registry
+from src.services.earn.strategies.base import ApyPoint
 
 logger = logging.getLogger(__name__)
 
@@ -216,6 +217,25 @@ class VaultService:
                 pool_id_hex, strategy.name,
             )
             return None
+
+    async def strategy_apy_history_safe(
+        self, pool_id_hex: str, days: Optional[int] = None
+    ) -> list[ApyPoint]:
+        """Best-effort APY history for the configured strategy, oldest first.
+
+        Empty is a normal answer, not an error: most strategies have no historical
+        source. Degrades to empty on failure too, so a flaky external read renders
+        no chart rather than 500ing the endpoint.
+        """
+        strategy = self._registry.get(pool_id_hex)
+        try:
+            return await strategy.get_apy_history(days)
+        except Exception:
+            logger.exception(
+                "strategy_apy_history_safe failed pool=%s strategy=%s",
+                pool_id_hex, strategy.name,
+            )
+            return []
 
     async def strategy_apy_bps_safe(self, pool_id_hex: str) -> int:
         """Best-effort APY read for the configured strategy.

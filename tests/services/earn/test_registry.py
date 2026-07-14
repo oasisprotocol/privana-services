@@ -8,6 +8,7 @@ from src.models.api import TokenInfo
 from src.models.settings import Settings
 from src.services.earn.registry import (
     StrategyRegistry,
+    _verified_defillama_pool_id,
     get_strategy_registry,
     register_aave_strategies_from_config,
     register_midas_strategies_from_config,
@@ -262,6 +263,120 @@ def _midas_settings() -> Settings:
         midas_default_slippage_bps=50,
         midas_oracle_heartbeat_sec=86400,
     )
+
+
+USDC_BASE = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+AAVE_LLAMA_UUID = "7e0661bf-8cf3-45e6-9424-31916d4c7b84"
+
+
+def _llama_client(meta: object) -> MagicMock:
+    client = MagicMock()
+    if isinstance(meta, Exception):
+        client.get_pool_meta = AsyncMock(side_effect=meta)
+    else:
+        client.get_pool_meta = AsyncMock(return_value=meta)
+    return client
+
+
+async def _register_aave_with_llama(registry, llama, llama_config: str):
+    accounting = _accounting_client({"0xaaaa": USDC_BASE})
+    with patch("src.clients.aave.get_aave_client", return_value=MagicMock()), \
+         patch("src.clients.accounting.get_accounting_client", return_value=accounting), \
+         patch("src.services.earn.registry.get_defillama_client", return_value=llama), \
+         patch("src.services.earn.strategies.aave.load_settings", return_value=_settings()):
+        await register_aave_strategies_from_config(
+            registry, '{"0xab12": "0xaaaa"}', llama_config
+        )
+    return registry.get("0xab12")
+
+
+class TestAaveDefiLlamaWiring:
+    async def test_pool_without_a_uuid_has_no_history(self, registry: StrategyRegistry) -> None:
+        strategy = await _register_aave_with_llama(registry, _llama_client(None), "")
+
+        assert strategy._defillama_pool_id is None
+        assert await strategy.get_apy_history() == []
+
+    async def test_verified_uuid_is_wired_in(self, registry: StrategyRegistry) -> None:
+        llama = _llama_client(
+            {"project": "aave-v3", "symbol": "USDC", "chain": "Base",
+             "underlyingTokens": [USDC_BASE]}
+        )
+
+        strategy = await _register_aave_with_llama(
+            registry, llama, '{"0xab12": "%s"}' % AAVE_LLAMA_UUID
+        )
+
+        assert strategy._defillama_pool_id == AAVE_LLAMA_UUID
+
+    async def test_uuid_from_another_project_is_rejected(
+        self, registry: StrategyRegistry, caplog
+    ) -> None:
+        # Underlying happens to match, but it's a Compound pool. Serving its curve
+        # under an Aave pool would be a confident lie.
+        llama = _llama_client(
+            {"project": "compound-v3", "symbol": "USDC", "chain": "Base",
+             "underlyingTokens": [USDC_BASE]}
+        )
+
+        strategy = await _register_aave_with_llama(
+            registry, llama, '{"0xab12": "%s"}' % AAVE_LLAMA_UUID
+        )
+
+        assert strategy._defillama_pool_id is None
+        assert any("refusing to serve" in r.message for r in caplog.records)
+
+    async def test_unknown_uuid_is_rejected(
+        self, registry: StrategyRegistry, caplog
+    ) -> None:
+        strategy = await _register_aave_with_llama(
+            registry, _llama_client(None), '{"0xab12": "not-a-real-pool"}'
+        )
+
+        assert strategy._defillama_pool_id is None
+        assert any("does not know" in r.message for r in caplog.records)
+
+    async def test_unreachable_defillama_keeps_the_configured_uuid(
+        self, registry: StrategyRegistry, caplog
+    ) -> None:
+        # A blip at boot must not disable the chart until someone restarts us.
+        llama = _llama_client(RuntimeError("connection refused"))
+
+        strategy = await _register_aave_with_llama(
+            registry, llama, '{"0xab12": "%s"}' % AAVE_LLAMA_UUID
+        )
+
+        assert strategy._defillama_pool_id == AAVE_LLAMA_UUID
+        assert any("could not verify" in r.message for r in caplog.records)
+
+    async def test_testnet_asset_does_not_disable_the_chart(
+        self, registry: StrategyRegistry
+    ) -> None:
+        # Our pool holds Sepolia USDC while DefiLlama only carries the mainnet
+        # venue, so the two token addresses legitimately differ. That must not
+        # disable the chart — showing the mainnet rate is the whole point.
+        llama = _llama_client(
+            {"project": "aave-v3", "symbol": "USDC", "chain": "Base",
+             "underlyingTokens": [USDC_BASE]}
+        )
+        accounting = _accounting_client({"0xaaaa": "0x036CbD53842c5426634e7929541eC2318f3dCF7e"})
+        with patch("src.clients.aave.get_aave_client", return_value=MagicMock()), \
+             patch("src.clients.accounting.get_accounting_client", return_value=accounting), \
+             patch("src.services.earn.registry.get_defillama_client", return_value=llama), \
+             patch("src.services.earn.strategies.aave.load_settings", return_value=_settings()):
+            await register_aave_strategies_from_config(
+                registry, '{"0xab12": "0xaaaa"}', '{"0xab12": "%s"}' % AAVE_LLAMA_UUID
+            )
+
+        assert registry.get("0xab12")._defillama_pool_id == AAVE_LLAMA_UUID
+
+    async def test_bad_json_disables_history_without_crashing(
+        self, registry: StrategyRegistry, caplog
+    ) -> None:
+        strategy = await _register_aave_with_llama(registry, _llama_client(None), "{oops")
+
+        assert strategy._defillama_pool_id is None
+        assert strategy.name == "aave-v3"  # the pool itself still registers
 
 
 class TestRegisterMidasFromConfig:

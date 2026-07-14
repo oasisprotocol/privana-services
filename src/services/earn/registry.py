@@ -2,6 +2,7 @@ import json
 import logging
 from typing import Optional
 
+from src.clients.defillama import get_defillama_client
 from src.services.earn.strategies.base import BaseStrategy
 from src.services.earn.strategies.manual import ManualStrategy
 
@@ -110,7 +111,89 @@ def _extract_token_id(entry: object, pool_id: str) -> Optional[str]:
     return None
 
 
-async def register_aave_strategies_from_config(registry: StrategyRegistry, raw_config: str) -> int:
+def _parse_defillama_pool_ids(raw_config: str) -> dict[str, str]:
+    """Parse ``DEFILLAMA_POOL_IDS`` (``{"<pool_id_hex>": "<defillama_uuid>"}``).
+
+    Bad JSON means no APY history, never a crash: the charts are decoration on
+    top of pools that work regardless.
+    """
+    if not raw_config.strip():
+        return {}
+    try:
+        parsed = json.loads(raw_config)
+    except json.JSONDecodeError:
+        logger.exception("DEFILLAMA_POOL_IDS contains invalid JSON; APY history disabled")
+        return {}
+    if not isinstance(parsed, dict):
+        logger.error(
+            "DEFILLAMA_POOL_IDS must be a JSON object; got %s", type(parsed).__name__
+        )
+        return {}
+    return {str(k).lower(): str(v) for k, v in parsed.items()}
+
+
+async def _verified_defillama_pool_id(
+    pool_id: str, uuid: str, expected_project: str
+) -> Optional[str]:
+    """Check a configured DefiLlama UUID before we trust it as a pool's APY source,
+    returning it when it holds up and None when it demonstrably doesn't.
+
+    A wrong UUID is worse than no UUID: it renders a confident, wrong curve beside
+    a button that takes the user's money. DefiLlama lists many near-identical rows
+    per chain and asset, so picking one by eye is easy to get wrong.
+
+    `project` is the check that survives our environments. Our pools run on
+    testnets while DefiLlama only carries mainnet venues — deliberately, since a
+    testnet APY is meaningless and the mainnet rate is the one a user is really
+    being offered — so token addresses legitimately differ and cannot be compared.
+    The resolved pool is logged in full so a mis-mapping is visible at boot.
+
+    A lookup that *fails* is not a mismatch: DefiLlama being unreachable at boot
+    keeps the configured id rather than silently disabling the chart until someone
+    restarts the service.
+    """
+    try:
+        meta = await get_defillama_client().get_pool_meta(uuid)
+    except Exception:
+        logger.warning(
+            "DEFILLAMA_POOL_IDS pool=%s: could not verify uuid=%s (DefiLlama unreachable); "
+            "trusting the configured value",
+            pool_id, uuid,
+        )
+        return uuid
+
+    if meta is None:
+        logger.error(
+            "DEFILLAMA_POOL_IDS pool=%s: DefiLlama does not know uuid=%s; no APY history",
+            pool_id, uuid,
+        )
+        return None
+
+    descriptor = "%s/%s (%s) on %s, underlying %s" % (
+        meta.get("project"), meta.get("symbol"), meta.get("poolMeta"), meta.get("chain"),
+        meta.get("underlyingTokens"),
+    )
+
+    if meta.get("project") != expected_project:
+        logger.error(
+            "DEFILLAMA_POOL_IDS pool=%s: uuid=%s is %s, not project %r; "
+            "refusing to serve its APY history",
+            pool_id, uuid, descriptor, expected_project,
+        )
+        return None
+
+    logger.info(
+        "DEFILLAMA_POOL_IDS pool=%s: uuid=%s resolved to %s — APY history enabled",
+        pool_id, uuid, descriptor,
+    )
+    return uuid
+
+
+async def register_aave_strategies_from_config(
+    registry: StrategyRegistry,
+    raw_config: str,
+    defillama_pool_ids: str = "",
+) -> int:
     """Parse `AAVE_POOL_ASSETS` JSON and register an AaveStrategy per pool.
 
     Canonical config format (preferred):
@@ -150,6 +233,7 @@ async def register_aave_strategies_from_config(registry: StrategyRegistry, raw_c
 
     client = get_aave_client()
     accounting = get_accounting_client()
+    llama_ids = _parse_defillama_pool_ids(defillama_pool_ids)
     count = 0
     for pool_id, entry in pool_assets.items():
         token_id = _extract_token_id(entry, pool_id)
@@ -174,13 +258,24 @@ async def register_aave_strategies_from_config(registry: StrategyRegistry, raw_c
             )
             continue
 
+        llama_id = llama_ids.get(pool_id.lower())
+        if llama_id:
+            llama_id = await _verified_defillama_pool_id(
+                pool_id, llama_id, expected_project="aave-v3"
+            )
+
         registry.register(
             pool_id,
-            AaveStrategy(client=client, asset_address=asset_address, token_id=token_id),
+            AaveStrategy(
+                client=client,
+                asset_address=asset_address,
+                token_id=token_id,
+                defillama_pool_id=llama_id,
+            ),
         )
         logger.info(
-            "Registered AaveStrategy pool=%s asset=%s token=%s chain=%s",
-            pool_id, asset_address, token_id, token_info.chain_id,
+            "Registered AaveStrategy pool=%s asset=%s token=%s chain=%s apy_history=%s",
+            pool_id, asset_address, token_id, token_info.chain_id, bool(llama_id),
         )
         count += 1
     return count

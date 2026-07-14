@@ -1,4 +1,18 @@
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from typing import Optional
+
+
+@dataclass(frozen=True)
+class ApyPoint:
+    """One sample of a strategy's APY over time.
+
+    `apy_bps` matches the units of `get_apy_bps`, so a chart's latest point and
+    the headline APY are the same number in the same scale.
+    """
+
+    timestamp: int  # unix seconds
+    apy_bps: int
 
 
 class BaseStrategy(ABC):
@@ -22,6 +36,16 @@ class BaseStrategy(ABC):
     @abstractmethod
     async def get_apy_bps(self) -> int:
         """Current APY in basis points (500 = 5%)."""
+
+    async def get_apy_history(self, days: Optional[int] = None) -> list[ApyPoint]:
+        """APY over time, oldest first. `days` limits the window to the most
+        recent N days; None returns everything the source has.
+
+        Not abstract, and empty by default: a strategy that has no historical
+        source is a normal state, not a broken one. Callers render what they get,
+        so an empty list means "no chart", never a wrong chart.
+        """
+        return []
 
     @abstractmethod
     async def deposit_to_earn(self, amount: int) -> None:

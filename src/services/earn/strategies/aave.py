@@ -174,9 +174,9 @@ class AaveStrategy(BaseStrategy):
             apy = entry.get("apy")
             if timestamp is None or apy is None or timestamp < cutoff:
                 continue
-            # DefiLlama reports apy as a percent float (3.14677); the rest of the
-            # system speaks integer bps, and the UI rounds to 2dp of a percent —
-            # exactly 1 bps — so nothing displayable is lost here.
+            # DefiLlama reports apy as percent in float (e.g. 3.14159); the rest of the
+            # system speaks integer bps, and the UI rounds to 2 decimal points
+            # which is exactly 1 bps, so there is no rounding error here.
             points.append(ApyPoint(timestamp=timestamp, apy_bps=round(apy * 100)))
 
         points.sort(key=lambda p: p.timestamp)

@@ -74,6 +74,19 @@ task('deploySwap')
     console.log(' SwapManager at:', address);
   });
 
+// Read the `VERSION` constant from a contract instance (proxy or bare
+// implementation). Returns null if the contract predates the getter, so an
+// old deployment without VERSION is treated as "needs upgrade" rather than
+// crashing the task.
+async function readVersion(contractPromise: Promise<any>): Promise<string | null> {
+  try {
+    const contract = await contractPromise;
+    return await contract.VERSION();
+  } catch {
+    return null;
+  }
+}
+
 async function deployOrUpgrade(hre: HardhatRuntimeEnvironment, factoryName: any, deployer: string, params: any[], existingAddress?: string) {
   const { ethers, upgrades } = hre;
   const factory = await ethers.getContractFactory(factoryName, deployer);
@@ -88,28 +101,67 @@ async function deployOrUpgrade(hre: HardhatRuntimeEnvironment, factoryName: any,
       let implAddress = await upgrades.erc1967.getImplementationAddress(existingAddress);
       console.log(` Detected existing ${factoryName} proxy contract at ${existingAddress}`);
 
+      // Compare the VERSION constant of the live implementation against the
+      // one compiled into the new implementation. VERSION is a `constant`, so
+      // it lives in each implementation's bytecode: the live value is read
+      // through the proxy, and the target value is read off a throwaway bare
+      // implementation deployed here.
+      //
+      // Both reads MUST happen before `forceImport` below. `forceImport`
+      // records the *new* factory's bytecode in the manifest but points it at
+      // the *old*, still-live on-chain implementation address (it trusts the
+      // caller that the proxy already runs this factory's code). That entry
+      // then makes `deployImplementation`/`upgradeProxy` believe the new impl
+      // is already deployed and live, so they reuse the old address and the
+      // upgrade silently no-ops. Reading VERSION off an independent bare deploy
+      // avoids the poisoned cache entirely.
+      console.log(' Checking if upgrade is needed...');
+
+      const liveVersion = await readVersion(ethers.getContractAt(factoryName, existingAddress) as any);
+
+      // Bare implementation deploy purely to read its VERSION. Its constructor
+      // takes no args (it only calls `_disableInitializers()`), and this
+      // instance is never wired to the proxy.
+      const probeImpl = await factory.deploy();
+      await probeImpl.waitForDeployment();
+      const newVersion = await readVersion(Promise.resolve(probeImpl) as any);
+
+      console.log(`  Live VERSION:      ${liveVersion ?? '<none>'}`);
+      console.log(`  Available VERSION: ${newVersion ?? '<none>'}`);
+
+      if (liveVersion !== null && newVersion !== null && liveVersion === newVersion) {
+        console.log(` No upgrade needed. Live ${factoryName} is already at VERSION ${liveVersion}.`);
+        console.log(` ${factoryName} proxy at: ${existingAddress}`);
+        console.log(` Implementation at: ${implAddress}`);
+        return;
+      }
+
+      // Register the current proxy so the plugin can validate and perform the
+      // upgrade. Done only in the upgrade path so the poisoned cache entry
+      // never affects the version check above.
       //const current = await ethers.getContractAt(factoryName, existingAddress);
       await upgrades.forceImport(existingAddress, factory, { kind: 'uups' /*, constructorArgs: [await current.accounting(), await current.poolAdmin()]*/});
 
-      // Check if upgrade is needed by validating the new implementation
-      console.log(' Checking if upgrade is needed...');
       try {
         await upgrades.validateUpgrade(existingAddress, factory);
-        console.log(' Upgrade validation passed. Upgrading proxy...');
+        console.log(` Upgrade validation passed. Upgrading ${liveVersion ?? '<none>'} -> ${newVersion ?? '<none>'}...`);
 
-        const upgraded = await upgrades.upgradeProxy(existingAddress, factory);
+        // `redeployImplementation: 'always'` is required: `forceImport` cached
+        // the new bytecode against the old on-chain impl address, so without
+        // it `upgradeProxy` would reuse the old implementation and no-op.
+        const upgraded = await upgrades.upgradeProxy(existingAddress, factory, { redeployImplementation: 'always' });
         await upgraded.waitForDeployment();
 
-        const newImplAddress = await upgrades.erc1967.getImplementationAddress(existingAddress);
-        if (newImplAddress !== implAddress) {
+        const upgradedImplAddress = await upgrades.erc1967.getImplementationAddress(existingAddress);
+        if (upgradedImplAddress !== implAddress) {
           console.log(` ${factoryName} proxy upgraded successfully!`);
           console.log(' New implementation deployed.');
-          implAddress = newImplAddress;
+          implAddress = upgradedImplAddress;
         } else {
           console.log(' No upgrade needed. Implementation is up to date.');
         }
       } catch (error) {
-        console.log(' Upgrade validation failed or not needed:', error);
+        console.log(' Upgrade validation failed:', error);
         console.log(' Keeping existing deployment.');
       }
 

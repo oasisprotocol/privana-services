@@ -48,6 +48,11 @@ class VaultService:
             address=self.contract_address,
             abi=EARN_MANAGER_ABI,
         )
+        # Same contract over the plain transport, for views over public state.
+        self.contract_public = self.sapphire.w3_public.eth.contract(
+            address=self.contract_address,
+            abi=EARN_MANAGER_ABI,
+        )
 
     async def _route_to_strategy(self, pool_id_hex: str, amount: int) -> None:
         """After a successful EarnManager.deposit, push the same amount into
@@ -94,7 +99,7 @@ class VaultService:
             )
 
     def get_pool(self, pool_id: bytes) -> dict:
-        pool = self.contract.functions.pools(pool_id).call()
+        pool = self.contract_public.functions.pools(pool_id).call()
         return {
             "token_id": "0x" + pool[0].hex(),
             "pool_address": pool[1],
@@ -104,10 +109,10 @@ class VaultService:
         }
 
     def list_pools(self) -> list[dict]:
-        count = self.contract.functions.getPoolCount().call()
+        count = self.contract_public.functions.getPoolCount().call()
         pools = []
         for i in range(count):
-            pool_id = self.contract.functions.poolIds(i).call()
+            pool_id = self.contract_public.functions.poolIds(i).call()
             pool = self.get_pool(pool_id)
             pool["pool_id"] = "0x" + pool_id.hex()
             pools.append(pool)

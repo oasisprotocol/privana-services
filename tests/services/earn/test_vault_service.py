@@ -35,6 +35,10 @@ def _make_service(registry=None):
         contract = MagicMock()
         w3.eth.contract.return_value = contract
         saph.w3 = w3
+        # Public views go over a plain client, confidential ones over the wrapped
+        # one. That split is transport; the contract behaves the same either way,
+        # so both resolve to a single mock here.
+        saph.w3_public = w3
         saph.execute_contract_call = MagicMock(return_value="0x" + "ff" * 32)
         mock_saph.return_value = saph
 
@@ -51,6 +55,7 @@ def _make_service(registry=None):
         from src.services.earn.vault_service import VaultService
         service = VaultService(registry=registry)
         service.contract = contract
+        service.contract_public = contract
         return service, contract, saph, acct
 
 

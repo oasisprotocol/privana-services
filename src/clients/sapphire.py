@@ -32,6 +32,8 @@ class SapphireClient:
         self.w3.middleware_onion.add(SignAndSendRawMiddlewareBuilder.build(self.account))
         self.w3 = sapphire.wrap(self.w3, self.account)
         self.w3.eth.default_account = self.account.address
+        # Plain transport for views over public state. For confidential reads keep using self.w3.
+        self.w3_public = Web3(Web3.HTTPProvider(self.rpc_url, cache_allowed_requests=True))
         self.chain_id = self.w3.eth.chain_id
         if self.chain_id != settings.accounting_chain_id:
             raise RuntimeError(

@@ -77,6 +77,15 @@ MIGRATIONS = [
     "ALTER TABLE swaps ADD COLUMN withdrawal_index INTEGER;",
     "ALTER TABLE swaps ADD COLUMN lifi_tx_hash TEXT;",
     "ALTER TABLE swaps ADD COLUMN deposit_tx_hash TEXT;",
+    """
+    CREATE TABLE IF NOT EXISTS token_price_history (
+        coin_id TEXT NOT NULL,
+        timestamp INTEGER NOT NULL,
+        price_e8 INTEGER NOT NULL,
+        PRIMARY KEY (coin_id, timestamp)
+    );
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_price_history_coin_ts ON token_price_history(coin_id, timestamp);",
 ]
 
 
@@ -103,6 +112,15 @@ def db_write(conn: sqlite3.Connection, sql: str, params: tuple = ()) -> sqlite3.
         cursor = conn.execute(sql, params)
         conn.commit()
         return cursor
+
+
+def db_write_many(conn: sqlite3.Connection, sql: str, params: list[tuple]) -> int:
+    if not params:
+        return 0
+    with _write_lock:
+        cursor = conn.executemany(sql, params)
+        conn.commit()
+        return cursor.rowcount
 
 
 def close_db() -> None:

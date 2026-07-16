@@ -52,6 +52,7 @@ async def lifespan(_app: FastAPI):
         register_aave_strategies_from_config,
         register_midas_strategies_from_config,
     )
+    from src.services.price_history import get_price_sampler
 
     logger.info("Privana services starting...")
 
@@ -83,8 +84,17 @@ async def lifespan(_app: FastAPI):
 
         asyncio.create_task(recover_inflight_lifi_swaps())
 
+    try:
+        await get_price_sampler().start()
+    except Exception:
+        logger.exception("Price sampler failed to start; no price history will be recorded")
+
     yield
 
+    try:
+        await get_price_sampler().stop()
+    except Exception:
+        logger.warning("Error stopping price sampler")
     try:
         await get_accounting_client().close()
     except Exception:

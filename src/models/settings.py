@@ -44,5 +44,7 @@ class Settings:
     # from DefiLlama. Pools left out simply have no history.
     defillama_pool_ids: str
 
+    coingecko_token_ids: str
+
     lifi_execution_enabled: bool = False
     lifi_max_swap_amount_usd: int = 0

@@ -59,7 +59,6 @@ class PoolResponse(BaseModel):
     pool_id: str
     token_id: str
     strategy: str
-    total_assets: str
     apy_bps: int
     status: str
     pool_address: str

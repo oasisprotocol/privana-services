@@ -54,28 +54,21 @@ async def list_pools() -> PoolListResponse:
     try:
         service = get_vault_service()
         pools = await asyncio.to_thread(service.list_pools)
-        # AUM and APY reads are independent per pool, so fan them out together
-        # to keep tail latency at max(slowest read) instead of sum-of-reads.
-        results = await asyncio.gather(
-            *[
-                asyncio.gather(
-                    service.effective_total_assets(p["pool_id"], p["total_assets"]),
-                    service.strategy_apy_bps_safe(p["pool_id"]),
-                )
-                for p in pools
-            ]
+        # APY reads are independent per pool, so fan them out to keep tail
+        # latency at max(slowest read) instead of sum-of-reads.
+        apy_bps_per_pool = await asyncio.gather(
+            *[service.strategy_apy_bps_safe(p["pool_id"]) for p in pools]
         )
         responses = [
             PoolResponse(
                 pool_id=p["pool_id"],
                 token_id=p["token_id"],
                 strategy=get_strategy_registry().get(p["pool_id"]).name,
-                total_assets=str(effective),
                 apy_bps=apy_bps,
                 status="active" if p["active"] else "paused",
                 pool_address=p["pool_address"],
             )
-            for p, (effective, apy_bps) in zip(pools, results)
+            for p, apy_bps in zip(pools, apy_bps_per_pool)
         ]
         return PoolListResponse(pools=responses)
     except Exception as exc:

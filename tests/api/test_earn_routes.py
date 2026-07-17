@@ -71,17 +71,6 @@ class TestListPoolsRoute:
             r = await api_client.get("/v1/earn/pools")
             assert r.status_code == 500
 
-    async def test_total_assets_reflects_strategy_live_aum(self, api_client):
-        with patch("src.api.earn.get_vault_service") as mock_svc:
-            svc = MagicMock()
-            svc.list_pools.return_value = [_mock_pool()]
-            svc.effective_total_assets = AsyncMock(return_value=1100)
-            svc.strategy_apy_bps_safe = AsyncMock(return_value=0)
-            mock_svc.return_value = svc
-
-            r = await api_client.get("/v1/earn/pools")
-            assert r.json()["pools"][0]["total_assets"] == "1100"
-
     async def test_apy_bps_reflects_strategy_value(self, api_client):
         with patch("src.api.earn.get_vault_service") as mock_svc:
             svc = _mock_service()

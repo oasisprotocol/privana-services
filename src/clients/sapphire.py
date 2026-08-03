@@ -47,6 +47,30 @@ class SapphireClient:
         except Exception:
             return False
 
+    def simulate_contract_call(
+        self,
+        contract_address: str,
+        abi: list,
+        function_name: str,
+        args: list,
+    ) -> None:
+        """Dry-run a call via ``eth_call`` and raise if it would revert.
+
+        Balances on the accounting ledger are confidential, so the service
+        cannot read a user's balance to pre-check it. A simulation gets the
+        same answer from the contract itself without spending gas, and covers
+        every revert cause at once (insufficient balance either side, a
+        consumed nonce, a bad signature) rather than just the one we thought
+        to check.
+
+        No gas field is set: the Sapphire middleware re-encodes call params
+        and chokes on an explicit hex gas value, and eth_call does not need
+        one.
+        """
+        address = Web3.to_checksum_address(contract_address)
+        contract = self.w3.eth.contract(address=address, abi=abi)
+        contract.functions[function_name](*args).call({"from": self.account.address})
+
     def execute_contract_call(
         self,
         contract_address: str,

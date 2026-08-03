@@ -111,33 +111,67 @@ class SwapExecutor:
                     lp_nonce,
                 )
 
+                swap_args = [
+                    Web3.to_checksum_address(user_address),
+                    bytes.fromhex(quote["from_token_id"][2:]),
+                    int(quote["from_amount"]),
+                    input_nonce,
+                    input_sig_bytes,
+                    bytes.fromhex(quote["to_token_id"][2:]),
+                    int(quote["to_amount_estimate"]),
+                    lp_nonce,
+                    output_sig_bytes,
+                ]
+
+                await self._reject_if_swap_would_revert(swap_id, swap_args)
+
                 tx_hash = await asyncio.to_thread(
                     self.sapphire.execute_contract_call,
                     contract_address=self.settings.swap_manager_contract_address,
                     abi=SWAP_MANAGER_ABI,
                     function_name="swap",
-                    args=[
-                        Web3.to_checksum_address(user_address),
-                        bytes.fromhex(quote["from_token_id"][2:]),
-                        int(quote["from_amount"]),
-                        input_nonce,
-                        input_sig_bytes,
-                        bytes.fromhex(quote["to_token_id"][2:]),
-                        int(quote["to_amount_estimate"]),
-                        lp_nonce,
-                        output_sig_bytes,
-                    ],
+                    args=swap_args,
                     gas_limit=1000000,
                 )
 
             self._update_swap(swap_id, status=SwapStatus.COMPLETED.value, swap_tx_hash=tx_hash)
 
+        except ValueError:
+            raise
         except Exception as exc:
             logger.exception(f"Swap {swap_id} failed")
             error_msg = sanitize_error(str(exc))
             self._update_swap(swap_id, status=SwapStatus.FAILED.value, error=error_msg)
 
         return self._get_swap(swap_id)
+
+    async def _reject_if_swap_would_revert(self, swap_id: str, swap_args: list) -> None:
+        """Dry-run the swap and reject it as a bad request if it cannot succeed.
+
+        The user's accounting balance is confidential, so it cannot be read
+        and checked the way LP liquidity is above. Simulating the real call
+        asks the contract the same question for free, and turns a guaranteed
+        on-chain revert — which costs the LP gas and reports back an opaque
+        "failed" — into a 400 before anything is broadcast.
+        """
+        try:
+            await asyncio.to_thread(
+                self.sapphire.simulate_contract_call,
+                contract_address=self.settings.swap_manager_contract_address,
+                abi=SWAP_MANAGER_ABI,
+                function_name="swap",
+                args=swap_args,
+            )
+        except Exception as exc:
+            reason = sanitize_error(str(exc))
+            logger.warning("Swap %s rejected by simulation: %s", swap_id, reason)
+            self._update_swap(
+                swap_id, status=SwapStatus.FAILED.value, error=reason
+            )
+            raise ValueError(
+                "Swap cannot be executed: it would revert on-chain. This usually "
+                "means an insufficient balance or an already-used transfer nonce."
+            ) from exc
 
     def _validate_quote(self, quote_id: str) -> dict:
         db = get_db()

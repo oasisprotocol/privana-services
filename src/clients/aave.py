@@ -119,8 +119,24 @@ class AaveClient:
         return contract.functions.allowance(holder, self.pool_address).call()
 
     def _get_reserve_data(self, asset_address: str) -> tuple:
+        """Reserve struct for `asset_address`, rejecting assets the pool does
+        not list.
+
+        Aave V3 does not revert for an unknown asset: `getReserveData` returns
+        a zero-filled struct. Read literally that looks like a listed reserve
+        paying 0% with a zero-address aToken, so a misconfigured pool address
+        silently reports 0 APY and an unreadable balance instead of failing.
+        A zero aTokenAddress is the canonical "reserve not initialized"
+        signal, so turn it into an error here and every caller inherits the
+        check.
+        """
         asset = Web3.to_checksum_address(asset_address)
-        return self.pool.functions.getReserveData(asset).call()
+        reserve = self.pool.functions.getReserveData(asset).call()
+        if int(reserve[8], 16) == 0:
+            raise ValueError(
+                f"Asset {asset} is not a listed reserve on Aave pool {self.pool_address}"
+            )
+        return reserve
 
     def _send_pool_tx(self, function_name: str, args: list) -> str:
         return self._send_write_tx(self.pool_address, self.pool, function_name, args)

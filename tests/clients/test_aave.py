@@ -84,6 +84,29 @@ def test_get_supply_apy_bps_calls_pool_with_checksummed_asset():
     pool.functions.getReserveData.assert_called_once_with(TEST_USDC)
 
 
+ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
+
+
+def test_unlisted_reserve_raises_instead_of_reporting_zero_apy():
+    client, pool, _ = _make_client()
+    pool.functions.getReserveData.return_value.call.return_value = _reserve_data(
+        0, atoken_address=ZERO_ADDRESS
+    )
+
+    with pytest.raises(ValueError, match="not a listed reserve"):
+        client.get_supply_apy_bps(TEST_USDC)
+
+
+def test_unlisted_reserve_raises_on_atoken_lookup():
+    client, pool, _ = _make_client()
+    pool.functions.getReserveData.return_value.call.return_value = _reserve_data(
+        0, atoken_address=ZERO_ADDRESS
+    )
+
+    with pytest.raises(ValueError, match="not a listed reserve"):
+        client.get_aToken_address(TEST_USDC)
+
+
 def test_get_aToken_address_returns_reserve_field():
     client, pool, _ = _make_client()
     pool.functions.getReserveData.return_value.call.return_value = _reserve_data(atoken_address=TEST_ATOKEN)

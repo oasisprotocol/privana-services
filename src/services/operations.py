@@ -4,8 +4,10 @@ from src.core.db import get_db
 from src.models.operations import UnsettledOperation
 
 # "canceled" is part of the read contract even though current writers only
-# produce pending, completed, and failed rows.
-UNSETTLED_STATUSES = ("pending", "failed", "canceled")
+# produce pending, completed, failed, and undeployed rows. "undeployed" is
+# unsettled by design: the shares exist but the funds still need an operator
+# to redeploy them into the strategy.
+UNSETTLED_STATUSES = ("pending", "failed", "canceled", "undeployed")
 
 
 def list_unsettled_operations(user_address: str, limit: int) -> list[UnsettledOperation]:
@@ -17,8 +19,11 @@ def list_unsettled_operations(user_address: str, limit: int) -> list[UnsettledOp
         *UNSETTLED_STATUSES,
         limit,
     )
+    # Placeholders are generated from the module constant, never from input,
+    # so the values stay bound.
+    status_placeholders = ", ".join("?" * len(UNSETTLED_STATUSES))
     rows = db.execute(
-        """
+        f"""
         SELECT * FROM (
             SELECT
                 id AS operation_id,
@@ -38,7 +43,7 @@ def list_unsettled_operations(user_address: str, limit: int) -> list[UnsettledOp
                 NULL AS token_id,
                 NULL AS amount
             FROM swaps
-            WHERE user_address = ? AND status IN (?, ?, ?)
+            WHERE user_address = ? AND status IN ({status_placeholders})
 
             UNION ALL
 
@@ -60,7 +65,7 @@ def list_unsettled_operations(user_address: str, limit: int) -> list[UnsettledOp
                 token_id,
                 amount
             FROM earn_transactions
-            WHERE user_address = ? AND status IN (?, ?, ?)
+            WHERE user_address = ? AND status IN ({status_placeholders})
         )
         ORDER BY updated_at DESC, created_at DESC, operation_id DESC
         LIMIT ?

@@ -281,7 +281,11 @@ async def register_aave_strategies_from_config(
     return count
 
 
-async def register_midas_strategies_from_config(registry: StrategyRegistry, raw_config: str) -> int:
+async def register_midas_strategies_from_config(
+    registry: StrategyRegistry,
+    raw_config: str,
+    defillama_pool_ids: str = "",
+) -> int:
     """Parse ``MIDAS_POOL_ASSETS`` JSON and register a MidasStrategy per pool.
 
     Config format:
@@ -324,6 +328,7 @@ async def register_midas_strategies_from_config(registry: StrategyRegistry, raw_
 
     client = get_midas_client()
     accounting = get_accounting_client()
+    llama_ids = _parse_defillama_pool_ids(defillama_pool_ids)
     count = 0
     for pool_id, entry in pool_assets.items():
         if not isinstance(entry, str) or not entry:
@@ -352,13 +357,24 @@ async def register_midas_strategies_from_config(registry: StrategyRegistry, raw_
             )
             continue
 
+        llama_id = llama_ids.get(pool_id.lower())
+        if llama_id:
+            llama_id = await _verified_defillama_pool_id(
+                pool_id, llama_id, expected_project="midas"
+            )
+
         registry.register(
             pool_id,
-            MidasStrategy(client=client, asset_address=asset_address, token_id=token_id),
+            MidasStrategy(
+                client=client,
+                asset_address=asset_address,
+                token_id=token_id,
+                defillama_pool_id=llama_id,
+            ),
         )
         logger.info(
-            "Registered MidasStrategy pool=%s asset=%s token=%s chain=%s",
-            pool_id, asset_address, token_id, token_info.chain_id,
+            "Registered MidasStrategy pool=%s asset=%s token=%s chain=%s apy_history=%s",
+            pool_id, asset_address, token_id, token_info.chain_id, bool(llama_id),
         )
         count += 1
     return count

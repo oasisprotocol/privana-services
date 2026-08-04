@@ -8,7 +8,6 @@ from src.models.api import TokenInfo
 from src.models.settings import Settings
 from src.services.earn.registry import (
     StrategyRegistry,
-    _verified_defillama_pool_id,
     get_strategy_registry,
     register_aave_strategies_from_config,
     register_midas_strategies_from_config,
@@ -266,7 +265,9 @@ def _midas_settings() -> Settings:
 
 
 USDC_BASE = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+MTBILL_TOKEN = "0xDD629E5241CbC5919847783e6C96B2De4754e438"
 AAVE_LLAMA_UUID = "7e0661bf-8cf3-45e6-9424-31916d4c7b84"
+MIDAS_LLAMA_UUID = "c4a1f2d0-2b6e-4c9a-8d3f-1a2b3c4d5e6f"
 
 
 def _llama_client(meta: object) -> MagicMock:
@@ -285,6 +286,18 @@ async def _register_aave_with_llama(registry, llama, llama_config: str):
          patch("src.services.earn.registry.get_defillama_client", return_value=llama), \
          patch("src.services.earn.strategies.aave.load_settings", return_value=_settings()):
         await register_aave_strategies_from_config(
+            registry, '{"0xab12": "0xaaaa"}', llama_config
+        )
+    return registry.get("0xab12")
+
+
+async def _register_midas_with_llama(registry, llama, llama_config: str):
+    accounting = _accounting_client({"0xaaaa": USDC_BASE})
+    with patch("src.clients.midas.get_midas_client", return_value=MagicMock()), \
+         patch("src.clients.accounting.get_accounting_client", return_value=accounting), \
+         patch("src.services.earn.registry.get_defillama_client", return_value=llama), \
+         patch("src.services.earn.strategies.midas.load_settings", return_value=_midas_settings()):
+        await register_midas_strategies_from_config(
             registry, '{"0xab12": "0xaaaa"}', llama_config
         )
     return registry.get("0xab12")
@@ -497,3 +510,82 @@ class TestRegisterMidasFromConfig:
         assert count == 1
         assert registry.pool_ids() == ["cd34"]
         assert any("failed to resolve token_id" in r.message for r in caplog.records)
+
+
+class TestMidasDefiLlamaWiring:
+    # DefiLlama keys midas-rwa rows by the underlying (symbol="USDC") and names
+    # the product in poolMeta, so poolMeta is the discriminator. mTBILL is one
+    # fund with a chain-independent APY, listed on Ethereum/Etherlink but not
+    # Base — we custody it on Base, so chain deliberately differs and is not
+    # asserted.
+    def _midas_row(self, **overrides) -> dict:
+        row = {"project": "midas-rwa", "symbol": "USDC", "poolMeta": "mTBILL",
+               "chain": "Ethereum", "underlyingTokens": [MTBILL_TOKEN]}
+        row.update(overrides)
+        return row
+
+    async def test_pool_without_a_uuid_has_no_history(self, registry: StrategyRegistry) -> None:
+        strategy = await _register_midas_with_llama(registry, _llama_client(None), "")
+
+        assert strategy._defillama_pool_id is None
+        assert await strategy.get_apy_history() == []
+
+    async def test_mtbill_is_wired_in(self, registry: StrategyRegistry) -> None:
+        llama = _llama_client(self._midas_row())
+
+        strategy = await _register_midas_with_llama(
+            registry, llama, '{"0xab12": "%s"}' % MIDAS_LLAMA_UUID
+        )
+
+        assert strategy._defillama_pool_id == MIDAS_LLAMA_UUID
+
+    async def test_ethereum_row_accepted_though_we_hold_on_base(
+        self, registry: StrategyRegistry
+    ) -> None:
+        # The fund's APY is chain-independent; the Ethereum row is the right
+        # source for our Base-held mTBILL, so chain must NOT disable it.
+        llama = _llama_client(self._midas_row(chain="Ethereum"))
+
+        strategy = await _register_midas_with_llama(
+            registry, llama, '{"0xab12": "%s"}' % MIDAS_LLAMA_UUID
+        )
+
+        assert strategy._defillama_pool_id == MIDAS_LLAMA_UUID
+
+    async def test_defillama_casing_still_matches(self, registry: StrategyRegistry) -> None:
+        # poolMeta casing can vary; the assert is case-insensitive so that alone
+        # must not disable the chart.
+        llama = _llama_client(self._midas_row(poolMeta="MTBILL"))
+
+        strategy = await _register_midas_with_llama(
+            registry, llama, '{"0xab12": "%s"}' % MIDAS_LLAMA_UUID
+        )
+
+        assert strategy._defillama_pool_id == MIDAS_LLAMA_UUID
+
+    async def test_wrong_midas_product_is_rejected(
+        self, registry: StrategyRegistry, caplog
+    ) -> None:
+        # Same project + underlying, but mBASIS is a different Midas product with
+        # its own APY (5.39% vs mTBILL's 4.37%). Serving its curve under the
+        # mTBILL pool would be a confident lie.
+        llama = _llama_client(self._midas_row(poolMeta="mBASIS", chain="Base"))
+
+        strategy = await _register_midas_with_llama(
+            registry, llama, '{"0xab12": "%s"}' % MIDAS_LLAMA_UUID
+        )
+
+        assert strategy._defillama_pool_id is None
+        assert any("not product" in r.message for r in caplog.records)
+
+    async def test_wrong_project_is_rejected(
+        self, registry: StrategyRegistry, caplog
+    ) -> None:
+        llama = _llama_client(self._midas_row(project="midas"))
+
+        strategy = await _register_midas_with_llama(
+            registry, llama, '{"0xab12": "%s"}' % MIDAS_LLAMA_UUID
+        )
+
+        assert strategy._defillama_pool_id is None
+        assert any("not project" in r.message for r in caplog.records)

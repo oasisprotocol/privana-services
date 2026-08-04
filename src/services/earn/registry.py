@@ -133,7 +133,10 @@ def _parse_defillama_pool_ids(raw_config: str) -> dict[str, str]:
 
 
 async def _verified_defillama_pool_id(
-    pool_id: str, uuid: str, expected_project: str
+    pool_id: str,
+    uuid: str,
+    expected_project: str,
+    expected_pool_meta: Optional[str] = None,
 ) -> Optional[str]:
     """Check a configured DefiLlama UUID before we trust it as a pool's APY source,
     returning it when it holds up and None when it demonstrably doesn't.
@@ -147,6 +150,15 @@ async def _verified_defillama_pool_id(
     testnet APY is meaningless and the mainnet rate is the one a user is really
     being offered — so token addresses legitimately differ and cannot be compared.
     The resolved pool is logged in full so a mis-mapping is visible at boot.
+
+    `expected_pool_meta` is an optional product discriminator for sources where
+    `project` alone can't tell rows apart. DefiLlama keys `midas-rwa` rows by the
+    *underlying* (symbol is `USDC`), so a dozen different products (mTBILL,
+    mBASIS, mMEV, …) share one project + symbol and only `poolMeta` names the
+    actual product. Compared case-insensitively. We do NOT assert chain here:
+    mTBILL is one fund whose APY is chain-independent, and we hold it on Base
+    while DefiLlama tracks it on Ethereum, so the chains legitimately differ.
+    Left unset for Aave, which keeps its project-only behaviour.
 
     A lookup that *fails* is not a mismatch: DefiLlama being unreachable at boot
     keeps the configured id rather than silently disabling the chart until someone
@@ -179,6 +191,16 @@ async def _verified_defillama_pool_id(
             "DEFILLAMA_POOL_IDS pool=%s: uuid=%s is %s, not project %r; "
             "refusing to serve its APY history",
             pool_id, uuid, descriptor, expected_project,
+        )
+        return None
+
+    if expected_pool_meta is not None and (
+        (meta.get("poolMeta") or "").lower() != expected_pool_meta.lower()
+    ):
+        logger.error(
+            "DEFILLAMA_POOL_IDS pool=%s: uuid=%s is %s, not product %r; "
+            "refusing to serve its APY history",
+            pool_id, uuid, descriptor, expected_pool_meta,
         )
         return None
 
@@ -360,7 +382,10 @@ async def register_midas_strategies_from_config(
         llama_id = llama_ids.get(pool_id.lower())
         if llama_id:
             llama_id = await _verified_defillama_pool_id(
-                pool_id, llama_id, expected_project="midas"
+                pool_id,
+                llama_id,
+                expected_project="midas-rwa",
+                expected_pool_meta="mTBILL",
             )
 
         registry.register(

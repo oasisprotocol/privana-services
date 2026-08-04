@@ -79,18 +79,20 @@ class MidasStrategy(BaseStrategy):
     while a Midas operator approves it). Holding a shared withdraw lock that
     long would block every other pool's withdrawals.
 
-    The headline APY is admin-managed via the ``MIDAS_APY_BPS`` setting.
-    mTBILL yield is realised as price appreciation against USD, not as a
-    token-balance accrual, so the live APY is not derivable from a single
-    on-chain read. The configured value is used for ``/v1/earn/pools``
-    display only and has no impact on routing or share math.
+    The headline APY prefers the live DefiLlama rate — the latest point of
+    the same mTBILL series behind ``get_apy_history`` — and falls back to the
+    admin-set ``MIDAS_APY_BPS`` setting when no DefiLlama pool is configured
+    or the fetch fails. mTBILL yield is realised as price appreciation against
+    USD, not as a token-balance accrual, so the rate is not derivable from a
+    single on-chain read; DefiLlama does the sample-and-annualise for us. The
+    value is used for ``/v1/earn/pools`` display only and has no impact on
+    routing or share math.
 
-    Historical APY, when a DefiLlama pool is configured, comes from
-    DefiLlama's mTBILL series (mirrors AaveStrategy). It is sourced
-    independently of ``MIDAS_APY_BPS``, so the chart's latest point and the
-    headline value may diverge; that is accepted — the chart is decoration,
-    the headline is the offered rate. Absent a configured pool there is no
-    history and ``get_apy_history`` returns an empty list.
+    Historical APY comes from DefiLlama's mTBILL series when a pool is
+    configured (mirrors AaveStrategy). Because the headline is that series'
+    latest point, chart and headline agree by construction. Absent a
+    configured pool there is no history: ``get_apy_history`` returns an empty
+    list and the headline falls back to ``MIDAS_APY_BPS``.
 
     `convert_usdc_to_mtbill_amount` and `convert_mtbill_to_usdc_amount` are
     staticmethods so they can be unit-tested without constructing a
@@ -168,6 +170,13 @@ class MidasStrategy(BaseStrategy):
         return await get_authenticated_privana_client()
 
     async def get_apy_bps(self) -> int:
+        # Prefer the live DefiLlama rate (the series' latest point); fall back
+        # to the admin-set constant when no pool is configured or the fetch
+        # fails. Shares the DefiLlama 1h cache with get_apy_history, so calling
+        # it here is cheap.
+        history = await self.get_apy_history()
+        if history:
+            return history[-1].apy_bps
         return self._apy_bps
 
     async def get_apy_history(self, days: Optional[int] = None) -> list[ApyPoint]:

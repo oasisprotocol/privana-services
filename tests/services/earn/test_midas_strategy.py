@@ -1,4 +1,3 @@
-import asyncio
 from dataclasses import dataclass, replace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -6,7 +5,6 @@ import pytest
 
 from src.core.config import load_settings
 from src.models.settings import Settings
-
 
 ASSET_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
 TOKEN_ID = "0xc719650e9f4b0f27d956638c54518932ef9d15e720a1a2b2850250bcd0816514"
@@ -201,12 +199,14 @@ def test_unsupported_chain_id_rejected(midas_client, privana) -> None:
 
 
 @pytest.mark.asyncio
-async def test_get_apy_bps_returns_configured_default(strategy) -> None:
+async def test_get_apy_bps_falls_back_to_constant_without_a_pool(strategy) -> None:
+    # No DefiLlama pool configured on the default fixture, so the headline
+    # falls back to the admin-set MIDAS_APY_BPS.
     assert await strategy.get_apy_bps() == 350
 
 
 @pytest.mark.asyncio
-async def test_get_apy_bps_reads_from_settings(midas_client, privana) -> None:
+async def test_get_apy_bps_reads_fallback_constant_from_settings(midas_client, privana) -> None:
     from src.services.earn.strategies.midas import MidasStrategy
 
     with patch(
@@ -222,6 +222,59 @@ async def test_get_apy_bps_reads_from_settings(midas_client, privana) -> None:
         )
 
     assert await s.get_apy_bps() == 525
+
+
+def _strategy_with_llama(midas_client, privana, llama):
+    from src.services.earn.strategies.midas import MidasStrategy
+
+    with patch(
+        "src.services.earn.strategies.midas.load_settings",
+        return_value=_strategy_settings(apy_bps=350),
+    ):
+        return MidasStrategy(
+            client=midas_client,
+            asset_address=ASSET_ADDRESS,
+            token_id=TOKEN_ID,
+            privana_client=privana,
+            poll_interval_sec=0,
+            defillama_pool_id="pool-uuid",
+            defillama_client=llama,
+        )
+
+
+@pytest.mark.asyncio
+async def test_get_apy_bps_prefers_defillama_latest_point(midas_client, privana) -> None:
+    from src.clients.defillama import ChartPoint
+
+    llama = MagicMock()
+    llama.get_pool_chart = AsyncMock(
+        return_value=[  # oldest first; the latest point wins
+            ChartPoint(timestamp=100, apy_bps=430),
+            ChartPoint(timestamp=200, apy_bps=437),
+        ]
+    )
+    s = _strategy_with_llama(midas_client, privana, llama)
+
+    assert await s.get_apy_bps() == 437  # the live rate, not the 350 constant
+
+
+@pytest.mark.asyncio
+async def test_get_apy_bps_falls_back_when_defillama_empty(midas_client, privana) -> None:
+    llama = MagicMock()
+    llama.get_pool_chart = AsyncMock(return_value=[])
+    s = _strategy_with_llama(midas_client, privana, llama)
+
+    assert await s.get_apy_bps() == 350
+
+
+@pytest.mark.asyncio
+async def test_get_apy_bps_falls_back_when_defillama_errors(midas_client, privana) -> None:
+    # A DefiLlama outage must not fail the pool read; degrade to the constant.
+    llama = MagicMock()
+    llama.get_pool_chart = AsyncMock(side_effect=RuntimeError("llama down"))
+    s = _strategy_with_llama(midas_client, privana, llama)
+
+    assert await s.get_apy_bps() == 350
 
 
 class TestConvertUsdcToMtbillAmount:

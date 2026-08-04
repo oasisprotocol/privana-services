@@ -9,9 +9,9 @@ from src.clients.lifi import get_lifi_client
 from src.core.config import load_settings
 from src.core.db import db_write, get_db
 from src.core.fees import calculate_fee
+from src.core.validation import validate_address, validate_amount, validate_token_id
 from src.models.api import QuoteResponse
 from src.models.swap import SwapVenue
-from src.core.validation import validate_address, validate_amount, validate_token_id
 
 logger = logging.getLogger(__name__)
 

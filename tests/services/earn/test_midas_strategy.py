@@ -1,4 +1,3 @@
-import asyncio
 from dataclasses import dataclass, replace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -6,7 +5,6 @@ import pytest
 
 from src.core.config import load_settings
 from src.models.settings import Settings
-
 
 ASSET_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
 TOKEN_ID = "0xc719650e9f4b0f27d956638c54518932ef9d15e720a1a2b2850250bcd0816514"

@@ -36,6 +36,12 @@ target-version = "py311"
 select = ["E", "F", "I", "W"]
 ignore = ["E501"]
 
+[tool.ruff.lint.per-file-ignores]
+# The conftests must load their .env before importing anything under src/,
+# because src.core.config reads the environment at import time.
+"tests/conftest.py" = ["E402"]
+"tests/integration/conftest.py" = ["E402"]
+
 [dependency-groups]
 dev = [
     "pytest>=7.0.0",

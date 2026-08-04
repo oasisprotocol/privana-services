@@ -6,7 +6,6 @@ import pytest
 
 from src.core.config import load_settings
 
-
 SAMPLE_ROUTES_RESPONSE = {
     "routes": [
         {

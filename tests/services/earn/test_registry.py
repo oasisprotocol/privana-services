@@ -8,7 +8,6 @@ from src.models.api import TokenInfo
 from src.models.settings import Settings
 from src.services.earn.registry import (
     StrategyRegistry,
-    _verified_defillama_pool_id,
     get_strategy_registry,
     register_aave_strategies_from_config,
     register_midas_strategies_from_config,

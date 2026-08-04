@@ -114,5 +114,6 @@ class TestErc20Helpers:
 class TestModuleLock:
     def test_base_tx_lock_exists(self):
         import asyncio
+
         from src.clients.base_evm import base_tx_lock
         assert isinstance(base_tx_lock, asyncio.Lock)

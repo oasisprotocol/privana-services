@@ -13,7 +13,12 @@ from src.core.abi import load_abi
 from src.core.config import load_settings
 from src.core.db import db_write, get_db
 from src.core.eip712 import sign_transfer
-from src.core.validation import sanitize_error, validate_address, validate_amount, validate_signature
+from src.core.validation import (
+    sanitize_error,
+    validate_address,
+    validate_amount,
+    validate_signature,
+)
 from src.services.earn.registry import StrategyRegistry, get_strategy_registry
 from src.services.earn.strategies.base import ApyPoint
 

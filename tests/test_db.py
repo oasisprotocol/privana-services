@@ -1,9 +1,7 @@
 import sqlite3
 
-import pytest
-
 import src.core.db as db_module
-from src.core.db import db_write, close_db
+from src.core.db import close_db, db_write
 
 
 class TestMigrations:

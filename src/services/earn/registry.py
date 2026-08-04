@@ -320,6 +320,14 @@ async def register_midas_strategies_from_config(
     the strategy's ``asset_address``. The Midas-specific vault/oracle
     addresses come from global settings, not the per-pool config.
 
+    ``defillama_pool_ids`` is the ``DEFILLAMA_POOL_IDS`` env map (shared with
+    Aave, keyed by ``pool_id_hex``). When it carries a UUID for a pool, that
+    DefiLlama pool backs the strategy's APY history and live headline rate.
+    Each UUID is verified at boot against ``project="midas-rwa"`` +
+    ``poolMeta="mTBILL"`` before it is trusted; a pool with no entry (or a
+    UUID that fails verification) simply has no history and its headline
+    falls back to the ``MIDAS_APY_BPS`` constant.
+
     Empty or whitespace-only input short-circuits with a debug log.
 
     Returns the number of pools registered. Per-pool failures (bad shape,

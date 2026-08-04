@@ -273,6 +273,59 @@ class TestVenueSelection(TestGetQuote):
                 user_address="0x" + "a" * 40,
             )
 
+    async def test_internal_swap_over_max_usd_cap_raises(self, test_db):
+        service = self._make_service()
+        service.settings = replace(service.settings, max_swap_amount_usd=100)
+        routes_with_usd = {
+            "routes": [{"toAmount": "2000000000000000000",
+                        "toAmountMin": "1950000000000000000",
+                        "fromAmountUSD": "250.00",
+                        "steps": [{"tool": "uniswap"}]}]
+        }
+        service.lifi.get_routes = AsyncMock(return_value=routes_with_usd)
+        with pytest.raises(ValueError, match="exceeds the maximum of 100 USD"):
+            await service.get_quote(
+                from_token_id="0xaaa",
+                to_token_id="0xbbb",
+                from_amount="1000000",
+                user_address="0x" + "a" * 40,
+            )
+
+    async def test_max_usd_cap_disabled_when_zero(self, test_db):
+        service = self._make_service()
+        service.settings = replace(service.settings, max_swap_amount_usd=0)
+        routes_with_usd = {
+            "routes": [{"toAmount": "2000000000000000000",
+                        "toAmountMin": "1950000000000000000",
+                        "fromAmountUSD": "250.00",
+                        "steps": [{"tool": "uniswap"}]}]
+        }
+        service.lifi.get_routes = AsyncMock(return_value=routes_with_usd)
+        result = await service.get_quote(
+            from_token_id="0xaaa",
+            to_token_id="0xbbb",
+            from_amount="1000000",
+            user_address="0x" + "a" * 40,
+        )
+        assert result.quote_id is not None
+
+    async def test_max_usd_cap_allows_route_without_usd_price(self, test_db):
+        service = self._make_service()
+        service.settings = replace(service.settings, max_swap_amount_usd=100)
+        routes_no_usd = {
+            "routes": [{"toAmount": "2000000000000000000",
+                        "toAmountMin": "1950000000000000000",
+                        "steps": [{"tool": "uniswap"}]}]
+        }
+        service.lifi.get_routes = AsyncMock(return_value=routes_no_usd)
+        result = await service.get_quote(
+            from_token_id="0xaaa",
+            to_token_id="0xbbb",
+            from_amount="1000000",
+            user_address="0x" + "a" * 40,
+        )
+        assert result.quote_id is not None
+
     async def test_lifi_swap_over_usd_cap_raises(self, test_db):
         service = self._make_service()
         service.settings = replace(

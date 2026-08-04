@@ -18,7 +18,7 @@ from privana import (
 from privana.client.errors import NetworkError
 from privana.types.common import Network
 
-from src.clients.defillama import DefiLlamaClient, get_defillama_client
+from src.clients.defillama import DefiLlamaClient
 from src.clients.midas import MidasClient
 from src.clients.privana import (
     get_authenticated_privana_client,
@@ -26,6 +26,7 @@ from src.clients.privana import (
 )
 from src.core.config import load_settings
 from src.services.earn.strategies.base import ApyPoint, BaseStrategy
+from src.services.earn.strategies.defillama_history import defillama_apy_history
 
 logger = logging.getLogger(__name__)
 
@@ -170,30 +171,9 @@ class MidasStrategy(BaseStrategy):
         return self._apy_bps
 
     async def get_apy_history(self, days: Optional[int] = None) -> list[ApyPoint]:
-        if not self._defillama_pool_id:
-            return []
-
-        client = self._defillama or get_defillama_client()
-        try:
-            raw = await client.get_pool_chart(self._defillama_pool_id)
-        except Exception:
-            # A chart is decoration on top of a working pool. Degrade to "no
-            # history" rather than failing the request, same as AaveStrategy.
-            logger.exception(
-                "MidasStrategy: DefiLlama chart failed pool=%s; serving no history",
-                self._defillama_pool_id,
-            )
-            return []
-
-        cutoff = 0
-        if days is not None:
-            cutoff = int(time.time()) - days * 86400
-
-        return [
-            ApyPoint(timestamp=p.timestamp, apy_bps=p.apy_bps)
-            for p in raw
-            if p.timestamp >= cutoff
-        ]
+        return await defillama_apy_history(
+            self._defillama_pool_id, self._defillama, days, log_label="MidasStrategy",
+        )
 
     @staticmethod
     def convert_usdc_to_mtbill_amount(

@@ -4,8 +4,9 @@
     "": {
       "name": "privana-services-solidity",
       "dependencies": {
-        "@openzeppelin/contracts": "~5.4.0",
-        "@openzeppelin/contracts-upgradeable": "~5.4.0",
+        "@oasisprotocol/sapphire-contracts": "^0.2.18",
+        "@openzeppelin/contracts": "5.4.0",
+        "@openzeppelin/contracts-upgradeable": "5.4.0",
       },
       "devDependencies": {
         "@nomicfoundation/hardhat-chai-matchers": "^2.1.2",
@@ -225,6 +226,8 @@
     "@nomicfoundation/solidity-analyzer-win32-x64-msvc": ["@nomicfoundation/solidity-analyzer-win32-x64-msvc@0.1.2", "", {}, "sha512-Fdjli4DCcFHb4Zgsz0uEJXZ2K7VEO+w5KVv7HmT7WO10iODdU9csC2az4jrhEsRtiR9Gfd74FlG0NYlw1BMdyA=="],
 
     "@oasisprotocol/deoxysii": ["@oasisprotocol/deoxysii@0.0.6", "", {}, "sha512-TI51bIpChfsla9aRbjip6zvTbz6rpsqKgM7MqJvSfeFF6G5xLXQcbSC9u/1hOnOOazd7HaqA9NvaXQdeKCb3yw=="],
+
+    "@oasisprotocol/sapphire-contracts": ["@oasisprotocol/sapphire-contracts@0.2.18", "", { "dependencies": { "@openzeppelin/contracts": "5.4.0", "@openzeppelin/contracts-upgradeable": "5.4.0" } }, "sha512-2DcMp4EKMdqbIWeDra7E8pBfSACVFBxZ/Uzs+AprpHH18dMZGj7vLWmp3978hZ1f0HA0cggkuWDw/LjZurJyng=="],
 
     "@oasisprotocol/sapphire-hardhat": ["@oasisprotocol/sapphire-hardhat@2.22.3", "", { "dependencies": { "@oasisprotocol/sapphire-paratime": "^2.3.0" }, "peerDependencies": { "hardhat": "2.x" } }, "sha512-9GqmHx9XC2mMSuejFjoS6PnRH2zPfWmbA9N/LBBd0uGkzVxVkMquqqhz5WDq0qpzJqoKHVn5PhM5gG8We3DWWQ=="],
 

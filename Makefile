@@ -14,19 +14,19 @@ test:
 	DISABLE_ROFL_KEYS=1 uv run pytest
 
 lint:
-	uv run ruff check src test
+	uv run ruff check src tests
 
 typecheck:
 	uv run mypy src
 
 lint-fix:
-	uv run ruff check --fix src test
+	uv run ruff check --fix src tests
 
 format:
-	uv run ruff format src test
+	uv run ruff format src tests
 
 format-check:
-	uv run ruff format --check src test
+	uv run ruff format --check src tests
 
 openapi:
 	uv run python scripts/gen_openapi.py > docs/openapi.json

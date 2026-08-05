@@ -72,7 +72,9 @@ async def lifespan(_app: FastAPI):
 
     try:
         registered = await register_midas_strategies_from_config(
-            get_strategy_registry(), settings.midas_pool_assets,
+            get_strategy_registry(),
+            settings.midas_pool_assets,
+            settings.defillama_pool_ids,
         )
         if registered:
             logger.info("Earn strategy registry: %d Midas pool(s) registered", registered)

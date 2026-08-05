@@ -18,13 +18,15 @@ from privana import (
 from privana.client.errors import NetworkError
 from privana.types.common import Network
 
+from src.clients.defillama import DefiLlamaClient
 from src.clients.midas import MidasClient
 from src.clients.privana import (
     get_authenticated_privana_client,
     get_privana_client,
 )
 from src.core.config import load_settings
-from src.services.earn.strategies.base import BaseStrategy
+from src.services.earn.strategies.base import ApyPoint, BaseStrategy
+from src.services.earn.strategies.defillama_history import defillama_apy_history
 
 logger = logging.getLogger(__name__)
 
@@ -77,11 +79,20 @@ class MidasStrategy(BaseStrategy):
     while a Midas operator approves it). Holding a shared withdraw lock that
     long would block every other pool's withdrawals.
 
-    APY is admin-managed via the ``MIDAS_APY_BPS`` setting. mTBILL yield is
-    realised as price appreciation against USD, not as a token-balance
-    accrual, so the live APY is not derivable from a single on-chain read.
-    The configured value is used for ``/v1/earn/pools`` display only and
-    has no impact on routing or share math.
+    The headline APY prefers the live DefiLlama rate — the latest point of
+    the same mTBILL series behind ``get_apy_history`` — and falls back to the
+    admin-set ``MIDAS_APY_BPS`` setting when no DefiLlama pool is configured
+    or the fetch fails. mTBILL yield is realised as price appreciation against
+    USD, not as a token-balance accrual, so the rate is not derivable from a
+    single on-chain read; DefiLlama does the sample-and-annualise for us. The
+    value is used for ``/v1/earn/pools`` display only and has no impact on
+    routing or share math.
+
+    Historical APY comes from DefiLlama's mTBILL series when a pool is
+    configured (mirrors AaveStrategy). Because the headline is that series'
+    latest point, chart and headline agree by construction. Absent a
+    configured pool there is no history: ``get_apy_history`` returns an empty
+    list and the headline falls back to ``MIDAS_APY_BPS``.
 
     `convert_usdc_to_mtbill_amount` and `convert_mtbill_to_usdc_amount` are
     staticmethods so they can be unit-tested without constructing a
@@ -100,10 +111,18 @@ class MidasStrategy(BaseStrategy):
         apy_bps: Optional[int] = None,
         poll_interval_sec: float = DEFAULT_POLL_INTERVAL_SEC,
         max_bridge_poll_attempts: int = DEFAULT_MAX_BRIDGE_POLL_ATTEMPTS,
+        defillama_pool_id: Optional[str] = None,
+        defillama_client: Optional[DefiLlamaClient] = None,
     ) -> None:
         self._client = client
         self._asset_address = asset_address
         self._token_id = token_id
+        # mTBILL exposes no APY on-chain at all: yield is price appreciation,
+        # so a rate only exists once you sample the oracle over time. Absent a
+        # configured DefiLlama pool we have no history, and get_apy_history
+        # says so.
+        self._defillama_pool_id = defillama_pool_id
+        self._defillama = defillama_client
 
         settings = load_settings()
         self._pool_address = pool_address or settings.liquidity_provider_address
@@ -151,7 +170,19 @@ class MidasStrategy(BaseStrategy):
         return await get_authenticated_privana_client()
 
     async def get_apy_bps(self) -> int:
+        # Prefer the live DefiLlama rate (the series' latest point); fall back
+        # to the admin-set constant when no pool is configured or the fetch
+        # fails. Shares the DefiLlama 1h cache with get_apy_history, so calling
+        # it here is cheap.
+        history = await self.get_apy_history()
+        if history:
+            return history[-1].apy_bps
         return self._apy_bps
+
+    async def get_apy_history(self, days: Optional[int] = None) -> list[ApyPoint]:
+        return await defillama_apy_history(
+            self._defillama_pool_id, self._defillama, days, log_label="MidasStrategy",
+        )
 
     @staticmethod
     def convert_usdc_to_mtbill_amount(

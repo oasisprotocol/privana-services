@@ -17,6 +17,12 @@ TEST_USER_ADDRESS = Account.from_key(TEST_USER_SK).address if TEST_USER_SK else 
 USDC_TOKEN_ID = "0x330ba47d00c7ce3018deee017b319fd7cc6473a2ddc9e6eba6ebb4207be15279"
 WETH_TOKEN_ID = "0x335b5cccd1e63b2fe79863a0db73fce430e4e66902e2b78424f8662621e29fb7"
 
+# Kept small so a run stays within the test user's standing WETH balance. An
+# over-balance amount does not fail loudly on the ledger side; it is rejected
+# by the pre-flight simulation, which reads as a broken test rather than an
+# under-funded account.
+WETH_SWAP_AMOUNT = 10**14
+
 pytestmark = [
     pytest.mark.skipif(
         not LP_SK or not os.getenv("LIFI_API_KEY") or not TEST_USER_SK,
@@ -85,7 +91,7 @@ class TestQuoteEndpoint:
         r = await api_client.get("/v1/quote", params={
             "from_token_id": WETH_TOKEN_ID,
             "to_token_id": USDC_TOKEN_ID,
-            "from_amount": str(5 * 10**15),
+            "from_amount": str(WETH_SWAP_AMOUNT),
             "user_address": TEST_USER_ADDRESS,
         })
         assert r.status_code == 200
@@ -147,7 +153,7 @@ class TestSwapEndpoint:
         print(f"\n  USDC→WETH swap tx: {result['tx_hash']}")
 
     async def test_swap_weth_to_usdc(self, api_client):
-        swap_amount = str(5 * 10**15)
+        swap_amount = str(WETH_SWAP_AMOUNT)
 
         r = await api_client.get("/v1/quote", params={
             "from_token_id": WETH_TOKEN_ID,

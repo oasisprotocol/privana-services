@@ -2,11 +2,16 @@ import re
 
 HEX_PATTERN = re.compile(r"^0x[0-9a-fA-F]+$")
 ADDRESS_PATTERN = re.compile(r"^0x[0-9a-fA-F]{40}$")
+TOKEN_ID_PATTERN = re.compile(r"^0x[0-9a-fA-F]{64}$")
 
 
 def validate_token_id(value: str, name: str = "token_id") -> None:
-    if not value or not HEX_PATTERN.match(value):
-        raise ValueError(f"{name} must be a hex string starting with 0x")
+    """Accounting token ids are bytes32. Checking the length here turns a
+    wrong-sized id into a 400 instead of an ABI encoding error deeper in the
+    swap path, which surfaced as an opaque 500.
+    """
+    if not value or not TOKEN_ID_PATTERN.match(value):
+        raise ValueError(f"{name} must be a bytes32 hex string (0x + 64 hex chars)")
 
 
 def validate_address(value: str, name: str = "address") -> None:

@@ -7,8 +7,12 @@ import pytest
 from src.core.config import load_settings
 from src.models.common import Balance
 
+# Accounting token ids are bytes32; validation rejects anything shorter.
+TOKEN_A = "0x" + "aa" * 32
+TOKEN_B = "0x" + "bb" * 32
+
 SUFFICIENT_BALANCE = Balance(
-    user_address="0xlp", token_id="0xbbb", balance="999999999999999999999"
+    user_address="0xlp", token_id=TOKEN_B, balance="999999999999999999999"
 )
 
 
@@ -26,7 +30,7 @@ class TestQuoteDeduplication:
         future = int(time.time()) + 300
         insert_quote("q1", expires_at=future)
         service = self._make_service()
-        result = await service._find_existing_quote("0xuser", "0xaaa", "0xbbb", "1000000")
+        result = await service._find_existing_quote("0xuser", TOKEN_A, TOKEN_B, "1000000")
         assert result is not None
         assert result.quote_id == "q1"
 
@@ -34,21 +38,21 @@ class TestQuoteDeduplication:
         past = int(time.time()) - 10
         insert_quote("q2", expires_at=past)
         service = self._make_service()
-        result = await service._find_existing_quote("0xuser", "0xaaa", "0xbbb", "1000000")
+        result = await service._find_existing_quote("0xuser", TOKEN_A, TOKEN_B, "1000000")
         assert result is None
 
     async def test_returns_none_for_different_user(self, insert_quote):
         future = int(time.time()) + 300
         insert_quote("q3", expires_at=future, user_address="0xother")
         service = self._make_service()
-        result = await service._find_existing_quote("0xuser", "0xaaa", "0xbbb", "1000000")
+        result = await service._find_existing_quote("0xuser", TOKEN_A, TOKEN_B, "1000000")
         assert result is None
 
     async def test_returns_none_for_different_amount(self, insert_quote):
         future = int(time.time()) + 300
         insert_quote("q4", expires_at=future)
         service = self._make_service()
-        result = await service._find_existing_quote("0xuser", "0xaaa", "0xbbb", "9999999")
+        result = await service._find_existing_quote("0xuser", TOKEN_A, TOKEN_B, "9999999")
         assert result is None
 
 
@@ -112,7 +116,7 @@ class TestGetQuote:
 
         from src.models.common import TokenInfo
         from_token = TokenInfo(
-            token_id="0xaaa",
+            token_id=TOKEN_A,
             token_type=1,
             token_type_name="ERC20",
             data="0x00",
@@ -121,7 +125,7 @@ class TestGetQuote:
             token_address="0x8eEDCff0b07609Cfb5e2775dFf21EDbACc30D0df",
         )
         to_token = TokenInfo(
-            token_id="0xbbb",
+            token_id=TOKEN_B,
             token_type=1,
             token_type_name="ERC20",
             data="0x00",
@@ -147,14 +151,14 @@ class TestGetQuote:
     async def test_successful_quote_returns_all_fields(self, test_db):
         service = self._make_service()
         result = await service.get_quote(
-            from_token_id="0xaaa",
-            to_token_id="0xbbb",
+            from_token_id=TOKEN_A,
+            to_token_id=TOKEN_B,
             from_amount="1000000",
             user_address="0x" + "a" * 40,
         )
         assert result.quote_id is not None
-        assert result.from_token_id == "0xaaa"
-        assert result.to_token_id == "0xbbb"
+        assert result.from_token_id == TOKEN_A
+        assert result.to_token_id == TOKEN_B
         assert result.from_chain_id == 84532
         assert result.to_chain_id == 84532
         assert result.from_amount == "1000000"
@@ -173,20 +177,20 @@ class TestGetQuote:
         service.lifi.get_routes = AsyncMock(return_value={"routes": []})
         with pytest.raises(ValueError, match="No routes available"):
             await service.get_quote(
-                from_token_id="0xaaa",
-                to_token_id="0xbbb",
+                from_token_id=TOKEN_A,
+                to_token_id=TOKEN_B,
                 from_amount="1000000",
                 user_address="0x" + "a" * 40,
             )
 
     async def test_insufficient_liquidity_raises_value_error(self, test_db):
         service = self._make_service()
-        low_balance = Balance(user_address="0xlp", token_id="0xbbb", balance="1")
+        low_balance = Balance(user_address="0xlp", token_id=TOKEN_B, balance="1")
         service.accounting.get_lp_balance = AsyncMock(return_value=low_balance)
         with pytest.raises(ValueError, match="Insufficient liquidity"):
             await service.get_quote(
-                from_token_id="0xaaa",
-                to_token_id="0xbbb",
+                from_token_id=TOKEN_A,
+                to_token_id=TOKEN_B,
                 from_amount="1000000",
                 user_address="0x" + "a" * 40,
             )
@@ -194,8 +198,8 @@ class TestGetQuote:
     async def test_passes_accounting_chain_and_token_to_lifi(self, test_db):
         service = self._make_service()
         await service.get_quote(
-            from_token_id="0xaaa",
-            to_token_id="0xbbb",
+            from_token_id=TOKEN_A,
+            to_token_id=TOKEN_B,
             from_amount="1000000",
             user_address="0x" + "a" * 40,
         )
@@ -207,7 +211,7 @@ class TestGetQuote:
 
 
 class TestVenueSelection(TestGetQuote):
-    LOW_BALANCE = Balance(user_address="0xlp", token_id="0xbbb", balance="1")
+    LOW_BALANCE = Balance(user_address="0xlp", token_id=TOKEN_B, balance="1")
 
     async def test_flag_off_lp_short_raises(self, test_db):
         service = self._make_service()
@@ -215,8 +219,8 @@ class TestVenueSelection(TestGetQuote):
         service.accounting.get_lp_balance = AsyncMock(return_value=self.LOW_BALANCE)
         with pytest.raises(ValueError, match="Insufficient liquidity"):
             await service.get_quote(
-                from_token_id="0xaaa",
-                to_token_id="0xbbb",
+                from_token_id=TOKEN_A,
+                to_token_id=TOKEN_B,
                 from_amount="1000000",
                 user_address="0x" + "a" * 40,
             )
@@ -226,8 +230,8 @@ class TestVenueSelection(TestGetQuote):
         service = self._make_service()
         service.settings = replace(service.settings, lifi_execution_enabled=True)
         result = await service.get_quote(
-            from_token_id="0xaaa",
-            to_token_id="0xbbb",
+            from_token_id=TOKEN_A,
+            to_token_id=TOKEN_B,
             from_amount="1000000",
             user_address="0x" + "a" * 40,
         )
@@ -243,8 +247,8 @@ class TestVenueSelection(TestGetQuote):
         }}}
         service.accounting.get_lp_balance = AsyncMock(return_value=self.LOW_BALANCE)
         result = await service.get_quote(
-            from_token_id="0xaaa",
-            to_token_id="0xbbb",
+            from_token_id=TOKEN_A,
+            to_token_id=TOKEN_B,
             from_amount="1000000",
             user_address="0x" + "a" * 40,
         )
@@ -267,8 +271,8 @@ class TestVenueSelection(TestGetQuote):
         service.lifi.get_routes = AsyncMock(side_effect=[pricing_routes, {"routes": []}])
         with pytest.raises(ValueError, match="Insufficient liquidity"):
             await service.get_quote(
-                from_token_id="0xaaa",
-                to_token_id="0xbbb",
+                from_token_id=TOKEN_A,
+                to_token_id=TOKEN_B,
                 from_amount="1000000",
                 user_address="0x" + "a" * 40,
             )
@@ -285,8 +289,8 @@ class TestVenueSelection(TestGetQuote):
         service.lifi.get_routes = AsyncMock(return_value=routes_with_usd)
         with pytest.raises(ValueError, match="exceeds the maximum of 100 USD"):
             await service.get_quote(
-                from_token_id="0xaaa",
-                to_token_id="0xbbb",
+                from_token_id=TOKEN_A,
+                to_token_id=TOKEN_B,
                 from_amount="1000000",
                 user_address="0x" + "a" * 40,
             )
@@ -302,8 +306,8 @@ class TestVenueSelection(TestGetQuote):
         }
         service.lifi.get_routes = AsyncMock(return_value=routes_with_usd)
         result = await service.get_quote(
-            from_token_id="0xaaa",
-            to_token_id="0xbbb",
+            from_token_id=TOKEN_A,
+            to_token_id=TOKEN_B,
             from_amount="1000000",
             user_address="0x" + "a" * 40,
         )
@@ -319,8 +323,8 @@ class TestVenueSelection(TestGetQuote):
         }
         service.lifi.get_routes = AsyncMock(return_value=routes_no_usd)
         result = await service.get_quote(
-            from_token_id="0xaaa",
-            to_token_id="0xbbb",
+            from_token_id=TOKEN_A,
+            to_token_id=TOKEN_B,
             from_amount="1000000",
             user_address="0x" + "a" * 40,
         )
@@ -341,8 +345,8 @@ class TestVenueSelection(TestGetQuote):
         service.lifi.get_routes = AsyncMock(return_value=routes_with_usd)
         with pytest.raises(ValueError, match="exceeds LiFi routing limit"):
             await service.get_quote(
-                from_token_id="0xaaa",
-                to_token_id="0xbbb",
+                from_token_id=TOKEN_A,
+                to_token_id=TOKEN_B,
                 from_amount="1000000",
                 user_address="0x" + "a" * 40,
             )
@@ -361,8 +365,8 @@ class TestVenueSelection(TestGetQuote):
         }
         service.lifi.get_routes = AsyncMock(return_value=routes_with_usd)
         result = await service.get_quote(
-            from_token_id="0xaaa",
-            to_token_id="0xbbb",
+            from_token_id=TOKEN_A,
+            to_token_id=TOKEN_B,
             from_amount="1000000",
             user_address="0x" + "a" * 40,
         )
@@ -374,12 +378,12 @@ class TestVenueSelection(TestGetQuote):
         service.accounting.get_lp_balance = AsyncMock(return_value=self.LOW_BALANCE)
         user = "0x" + "a" * 40
         first = await service.get_quote(
-            from_token_id="0xaaa",
-            to_token_id="0xbbb",
+            from_token_id=TOKEN_A,
+            to_token_id=TOKEN_B,
             from_amount="1000000",
             user_address=user,
         )
         assert first.venue == "lifi"
-        existing = await service._find_existing_quote(user, "0xaaa", "0xbbb", "1000000")
+        existing = await service._find_existing_quote(user, TOKEN_A, TOKEN_B, "1000000")
         assert existing is not None
         assert existing.venue == "lifi"

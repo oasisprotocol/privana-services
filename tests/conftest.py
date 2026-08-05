@@ -38,8 +38,8 @@ def insert_quote(test_db):
             expires_at = now + 300
         defaults = {
             "user_address": "0xuser",
-            "from_token_id": "0xaaa",
-            "to_token_id": "0xbbb",
+            "from_token_id": "0x" + "aa" * 32,
+            "to_token_id": "0x" + "bb" * 32,
             "from_chain_id": 84532,
             "to_chain_id": 84532,
             "from_amount": "1000000",

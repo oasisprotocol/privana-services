@@ -136,7 +136,18 @@ class SwapExecutor:
 
             self._update_swap(swap_id, status=SwapStatus.COMPLETED.value, swap_tx_hash=tx_hash)
 
-        except ValueError:
+        except ValueError as exc:
+            # A ValueError means the request was rejected rather than settled,
+            # so it propagates as a 400. The row was already inserted though,
+            # and leaving it PENDING would strand it in the unsettled feed
+            # forever. _reject_if_swap_would_revert records the precise chain
+            # reason itself, so only close out rows it did not already touch.
+            if self._get_swap(swap_id).status == SwapStatus.PENDING.value:
+                self._update_swap(
+                    swap_id,
+                    status=SwapStatus.FAILED.value,
+                    error=sanitize_error(str(exc)),
+                )
             raise
         except Exception as exc:
             logger.exception(f"Swap {swap_id} failed")

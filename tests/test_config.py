@@ -33,6 +33,26 @@ def test_load_settings_without_lp_key_does_not_crash(monkeypatch):
     config_module.load_settings(refresh=True)
 
 
+def test_base_rpc_url_prefers_new_name(monkeypatch):
+    monkeypatch.setenv("BASE_RPC_URL", "https://mainnet.base.org")
+    monkeypatch.setenv("BASE_SEPOLIA_RPC_URL", "https://sepolia.base.org")
+    assert config_module._get_base_rpc_url() == "https://mainnet.base.org"
+
+
+def test_base_rpc_url_falls_back_to_legacy_name(monkeypatch, caplog):
+    monkeypatch.delenv("BASE_RPC_URL", raising=False)
+    monkeypatch.setenv("BASE_SEPOLIA_RPC_URL", "https://sepolia.base.org")
+    with caplog.at_level("WARNING"):
+        assert config_module._get_base_rpc_url() == "https://sepolia.base.org"
+    assert "BASE_SEPOLIA_RPC_URL is deprecated" in caplog.text
+
+
+def test_base_rpc_url_unset_returns_none(monkeypatch):
+    monkeypatch.delenv("BASE_RPC_URL", raising=False)
+    monkeypatch.delenv("BASE_SEPOLIA_RPC_URL", raising=False)
+    assert config_module._get_base_rpc_url() is None
+
+
 def _settings_with(**overrides):
     base = main_module.settings
     return dataclasses.replace(base, **overrides)
@@ -54,6 +74,21 @@ def test_validate_settings_flags_unset_addresses(monkeypatch):
     assert "ACCOUNTING_CONTRACT_ADDRESS is not set" in message
     assert "SWAP_MANAGER_CONTRACT_ADDRESS is not set" in message
     assert "EARN_MANAGER_CONTRACT_ADDRESS is not set" in message
+
+
+def test_validate_settings_flags_missing_base_rpc_url(monkeypatch):
+    crafted = _settings_with(
+        liquidity_provider_secret_key="0x" + "1" * 64,
+        accounting_contract_address="0x" + "a" * 40,
+        swap_manager_contract_address="0x" + "b" * 40,
+        earn_manager_contract_address="0x" + "c" * 40,
+        privana_api_base_url="https://example.test",
+        base_rpc_url="",
+        environment="production",
+    )
+    monkeypatch.setattr(main_module, "settings", crafted)
+    with pytest.raises(RuntimeError, match="BASE_RPC_URL is not set"):
+        main_module._validate_settings()
 
 
 def test_validate_settings_passes_with_real_addresses(monkeypatch):

@@ -22,8 +22,10 @@ AAVE_REFERRAL_CODE = 0
 class AaveClient:
     """Aave V3 Pool client. Reads rates/balances and writes supply/withdraw.
 
-    Reads are free (no signer). Writes use the LP EOA on Base Sepolia via
-    standard web3 signing (non-confidential chain, no sapphirepy wrapper).
+    Reads are free (no signer). Writes use the LP EOA on Base via standard
+    web3 signing (non-confidential chain, no sapphirepy wrapper). Which Base
+    is set by ``BASE_RPC_URL`` and must match the chain ``AAVE_POOL_ADDRESS``
+    is deployed on.
 
     Single class by design: each protocol adapter has exactly one strategy
     consuming it, and the strategy needs both read and write surfaces, so a
@@ -32,7 +34,7 @@ class AaveClient:
 
     def __init__(self) -> None:
         settings = load_settings()
-        self.w3 = Web3(Web3.HTTPProvider(settings.base_sepolia_rpc_url))
+        self.w3 = Web3(Web3.HTTPProvider(settings.base_rpc_url))
         self.pool_address = Web3.to_checksum_address(settings.aave_pool_address)
         self.pool = self.w3.eth.contract(
             address=self.pool_address,

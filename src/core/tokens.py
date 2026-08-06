@@ -13,16 +13,21 @@ def get_supported_token_ids() -> list[str]:
 
 
 def get_supported_chains() -> list[dict]:
+    """Chains this deployment advertises, straight from ``SUPPORTED_CHAINS``.
+
+    Missing or malformed config yields an empty list, not a default. The
+    fallback here used to be a hardcoded Base Sepolia, which on a mainnet
+    deploy would answer /chains with a testnet chain — a wrong answer that
+    looks like a working one. Serving nothing is the visible failure.
+    """
     raw = os.getenv("SUPPORTED_CHAINS", "")
-    if raw.strip():
-        try:
-            chains = json.loads(raw)
-            return [{"chain_id": c["chain_id"], "name": c["name"]} for c in chains]
-        except (json.JSONDecodeError, KeyError):
-            logger.warning("Invalid SUPPORTED_CHAINS JSON, falling back to defaults")
+    if not raw.strip():
+        logger.error("SUPPORTED_CHAINS is not set; no chains will be advertised")
+        return []
 
-    token_ids = get_supported_token_ids()
-    if not token_ids:
-        return [{"chain_id": 84532, "name": "Base Sepolia"}]
-
-    return [{"chain_id": 84532, "name": "Base Sepolia"}]
+    try:
+        chains = json.loads(raw)
+        return [{"chain_id": c["chain_id"], "name": c["name"]} for c in chains]
+    except (json.JSONDecodeError, KeyError, TypeError):
+        logger.exception("Invalid SUPPORTED_CHAINS; no chains will be advertised")
+        return []

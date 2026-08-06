@@ -1,14 +1,191 @@
+import { readFileSync, writeFileSync } from "fs";
+import { join } from "path";
+
 import '@nomicfoundation/hardhat-ethers';
 import '@oasisprotocol/sapphire-hardhat';
 import '@typechain/hardhat';
-import {ContractFactory, JsonRpcProvider} from "ethers";
+import {ethers, JsonRpcProvider, TransactionResponse} from "ethers";
 import { task } from 'hardhat/config';
+import {HardhatEthersSigner} from "@nomicfoundation/hardhat-ethers/signers";
 import {HardhatRuntimeEnvironment} from "hardhat/types";
 import {HttpNetworkConfig} from "hardhat/types/config";
 import 'solidity-coverage';
-import * as Contracts from "../typechain-types";
 
-task('deployerAddress')
+// Return unwrapped Sapphire client bound to SECRET_KEY with plain text
+// transactions. Used for all contract management that should be public.
+export async function getUwDeployer(hre: HardhatRuntimeEnvironment): Promise<HardhatEthersSigner> {
+  const { network } = hre;
+  const uwProvider = new JsonRpcProvider((network.config as HttpNetworkConfig).url);
+  return new hre.ethers.Wallet(process.env.SECRET_KEY as string, uwProvider) as any;
+}
+
+// Read VERSION from the local contract sources.
+function getAvailableVersion(contractName: string): bigint {
+  const source = readFileSync(join(__dirname, "..", "contracts", contractName+".sol"), "utf8");
+  const match = source.match(/uint64 public constant VERSION = (\d+)/);
+  if (!match) {
+    throw new Error(`Could not find VERSION constant in contracts/${contractName}.sol`);
+  }
+  return BigInt(match[1]);
+}
+
+async function getBalance(hre: HardhatRuntimeEnvironment, address: string): Promise<string> {
+  const { network, ethers } = hre;
+  const token = (network.config.chainId == 23294) ? 'ROSE' : 'TEST';
+  return ethers.formatEther(await ethers.provider.getBalance(address)) + ` ${token}`;
+}
+
+async function createSafeJson(to: string, data: string, name: string, description: string, chainId: string): Promise<string> {
+  const safeTransaction = {
+    version: "1.0",
+    chainId,
+    createdAt: Date.now(),
+    meta: {
+      name,
+      description,
+      txBuilderVersion: "1.16.5",
+    },
+    transactions: [
+      {
+        to,
+        value: "0",
+        data,
+      },
+    ],
+  };
+
+  return JSON.stringify(safeTransaction, null, 2);
+}
+
+async function deployProxy(hre: HardhatRuntimeEnvironment, contractName: string, deployer: ethers.Signer, initArgs: any[], constructorArgs: any[]): Promise<string> {
+  const Factory = await hre.ethers.getContractFactory(contractName, deployer);
+  const proxy = await hre.upgrades.deployProxy(
+    Factory,
+    initArgs,
+    {
+      kind: 'uups',
+      initializer: 'initialize',
+      constructorArgs,
+      txOverrides: { gasLimit: 15000000 }
+    }
+  );
+  await proxy.waitForDeployment();
+
+  const proxyAddress = await proxy.getAddress();
+  const implAddress = await hre.upgrades.erc1967.getImplementationAddress(proxyAddress);
+
+  console.log(`${contractName} contract address: ${proxyAddress}`);
+  console.log(`${contractName} implementation address: ${implAddress}`);
+  console.log(`${contractName} owner address: ${await (proxy as any).owner()}`);
+
+  try {
+    await hre.run("verify:sourcify", { address: implAddress, contract: contractName });
+  } catch (err) {
+    console.log(
+      `Warning: Sourcify verification of implementation ${implAddress} failed or is unsupported on this network: ${(err as Error).message}`
+    );
+  }
+  try {
+    await hre.run("verify:sourcify", { address: proxyAddress, proxy: true });
+  } catch (err) {
+    console.log(
+      `Warning: Sourcify verification of proxy ${proxyAddress} failed or is unsupported on this network: ${(err as Error).message}`
+    );
+  }
+
+  return implAddress;
+}
+
+async function upgradeProxy(hre: HardhatRuntimeEnvironment, contractName: string, address: string, deployer: ethers.Signer, outputSafe: string, constructorArgs: any[]) {
+  const Factory = await hre.ethers.getContractFactory(contractName, deployer);
+  const current = await hre.ethers.getContractAt( contractName, address, deployer);
+
+  // Get deployed implementation for comparison.
+  const currentImpl = await hre.upgrades.erc1967.getImplementationAddress(address);
+  console.log(`Current implementation: ${currentImpl}`);
+
+  // Only upgrade if the deployed implementation's VERSION is lower than the one being deployed.
+  const availableVersion = getAvailableVersion(contractName);
+  let currentVersion = 0n;
+  try {
+    currentVersion = await current.VERSION();
+  } catch {}
+  console.log(`Current version: ${currentVersion}, available version: ${availableVersion}`);
+
+  if (currentVersion >= availableVersion) {
+    console.log(`Skipping upgrade: deployed version ${currentVersion} is not lower than available version ${availableVersion}.`);
+    return;
+  }
+
+  // Check the current implementation in .openzeppelin folder with the proposed one.
+  await hre.upgrades.validateUpgrade(address, Factory, {
+    kind: 'uups',
+    constructorArgs,
+  });
+
+  const deployTx = await hre.upgrades.prepareUpgrade(address, Factory, {
+    kind: 'uups',
+    constructorArgs,
+    redeployImplementation: 'always',
+    txOverrides: { gasLimit: 15000000 },
+    getTxResponse: true,
+  }) as TransactionResponse;
+  const deployReceipt = await deployTx.wait();
+  const newImplAddress = deployReceipt!.contractAddress!;
+  console.log(`Deployed new proposed implementation: ${newImplAddress} (tx: ${deployTx.hash})`);
+
+  try {
+    await hre.run("verify:sourcify", { address: newImplAddress, contract: contractName });
+  } catch (err) {
+    if (outputSafe) {
+      // Verification is critical for a Safe artifact: signers rely on it to confirm the
+      // bytecode they're approving actually matches this source before executing on-chain.
+      throw new Error(
+        `Sourcify verification of new implementation ${newImplAddress} failed, refusing to produce a Safe transaction for an unverified upgrade: ${(err as Error).message}`
+      );
+    }
+    console.log(
+      `Warning: Sourcify verification failed or is unsupported on this network: ${(err as Error).message}`
+    );
+  }
+
+  if (!outputSafe) {
+    const txProposeUpgrade = await (await current.proposeUpgrade(newImplAddress, 0)).wait();
+    console.log(`Proposed upgrade to ${newImplAddress}. (tx: ${txProposeUpgrade?.hash})`);
+
+    const txUpgradeAndCall = await (await current.upgradeToAndCall(newImplAddress, "0x")).wait();
+    console.log(`Upgraded! New implementation: ${newImplAddress}. (tx: ${txUpgradeAndCall?.hash})`);
+
+    const checkImplAddress = await hre.upgrades.erc1967.getImplementationAddress(address);
+    if (checkImplAddress === currentImpl) {
+      console.log(`Warning: Implementation address unchanged. Upgrade may have been a no-op.`);
+    }
+  } else {
+    const dataProposeUpgrade = Factory.interface.encodeFunctionData("proposeUpgrade", [newImplAddress, 0]);
+    const jsonProposeUpgrade = await createSafeJson(
+      address,
+      dataProposeUpgrade,
+      `Propose Upgrade of ${contractName}`,
+      `Propose Upgrade of ${contractName} contract ${address} to implementation ${newImplAddress}`,
+      (await hre.ethers.provider.getNetwork()).chainId.toString()
+    );
+    writeFileSync(outputSafe+"-1", jsonProposeUpgrade);
+
+    const dataUpgradeToAndCall = Factory.interface.encodeFunctionData("upgradeToAndCall", [newImplAddress, "0x"]);
+    const json = await createSafeJson(
+      address,
+      dataUpgradeToAndCall,
+      `Upgrade ${contractName}`,
+      `Upgrade ${contractName} contract ${address} to implementation ${newImplAddress}`,
+      (await hre.ethers.provider.getNetwork()).chainId.toString()
+    );
+    writeFileSync(outputSafe+"-2", json);
+
+    console.log(`Two Safe Transaction Builder JSON batches written to ${outputSafe}-1 and ${outputSafe}-2. Execute them separately.`);
+  }
+}
+
+task('deployer:address')
   .setDescription('Show deployer address')
   .setAction(async (args, hre) => {
     const { ethers } = hre;
@@ -17,179 +194,88 @@ task('deployerAddress')
   });
 
 task('deploy')
-  .setDescription('Deploy/Upgrade EarnManager and SwapManager contracts')
-  .addParam('accountingaddress', 'Address of the Accounting contract proxy')
-  .addOptionalParam('swapmanageraddress', 'Address of the SwapManager contract proxy')
-  .addParam('lpaddress', 'Address of the liquidity provider')
-  .addOptionalParam('earnmanageraddress', 'Address of the EarnManager contract proxy')
+  .setDescription('Deploy EarnManager and SwapManager contracts')
+  .addParam('accountingAddress', 'Address of the Accounting contract')
+  .addParam('poolAdminAddress', 'Address of the pool admin')
+  .addParam('lpAddress', 'Address of the liquidity provider')
   .setAction(async (args, hre) => {
-    await hre.run('deployEarn', { accountingaddress: args.accountingaddress, earnmanageraddress: args.earnmanageraddress });
-    await hre.run('deploySwap', { accountingaddress: args.accountingaddress, swapmanageraddress: args.swapmanageraddress, lpaddress: args.lpaddress });
+    await hre.run('deploy:earn', { accountingAddress: args.accountingAddress, poolAdminAddress: args.poolAdminAddress});
+    await hre.run('deploy:swap', { accountingAddress: args.accountingAddress, lpAddress: args.lpAddress });
   });
 
-task('deployEarn')
-  .setDescription('Deploy or Upgrade EarnManager contract')
-  .addParam('accountingaddress', 'Address of the Accounting contract proxy')
-  .addOptionalParam('earnmanageraddress', 'Address of the EarnManager contract proxy')
-  .setAction(async (args, hre) => {
-    const { ethers, network, upgrades } = hre;
-    await hre.run('compile');
-
-    const [deployer] = await ethers.getSigners();
-    console.log('\n== EarnManager deploying with:', deployer.address, '==\n');
-    console.log(' Balance:', ethers.formatEther(await ethers.provider.getBalance(deployer.address)), 'ROSE');
-
-    console.log(' Accounting contract proxy:', args.accountingaddress);
-
-    // Use plain text contract create transaction.
-    const uwProvider = new JsonRpcProvider((network.config as HttpNetworkConfig).url);
-    deployer.connect(uwProvider);
-
-    await deployOrUpgrade(hre, 'EarnManager', deployer, [args.accountingaddress, deployer.address], args.earnmanageraddress);
-  });
-
-task('deploySwap')
-  .addParam('accountingaddress', 'Address of the Accounting contract proxy')
-  .addOptionalParam('swapmanageraddress', 'Address of the SwapManager contract proxy')
-  .addParam('lpaddress', 'Address of the liquidity provider')
+task('deploy:earn')
+  .setDescription('Deploy EarnManager contract')
+  .addParam('accountingAddress', 'Address of the Accounting contract')
+  .addParam('poolAdminAddress', 'Address of the pool admin')
   .setAction(async (args, hre) => {
     const { ethers } = hre;
-    const [deployer] = await ethers.getSigners();
-    console.log('\n== SwapManager deploying with:', deployer.address, '==\n');
-    console.log(' Balance:', ethers.formatEther(await ethers.provider.getBalance(deployer.address)), 'ROSE');
+    await hre.run('compile');
 
-    console.log(' Accounting proxy:', args.accountingaddress);
-    console.log(' Liquidity provider:', args.lpaddress);
+    const deployer = await getUwDeployer(hre);
+    console.log('\n== EarnManager deploying with:', deployer.address, '==\n');
+    console.log('Balance:', await getBalance(hre, deployer.address));
+    console.log('Accounting contract:', args.accountingAddress);
 
-    let contract: Contracts.SwapManager
-    if (!args.swapmanageraddress) {
-      const factory = await ethers.getContractFactory('SwapManager');
-      contract = await factory.deploy(args.accountingaddress, args.lpaddress);
-      await contract.waitForDeployment();
-    } else {
-      contract = await ethers.getContractAt('SwapManager', args.swapmanageraddress);
-    }
-
-    const address = await contract.getAddress();
-    console.log(' SwapManager at:', address);
+    return await deployProxy(hre, "EarnManager", deployer, [args.accountingAddress, args.poolAdminAddress], []);
   });
 
-// Read the `VERSION` constant from a contract instance (proxy or bare
-// implementation). Returns null if the contract predates the getter, so an
-// old deployment without VERSION is treated as "needs upgrade" rather than
-// crashing the task.
-async function readVersion(contractPromise: Promise<any>): Promise<string | null> {
-  try {
-    const contract = await contractPromise;
-    return await contract.VERSION();
-  } catch {
-    return null;
-  }
-}
+task('deploy:swap')
+  .setDescription('Deploy SwapManager contract')
+  .addParam('accountingAddress', 'Address of the Accounting contract')
+  .addParam('lpAddress', 'Address of the liquidity provider')
+  .setAction(async (args, hre) => {
+    const { ethers } = hre;
+    await hre.run('compile');
 
-async function deployOrUpgrade(hre: HardhatRuntimeEnvironment, factoryName: any, deployer: string, params: any[], existingAddress?: string) {
-  const { ethers, upgrades } = hre;
-  const factory = await ethers.getContractFactory(factoryName, deployer);
+    const deployer = await getUwDeployer(hre);
+    console.log('\n== SwapManager deploying with:', deployer.address, '==\n');
+    console.log('Balance:', await getBalance(hre, deployer.address));
+    console.log('Accounting contract:', args.accountingAddress);
+    console.log('Liquidity provider:', args.lpAddress);
 
-  // Idempotency: if EARN_MANAGER_CONTRACT_ADDRESS points to an already-deployed
-  // proxy (codesize > 0), skip redeployment so re-running this script in CI
-  // or by accident does not silently produce a new proxy and orphan the old
-  // one (and any pools registered on it).
-  if (existingAddress) {
-    const code = await ethers.provider.getCode(existingAddress);
-    if (code !== '0x') {
-      let implAddress = await upgrades.erc1967.getImplementationAddress(existingAddress);
-      console.log(` Detected existing ${factoryName} proxy contract at ${existingAddress}`);
+    return await deployProxy(hre, "SwapManager", deployer, [args.accountingAddress, args.lpAddress], []);
+  });
 
-      // Compare the VERSION constant of the live implementation against the
-      // one compiled into the new implementation. VERSION is a `constant`, so
-      // it lives in each implementation's bytecode: the live value is read
-      // through the proxy, and the target value is read off a throwaway bare
-      // implementation deployed here.
-      //
-      // Both reads MUST happen before `forceImport` below. `forceImport`
-      // records the *new* factory's bytecode in the manifest but points it at
-      // the *old*, still-live on-chain implementation address (it trusts the
-      // caller that the proxy already runs this factory's code). That entry
-      // then makes `deployImplementation`/`upgradeProxy` believe the new impl
-      // is already deployed and live, so they reuse the old address and the
-      // upgrade silently no-ops. Reading VERSION off an independent bare deploy
-      // avoids the poisoned cache entirely.
-      console.log(' Checking if upgrade is needed...');
+task('upgrade')
+  .setDescription('Upgrade EarnManager and SwapManager contracts')
+  .addParam('earnManagerAddress', 'Address of the EarnManager contract')
+  .addParam('swapManagerAddress', 'Address of the SwapManager contract')
+  .addOptionalParam("outputSafe", "Instead of submitting the transaction write it to file as Safe Transaction Builder JSON.")
+  .setAction(async (args, hre) => {
+    await hre.run('upgrade:earn', { earnManagerAddress: args.earnManagerAddress, outputSafe: args.outputSafe });
+    await hre.run('upgrade:swap', { swapManagerAddress: args.swapManagerAddress, outputSafe: args.outputSafe });
+  });
 
-      const liveVersion = await readVersion(ethers.getContractAt(factoryName, existingAddress) as any);
+task('upgrade:earn')
+  .setDescription('Upgrade EarnManager contract')
+  .addParam('earnManagerAddress', 'Address of the EarnManager contract')
+  .addOptionalParam("outputSafe", "Instead of submitting the transaction write it to file as Safe Transaction Builder JSON.")
+  .setAction(async (args, hre) => {
+    const { ethers } = hre;
+    await hre.run('compile');
 
-      // Bare implementation deploy purely to read its VERSION. Its constructor
-      // takes no args (it only calls `_disableInitializers()`), and this
-      // instance is never wired to the proxy.
-      const probeImpl = await factory.deploy();
-      await probeImpl.waitForDeployment();
-      const newVersion = await readVersion(Promise.resolve(probeImpl) as any);
+    const deployer = await getUwDeployer(hre);
+    console.log('\n== EarnManager upgrading with:', deployer.address, '==\n');
+    console.log('Balance:', await getBalance(hre, deployer.address));
 
-      console.log(`  Live VERSION:      ${liveVersion ?? '<none>'}`);
-      console.log(`  Available VERSION: ${newVersion ?? '<none>'}`);
+    return await upgradeProxy(hre, 'EarnManager', args.earnManagerAddress, deployer, args.outputSafe, [])
+  });
 
-      if (liveVersion !== null && newVersion !== null && liveVersion === newVersion) {
-        console.log(` No upgrade needed. Live ${factoryName} is already at VERSION ${liveVersion}.`);
-        console.log(` ${factoryName} proxy at: ${existingAddress}`);
-        console.log(` Implementation at: ${implAddress}`);
-        return;
-      }
+task('upgrade:swap')
+  .addParam('swapManagerAddress', 'Address of the SwapManager contract proxy')
+  .addOptionalParam("outputSafe", "Instead of submitting the transaction write it to file as Safe Transaction Builder JSON.")
+  .setAction(async (args, hre) => {
+    const { ethers } = hre;
+    await hre.run('compile');
 
-      // Register the current proxy so the plugin can validate and perform the
-      // upgrade. Done only in the upgrade path so the poisoned cache entry
-      // never affects the version check above.
-      //const current = await ethers.getContractAt(factoryName, existingAddress);
-      await upgrades.forceImport(existingAddress, factory, { kind: 'uups' /*, constructorArgs: [await current.accounting(), await current.poolAdmin()]*/});
+    const deployer = await getUwDeployer(hre);
+    console.log('\n== SwapManager upgrading with:', deployer.address, '==\n');
+    console.log('Balance:', await getBalance(hre, deployer.address));
 
-      try {
-        await upgrades.validateUpgrade(existingAddress, factory);
-        console.log(` Upgrade validation passed. Upgrading ${liveVersion ?? '<none>'} -> ${newVersion ?? '<none>'}...`);
+    return await upgradeProxy(hre, 'SwapManager', args.swapManagerAddress, deployer, args.outputSafe, [])
+  });
 
-        // `redeployImplementation: 'always'` is required: `forceImport` cached
-        // the new bytecode against the old on-chain impl address, so without
-        // it `upgradeProxy` would reuse the old implementation and no-op.
-        const upgraded = await upgrades.upgradeProxy(existingAddress, factory, { redeployImplementation: 'always' });
-        await upgraded.waitForDeployment();
-
-        const upgradedImplAddress = await upgrades.erc1967.getImplementationAddress(existingAddress);
-        if (upgradedImplAddress !== implAddress) {
-          console.log(` ${factoryName} proxy upgraded successfully!`);
-          console.log(' New implementation deployed.');
-          implAddress = upgradedImplAddress;
-        } else {
-          console.log(' No upgrade needed. Implementation is up to date.');
-        }
-      } catch (error) {
-        console.log(' Upgrade validation failed:', error);
-        console.log(' Keeping existing deployment.');
-      }
-
-      console.log(` ${factoryName} proxy at: ${existingAddress}`);
-      console.log(` Implementation at: ${implAddress}`);
-      return;
-    }
-  }
-
-  // UUPS proxy: implementation deployed first, then ERC1967Proxy points at it
-  // and runs `initialize(_accounting, _poolAdmin)` atomically. Returned
-  // address is the proxy. Future upgrades go through
-  // `upgrades.upgradeProxy(proxy, NewImpl)`.
-  // Pool admin defaults to the deployer; rotate later via `setPoolAdmin`.
-  const proxy = await upgrades.deployProxy(
-    factory,
-    params,
-    { kind: 'uups', initializer: 'initialize' },
-  );
-  await proxy.waitForDeployment();
-
-  const proxyAddress = await proxy.getAddress();
-  const implAddress = await upgrades.erc1967.getImplementationAddress(proxyAddress);
-  console.log(` ${factoryName} proxy at: ${proxyAddress}`);
-  console.log(` Implementation at: ${implAddress}`);
-}
-
-task('deployToken')
+task('deploy:token')
   .setDescription('Deploys a mock ERC-20 token (testing only)')
   .addPositionalParam('name', 'Token name')
   .addPositionalParam('symbol', 'Token symbol')
@@ -198,6 +284,7 @@ task('deployToken')
   .addOptionalPositionalParam('recipient', 'Holder of premint tokens (default: signer address)')
   .setAction(async (args, hre) => {
     const { ethers } = hre;
+    await hre.run('compile');
     const [deployer] = await ethers.getSigners();
 
     if (args.recipient === undefined || args.recipient === '') {
@@ -205,7 +292,7 @@ task('deployToken')
     }
 
     console.log('Deploying with:', deployer.address);
-    console.log('Balance:', ethers.formatEther(await ethers.provider.getBalance(deployer.address)), 'ETH');
+    console.log('Balance:', await getBalance(hre, deployer.address));
     console.log(`Token: ${args.name} (${args.symbol}), ${args.decimals} decimals, premint ${args.premint} to ${args.recipient}`);
 
     const factory = await ethers.getContractFactory('MockERC20');

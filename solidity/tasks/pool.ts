@@ -1,3 +1,5 @@
+import { getUwDeployer } from './deploy';
+
 import '@nomicfoundation/hardhat-ethers';
 import '@oasisprotocol/sapphire-hardhat';
 import '@typechain/hardhat';
@@ -6,44 +8,23 @@ import 'solidity-coverage';
 
 import {keccak256, toUtf8Bytes} from "ethers";
 
-task('pools')
-  .setDescription('List all pool IDs')
-  .addParam('earnmanageraddress', 'Address of the EarnManager contract proxy')
-  .setAction(async (args, hre) => {
-  const { ethers } = hre;
-    const factory = await ethers.getContractFactory('EarnManager');
-    const em = factory.attach(args.earnmanageraddress);
-
-    console.log('EarnManager:', args.earnmanageraddress);
-    console.log('Pool IDs:');
-
-    const poolIds = await em.poolIds();
-    if (poolIds.length === 0) {
-      console.log('  No pools found');
-    } else {
-      poolIds.forEach((poolId: string, index: number) => {
-        console.log(`  [${index}] ${poolId}`);
-      });
-    }
-  });
-
-task('poolState')
+task('pool:show')
   .setDescription('Shows state of the Earn pool')
-  .addParam('earnmanageraddress', 'Address of the EarnManager contract proxy')
-  .addOptionalParam('poolid', 'ID or name of the pool', keccak256(toUtf8Bytes('aave-usdc-base-sepolia')))
+  .addPositionalParam('poolId', 'ID or name of the pool e.g. aave-usdc-base-sepolia', keccak256(toUtf8Bytes('aave-usdc-base-sepolia')))
+  .addParam('earnManagerAddress', 'Address of the EarnManager contract proxy')
   .setAction(async (args, hre) => {
     const { ethers } = hre;
     const factory = await ethers.getContractFactory('EarnManager');
-    const em = factory.attach(args.earnmanageraddress);
+    const em = factory.attach(args.earnManagerAddress);
 
     // Check if poolid is not a 32-byte hex value and convert it if needed
-    if (!/^0x[0-9a-fA-F]{64}$/.test(args.poolid)) {
-      args.poolid = ethers.keccak256(ethers.toUtf8Bytes(args.poolid));
+    if (!/^0x[0-9a-fA-F]{64}$/.test(args.poolId)) {
+      args.poolId = ethers.keccak256(ethers.toUtf8Bytes(args.poolId));
     }
 
-    const pool = await em.pools(args.pooolid);
-    console.log('EarnManager:    ', args.earnmanageraddress);
-    console.log('Pool ID:        ', args.poolid);
+    const pool = await em.pools(args.poolId);
+    console.log('EarnManager:    ', args.earnManagerAddress);
+    console.log('Pool ID:        ', args.poolId);
     console.log('Pool:');
     console.log('  tokenId:      ', pool.tokenId);
     console.log('  poolAddress:  ', pool.poolAddress);
@@ -57,34 +38,35 @@ task('poolState')
     console.log('VIRTUAL_ASSETS: ', (await em.VIRTUAL_ASSETS()).toString());
   });
 
-task('poolCreate')
+task('pool:create')
   .setDescription('Creates a new Earn pool')
-  .addParam('earnmanageraddress', 'Address of the EarnManager contract proxy')
-  .addParam('poolid', 'ID or <strategy>-<asset>-<chain> name of the pool (e.g. aave-usdc-base-sepolia)')
-  .addParam('tokenid', 'ID of the token (e.g. 0xc719650e9f4b0f27d956638c54518932ef9d15e720a1a2b2850250bcd0816514)')
-  .addParam('lpaddress', 'Address of the liquidity provider')
+  .addParam('earnManagerAddress', 'Address of the EarnManager contract proxy')
+  .addParam('poolId', 'ID or <strategy>-<asset>-<chain> name of the pool (e.g. aave-usdc-base-sepolia)')
+  .addParam('tokenId', 'ID of the token (e.g. 0xc719650e9f4b0f27d956638c54518932ef9d15e720a1a2b2850250bcd0816514)')
+  .addParam('lpAddress', 'Address of the liquidity provider')
   .setAction(async (args, hre) => {
       const { ethers } = hre;
 
       // Check if poolid is not a 32-byte hex value and convert it if needed
-      if (!/^0x[0-9a-fA-F]{64}$/.test(args.poolid)) {
-          args.poolid = ethers.keccak256(ethers.toUtf8Bytes(args.poolid));
+      if (!/^0x[0-9a-fA-F]{64}$/.test(args.poolId)) {
+          args.poolId = ethers.keccak256(ethers.toUtf8Bytes(args.poolId));
       }
 
-      const [deployer] = await ethers.getSigners();
+      // Use unencrypted tx.
+      const deployer = await getUwDeployer(hre);
       console.log('Calling createPool from:', deployer.address);
-      console.log('  EarnManager:', args.earnmanageraddress);
-      console.log('  poolId:     ', args.poolid);
-      console.log('  tokenId:    ', args.tokenid);
-      console.log('  poolWallet: ', args.lpaddress);
+      console.log('  EarnManager:', args.earnManagerAddress);
+      console.log('  poolId:     ', args.poolId);
+      console.log('  tokenId:    ', args.tokenId);
+      console.log('  poolAddress:', args.lpAddress);
 
-      const earnManager = await ethers.getContractAt('EarnManager', args.earnmanageraddress);
-      const tx = await earnManager.createPool(args.poolid, args.tokenid, args.lpaddress);
+      const earnManager = await ethers.getContractAt('EarnManager', args.earnManagerAddress, deployer);
+      const tx = await earnManager.createPool(args.poolId, args.tokenId, args.lpAddress);
       console.log('createPool tx:', tx.hash);
       await tx.wait();
       console.log('Pool created.');
 
-      const pool = await earnManager.pools(args.poolid);
+      const pool = await earnManager.pools(args.poolId);
       console.log('Pool state:', {
           tokenId: pool.tokenId,
           poolAddress: pool.poolAddress,

@@ -33,7 +33,8 @@
     "typescript": "^4.8.4"
   },
   "dependencies": {
-    "@openzeppelin/contracts": "~5.4.0",
-    "@openzeppelin/contracts-upgradeable": "~5.4.0"
+    "@oasisprotocol/sapphire-contracts": "^0.2.18",
+    "@openzeppelin/contracts": "5.4.0",
+    "@openzeppelin/contracts-upgradeable": "5.4.0"
   }
 }

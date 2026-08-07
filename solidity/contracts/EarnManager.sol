@@ -3,20 +3,19 @@ pragma solidity ^0.8.24;
 
 import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import "@oasisprotocol/sapphire-contracts/contracts/UPUPSUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/utils/cryptography/EIP712Upgradeable.sol";
 import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import "./interfaces/IAccounting.sol";
 
-/// @title EarnManager (UUPS upgradeable)
+/// @title EarnManager (UPUPS upgradeable)
 /// @notice Pool registry and share accounting for Privana earn strategies.
 /// @dev Deployed behind an ERC1967 proxy. Storage layout MUST stay
 /// append-only across upgrades: never reorder, remove, or change the type of
 /// existing slots; new state goes at the end (and consumes from `__gap`).
 contract EarnManager is
-    Initializable,
     OwnableUpgradeable,
-    UUPSUpgradeable,
+    UPUPSUpgradeable,
     EIP712Upgradeable
 {
     using ECDSA for bytes32;
@@ -37,6 +36,9 @@ contract EarnManager is
     /// Constants
     /// -----------------------------------------------------------------------
 
+    /// @notice Contract version, bumped on each upgrade for tracking/verification.
+    uint64 public constant VERSION = 1;
+    
     /// @dev EIP-712 typehash for the user's withdraw consent message.
     /// The signer is recovered from the signature, so `user` is intentionally
     /// not part of the typed data: encoding it would be redundant and would
@@ -132,7 +134,7 @@ contract EarnManager is
         if (_accounting == address(0)) revert ZeroAddress();
         if (_poolAdmin == address(0)) revert ZeroAddress();
         __Ownable_init(msg.sender);
-        __UUPSUpgradeable_init();
+        __UPUPSUpgradeable_init();
         __EIP712_init("EarnManager", "1");
         accounting = IAccounting(_accounting);
         poolAdmin = _poolAdmin;
@@ -347,5 +349,6 @@ contract EarnManager is
     /// Internal
     /// -----------------------------------------------------------------------
 
-    function _authorizeUpgrade(address newImplementation) internal override onlyOwner {}
+    function _authorizeProposeUpgrade(address, uint256) internal override onlyOwner {}
+    function _authorizeUpgrade(address) internal override onlyOwner {}
 }

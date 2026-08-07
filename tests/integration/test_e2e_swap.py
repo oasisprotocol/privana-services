@@ -62,7 +62,14 @@ class TestHealthCheck:
         assert "checks" in data
 
 
+_TOKENS_NOT_REGISTERED_REASON = (
+    "USDC_TOKEN_ID/WETH_TOKEN_ID are not registered on the redeployed testnet "
+    "Accounting contract; re-enable once they're registered again"
+)
+
+
 class TestQuoteEndpoint:
+    @pytest.mark.skip(reason=_TOKENS_NOT_REGISTERED_REASON)
     async def test_get_usdc_to_weth_quote(self, api_client):
         r = await api_client.get("/v1/quote", params={
             "from_token_id": USDC_TOKEN_ID,
@@ -81,6 +88,7 @@ class TestQuoteEndpoint:
         assert isinstance(data["transfer_nonce"], int)
         assert data["quote_id"] is not None
 
+    @pytest.mark.skip(reason=_TOKENS_NOT_REGISTERED_REASON)
     async def test_get_weth_to_usdc_quote(self, api_client):
         r = await api_client.get("/v1/quote", params={
             "from_token_id": WETH_TOKEN_ID,
@@ -112,6 +120,7 @@ class TestQuoteEndpoint:
 
 
 class TestSwapEndpoint:
+    @pytest.mark.skip(reason=_TOKENS_NOT_REGISTERED_REASON)
     async def test_swap_usdc_to_weth(self, api_client):
         swap_amount = "500000"
 
@@ -146,6 +155,7 @@ class TestSwapEndpoint:
         assert result["tx_hash"].startswith("0x")
         print(f"\n  USDC→WETH swap tx: {result['tx_hash']}")
 
+    @pytest.mark.skip(reason=_TOKENS_NOT_REGISTERED_REASON)
     async def test_swap_weth_to_usdc(self, api_client):
         swap_amount = str(5 * 10**15)
 

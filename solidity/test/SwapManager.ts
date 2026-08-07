@@ -1,5 +1,5 @@
 import { expect } from 'chai';
-import { ethers } from 'hardhat';
+import { ethers, upgrades } from 'hardhat';
 import { loadFixture } from '@nomicfoundation/hardhat-network-helpers';
 
 describe('SwapManager', function () {
@@ -22,9 +22,12 @@ describe('SwapManager', function () {
     ).deploy();
     await mockAccounting.waitForDeployment();
 
-    const swapManager = await (
-      await ethers.getContractFactory('SwapManager')
-    ).deploy(await mockAccounting.getAddress(), liquidityProvider.address);
+    const factory = await ethers.getContractFactory('SwapManager');
+    const swapManager = await upgrades.deployProxy(
+      factory,
+      [await mockAccounting.getAddress(), liquidityProvider.address],
+      { kind: 'uups', initializer: 'initialize' },
+    );
     await swapManager.waitForDeployment();
 
     return { swapManager, mockAccounting, owner, user, liquidityProvider, relayer };
@@ -49,15 +52,25 @@ describe('SwapManager', function () {
     it('should reject zero accounting address', async function () {
       const { swapManager, liquidityProvider } = await loadFixture(deployFixture);
       const factory = await ethers.getContractFactory('SwapManager');
-      await expect(factory.deploy(ethers.ZeroAddress, liquidityProvider.address))
-        .to.be.revertedWithCustomError(swapManager, 'ZeroAddress');
+      await expect(
+        upgrades.deployProxy(
+          factory,
+          [ethers.ZeroAddress, liquidityProvider.address],
+          { kind: 'uups', initializer: 'initialize' },
+        ),
+      ).to.be.revertedWithCustomError(swapManager, 'ZeroAddress');
     });
 
     it('should reject zero liquidityProvider address', async function () {
       const { swapManager, mockAccounting, liquidityProvider } = await loadFixture(deployFixture);
       const factory = await ethers.getContractFactory('SwapManager');
-      await expect(factory.deploy(await mockAccounting.getAddress(), ethers.ZeroAddress))
-        .to.be.revertedWithCustomError(swapManager, 'ZeroAddress');
+      await expect(
+        upgrades.deployProxy(
+          factory,
+          [await mockAccounting.getAddress(), ethers.ZeroAddress],
+          { kind: 'uups', initializer: 'initialize' },
+        ),
+      ).to.be.revertedWithCustomError(swapManager, 'ZeroAddress');
     });
   });
 

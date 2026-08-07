@@ -101,6 +101,8 @@ data/
 *.db-journal
 *.db-wal
 
+*.orc
+
 # Solidity / Hardhat
 solidity/node_modules/
 solidity/artifacts/
@@ -108,7 +110,9 @@ solidity/cache/
 solidity/typechain-types/
 solidity/.env
 
-# OpenZeppelin Upgrades manifests are per-developer state and are never
-# committed to this repo by team convention.
-solidity/.openzeppelin/
-*.orc
+
+# OpenZeppelin upgrades manifests: ignore sapphire-localnet (chain 23293)
+# manifests. Production sapphire/sapphire-testnet manifests (23294/23295) are
+# tracked in git so `hardhat upgrade`'s validateUpgrade() has a real
+# storage layout to check against.
+solidity/.openzeppelin/unknown-23293.json

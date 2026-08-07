@@ -1,12 +1,21 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
+import "@oasisprotocol/sapphire-contracts/contracts/UPUPSUpgradeable.sol";
 import "./interfaces/IAccounting.sol";
 
-contract SwapManager is Ownable {
+contract SwapManager is
+    OwnableUpgradeable,
+    UPUPSUpgradeable
+{
+    /// @notice Contract version, bumped on each upgrade for tracking/verification.
+    uint64 public constant VERSION = 1;
+
     IAccounting public accounting;
     address public liquidityProvider;
+
+    uint256[50] private __gap;
 
     event AccountingUpdated(address indexed newAccounting);
     event LiquidityProviderUpdated(address indexed newLiquidityProvider);
@@ -14,8 +23,16 @@ contract SwapManager is Ownable {
     error ZeroAddress();
     error ZeroAmount();
 
-    constructor(address _accounting, address _liquidityProvider) Ownable(msg.sender) {
+    /// @custom:oz-upgrades-unsafe-allow constructor
+    constructor() {
+        _disableInitializers();
+    }
+
+    function initialize(address _accounting, address _liquidityProvider) external initializer {
         if (_accounting == address(0) || _liquidityProvider == address(0)) revert ZeroAddress();
+        __Ownable_init(msg.sender);
+        __UPUPSUpgradeable_init();
+
         accounting = IAccounting(_accounting);
         liquidityProvider = _liquidityProvider;
     }
@@ -67,4 +84,11 @@ contract SwapManager is Ownable {
         liquidityProvider = _liquidityProvider;
         emit LiquidityProviderUpdated(_liquidityProvider);
     }
+
+    /// -----------------------------------------------------------------------
+    /// Internal
+    /// -----------------------------------------------------------------------
+
+    function _authorizeProposeUpgrade(address, uint256) internal override onlyOwner {}
+    function _authorizeUpgrade(address) internal override onlyOwner {}
 }

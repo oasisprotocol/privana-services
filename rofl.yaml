@@ -44,7 +44,7 @@ deployments:
     app_id: rofl1qr38yckt9s7rzuadyzg0mu04jtctusftcy6t7rpy
     network: testnet
     paratime: sapphire
-    admin: dave2
+    admin: ptrus_testnet
     oci_repository: rofl.sh/f137525c-25e9-44ef-b0e0-531ec3c6585c:1779377054
     artifacts:
       container:
@@ -59,8 +59,8 @@ deployments:
           min_tcb_evaluation_data_number: 18
           tdx: {}
       enclaves:
-        - id: O6AfEBcCc7RnaQjNeEVovSZW+YMWg6SsdFoVbtqbEKUAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
-        - id: jlOlHQtYZAulabkfPnstooPgEiKZzg+BUgqACgWLAaAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
+        - id: OBwkuyQDbEf5M4rOgliy9xlN3HdCHCupr6Q7TES2tt0AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
+        - id: 1kVtRgwKUQafLZJ3RgtH3cvcrmXspce8LgipLCXcKD0AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
       endorsements:
         - any: {}
       fees: endorsing_node

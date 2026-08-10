@@ -56,9 +56,10 @@ class SapphireClient:
     ) -> None:
         """Dry-run a call via ``eth_call`` and raise if it would revert.
 
-        Balances on the accounting ledger are confidential, so the service
-        cannot read a user's balance to pre-check it. A simulation gets the
-        same answer from the contract itself without spending gas, and covers
+        Token balances in the Accounting contract are access-gated (SIWE or
+        signed queries), and a query signed with the LP key can only read the
+        LP's own balance — not the counterparty user's. A simulation gets the
+        answer from the contract itself without spending gas, and covers
         every revert cause at once (insufficient balance either side, a
         consumed nonce, a bad signature) rather than just the one we thought
         to check.

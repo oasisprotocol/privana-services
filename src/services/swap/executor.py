@@ -159,8 +159,9 @@ class SwapExecutor:
     async def _reject_if_swap_would_revert(self, swap_id: str, swap_args: list) -> None:
         """Dry-run the swap and reject it as a bad request if it cannot succeed.
 
-        The user's accounting balance is confidential, so it cannot be read
-        and checked the way LP liquidity is above. Simulating the real call
+        The user's balance in the Accounting contract is access-gated, so a
+        query signed with the LP key cannot read it and check it the way LP
+        liquidity is above. Simulating the real call
         asks the contract the same question for free, and turns a guaranteed
         on-chain revert — which costs the LP gas and reports back an opaque
         "failed" — into a 400 before anything is broadcast.

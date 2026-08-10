@@ -52,6 +52,7 @@ async def lifespan(_app: FastAPI):
         register_aave_strategies_from_config,
         register_midas_strategies_from_config,
     )
+    from src.services.pool_rate_history import get_pool_rate_sampler
     from src.services.price_history import get_price_sampler
 
     logger.info("Privana services starting...")
@@ -91,12 +92,22 @@ async def lifespan(_app: FastAPI):
     except Exception:
         logger.exception("Price sampler failed to start; no price history will be recorded")
 
+    try:
+        await get_pool_rate_sampler().start()
+    except Exception:
+        logger.exception("Pool rate sampler failed to start; no earn rate history will be recorded")
+
     yield
 
     try:
         await get_price_sampler().stop()
     except Exception:
         logger.warning("Error stopping price sampler")
+
+    try:
+        await get_pool_rate_sampler().stop()
+    except Exception:
+        logger.warning("Error stopping pool rate sampler")
     try:
         await get_accounting_client().close()
     except Exception:

@@ -393,6 +393,15 @@ async def test_is_healthy_false_when_rate_read_raises(strategy, aave_client) -> 
 
 
 @pytest.mark.asyncio
+async def test_is_healthy_false_when_asset_not_listed_on_pool(strategy, aave_client) -> None:
+    aave_client.get_supply_apy_bps.side_effect = ValueError(
+        "Asset 0xusdc is not a listed reserve on Aave pool 0xpool"
+    )
+
+    assert await strategy.is_healthy() is False
+
+
+@pytest.mark.asyncio
 async def test_retry_on_network_error_recovers_from_transient_drop(strategy) -> None:
     from privana.client.errors import NetworkError
 

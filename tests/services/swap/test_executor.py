@@ -146,6 +146,113 @@ class TestExecuteSwap:
         assert result.status == SwapStatus.FAILED.value
         assert "reverted" in result.error.lower()
 
+    async def test_swap_that_would_revert_is_rejected_before_broadcast(
+        self, test_db, settings, insert_quote, user_address, input_signature
+    ):
+        insert_quote(
+            "q_sim_revert",
+            user_address=user_address.lower(),
+            from_token_id="0xaaaa",
+            to_token_id="0xbbbb",
+            from_amount="1000000",
+            to_amount_gross="45000000000000000",
+            to_amount_estimate="44000000000000000",
+            to_amount_min="43000000000000000",
+            route_tool="okx",
+        )
+        executor = _make_executor(settings)
+        executor.sapphire.simulate_contract_call = MagicMock(
+            side_effect=RuntimeError("execution reverted: InsufficientBalance")
+        )
+
+        with pytest.raises(ValueError, match="would revert on-chain"):
+            await executor.execute_swap("q_sim_revert", 0, input_signature)
+
+        executor.sapphire.execute_contract_call.assert_not_called()
+
+    async def test_rejected_swap_is_not_left_pending(
+        self, test_db, settings, insert_quote, user_address, input_signature
+    ):
+        # The swap row is inserted before execution, so a rejection that
+        # propagates as a 400 must still close the row out. A stranded PENDING
+        # row sits in /v1/operations/unsettled forever.
+        insert_quote(
+            "q_not_pending",
+            user_address=user_address.lower(),
+            from_token_id="0xaaaa",
+            to_token_id="0xbbbb",
+            from_amount="1000000",
+            to_amount_gross="45000000000000000",
+            to_amount_estimate="44000000000000000",
+            to_amount_min="43000000000000000",
+            route_tool="okx",
+        )
+        executor = _make_executor(settings)
+        executor.sapphire.simulate_contract_call = MagicMock(
+            side_effect=RuntimeError("execution reverted")
+        )
+
+        with pytest.raises(ValueError):
+            await executor.execute_swap("q_not_pending", 0, input_signature)
+
+        row = test_db.execute("SELECT status, error FROM swaps").fetchone()
+        assert row["status"] == SwapStatus.FAILED.value
+        assert row["error"] is not None
+
+    async def test_unexpected_value_error_still_closes_the_swap_row(
+        self, test_db, settings, insert_quote, user_address, input_signature
+    ):
+        # Not just the simulation path: any ValueError raised mid-execution
+        # must leave a settled row rather than a pending one.
+        insert_quote(
+            "q_value_error",
+            user_address=user_address.lower(),
+            from_token_id="0xaaaa",
+            to_token_id="0xbbbb",
+            from_amount="1000000",
+            to_amount_gross="45000000000000000",
+            to_amount_estimate="44000000000000000",
+            to_amount_min="43000000000000000",
+            route_tool="okx",
+        )
+        executor = _make_executor(settings)
+        executor.sapphire.execute_contract_call = MagicMock(
+            side_effect=ValueError("malformed argument")
+        )
+
+        with pytest.raises(ValueError):
+            await executor.execute_swap("q_value_error", 0, input_signature)
+
+        row = test_db.execute("SELECT status FROM swaps").fetchone()
+        assert row["status"] == SwapStatus.FAILED.value
+
+    async def test_simulation_runs_before_execution(
+        self, test_db, settings, insert_quote, user_address, input_signature
+    ):
+        insert_quote(
+            "q_sim_order",
+            user_address=user_address.lower(),
+            from_token_id="0xaaaa",
+            to_token_id="0xbbbb",
+            from_amount="1000000",
+            to_amount_gross="45000000000000000",
+            to_amount_estimate="44000000000000000",
+            to_amount_min="43000000000000000",
+            route_tool="okx",
+        )
+        executor = _make_executor(settings)
+        calls = []
+        executor.sapphire.simulate_contract_call = MagicMock(
+            side_effect=lambda **kw: calls.append("simulate")
+        )
+        executor.sapphire.execute_contract_call = MagicMock(
+            side_effect=lambda **kw: calls.append("execute") or ("0x" + "ff" * 32)
+        )
+
+        await executor.execute_swap("q_sim_order", 0, input_signature)
+
+        assert calls == ["simulate", "execute"]
+
     async def test_insufficient_liquidity_raises_value_error(
         self, test_db, settings, insert_quote, user_address, input_signature
     ):

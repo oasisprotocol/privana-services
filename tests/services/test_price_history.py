@@ -19,6 +19,7 @@ MAPPING = f'{{"{USDC_SWAP}":"usd-coin","{USDC_EARN}":"usd-coin","{WETH}":"ethere
 
 JUN15 = 1781481600  # 2026-06-15 00:00:00 UTC
 JUN16 = JUN15 + 86400
+SAMPLE_INTERVAL = 86400 // 4
 
 
 def _settings(raw: str):
@@ -65,12 +66,23 @@ class TestStoreAndRead:
 
         assert [p.price_e8 for p in read_points("usd-coin")] == [99973600]
 
-    def test_intraday_points_collapse_onto_the_day(self):
-        # Whatever the caller hands us, one day is one row: the write path is the
-        # only thing standing between a stray timestamp and a duplicated day.
+    def test_points_within_one_interval_collapse(self):
+        # Whatever the caller hands us, one sampling interval is one row.
         store_points("ethereum", [PricePoint(JUN15, 100), PricePoint(JUN15 + 3661, 200)])
 
         assert [(p.timestamp, p.price_e8) for p in read_points("ethereum")] == [(JUN15, 100)]
+
+    def test_samples_in_different_intervals_are_kept(self):
+        # The sampler runs 4x/day; bucketing to whole days would drop 3 of every
+        # 4 rounds on the floor via INSERT OR IGNORE.
+        store_points("ethereum", [
+            PricePoint(JUN15, 100),
+            PricePoint(JUN15 + SAMPLE_INTERVAL, 200),
+            PricePoint(JUN15 + 2 * SAMPLE_INTERVAL, 300),
+            PricePoint(JUN15 + 3 * SAMPLE_INTERVAL, 400),
+        ])
+
+        assert [p.price_e8 for p in read_points("ethereum")] == [100, 200, 300, 400]
 
 
 class TestSampler:
@@ -129,18 +141,32 @@ class TestSampler:
         with patch("src.services.price_history.load_settings", return_value=_settings(MAPPING)):
             assert await PriceSampler(client=gecko).backfill() == 1
 
-    async def test_restarting_does_not_accumulate_rows_for_today(self, gecko, no_sleep):
-        # CoinGecko's daily series ends with a point at the current second, not at
-        # midnight. That timestamp differs on every boot, so OR IGNORE alone let each
-        # restart append another row for the day on top of the day's real point.
+    async def test_restarting_within_one_interval_does_not_accumulate_rows(self, gecko, no_sleep):
+        # CoinGecko's daily series ends with a point at the current second, not on
+        # a bucket boundary. That timestamp differs on every boot, so without
+        # bucketing each restart would append another row for the same interval.
         with patch("src.services.price_history.load_settings", return_value=_settings(MAPPING)):
-            for boot_second in (28800, 45000, 71100):
+            for offset in (1, 700, SAMPLE_INTERVAL - 1):
                 gecko.get_price_history = AsyncMock(
-                    return_value=[PricePoint(JUN15, 100), PricePoint(JUN15 + boot_second, 200)]
+                    return_value=[PricePoint(JUN15, 100), PricePoint(JUN15 + offset, 200)]
                 )
                 await PriceSampler(client=gecko).backfill()
 
         assert [(p.timestamp, p.price_e8) for p in read_points("ethereum")] == [(JUN15, 100)]
+
+    async def test_restarting_in_a_later_interval_records_a_new_sample(self, gecko, no_sleep):
+        with patch("src.services.price_history.load_settings", return_value=_settings(MAPPING)):
+            for offset in (0, SAMPLE_INTERVAL, 2 * SAMPLE_INTERVAL):
+                gecko.get_price_history = AsyncMock(
+                    return_value=[PricePoint(JUN15 + offset, 100 + offset)]
+                )
+                await PriceSampler(client=gecko).backfill()
+
+        assert [p.timestamp for p in read_points("ethereum")] == [
+            JUN15,
+            JUN15 + SAMPLE_INTERVAL,
+            JUN15 + 2 * SAMPLE_INTERVAL,
+        ]
 
     async def test_start_is_a_no_op_without_config(self, gecko):
         sampler = PriceSampler(client=gecko)
@@ -149,17 +175,18 @@ class TestSampler:
 
         assert sampler._task is None
 
-    async def test_samples_land_on_the_day(self, gecko):
+    async def test_samples_snap_to_the_interval_boundary(self, gecko):
         with patch("src.services.price_history.load_settings", return_value=_settings(MAPPING)):
             with patch("src.services.price_history.time.time", return_value=1781485337):
                 await PriceSampler(client=gecko).sample_once()
 
-        # 1781485337 is 2026-06-15 01:02:17 UTC; the point is recorded at 00:00:00.
+        # 1781485337 is 2026-06-15 01:02:17 UTC, inside the 00:00 sampling
+        # interval, so the point is recorded at 00:00:00.
         assert [p.timestamp for p in read_points("usd-coin")] == [1781481600]
 
-    async def test_resampling_within_the_day_does_not_duplicate(self, gecko):
-        # We poll several times a day but keep one point per day, so every tick after
-        # the day's first is a no-op instead of another near-identical row.
+    async def test_resampling_within_one_interval_does_not_duplicate(self, gecko):
+        # A retry or an early tick inside the same interval is a no-op rather
+        # than another near-identical row.
         sampler = PriceSampler(client=gecko)
         with patch("src.services.price_history.load_settings", return_value=_settings(MAPPING)):
             with patch("src.services.price_history.time.time", return_value=1781485337):

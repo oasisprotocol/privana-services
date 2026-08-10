@@ -19,8 +19,16 @@ DAY_SEC = 86400
 SAMPLE_INTERVAL_SEC = DAY_SEC // 4  # ~4x/day
 BACKFILL_DELAY_SEC = 5
 
-def _day_bucket(timestamp: int) -> int:
-    return timestamp - (timestamp % DAY_SEC)
+def _sample_bucket(timestamp: int) -> int:
+    """Snap a timestamp to the sampling grid.
+
+    Bucketing to whole days would collapse every sample taken on the same day
+    onto one primary key, and since rows are inserted with OR IGNORE only the
+    first would survive — sampling 4x/day would silently store 1 point/day.
+    DAY_SEC is an exact multiple of SAMPLE_INTERVAL_SEC, so CoinGecko's daily
+    backfill points stay on their existing boundaries.
+    """
+    return timestamp - (timestamp % SAMPLE_INTERVAL_SEC)
 
 
 def parse_coingecko_token_ids(raw_config: str) -> dict[str, str]:
@@ -44,7 +52,7 @@ def configured_coin_ids() -> list[str]:
 
 def store_points(coin_id: str, points: list[PricePoint]) -> int:
     rows = [
-        (coin_id, _day_bucket(p.timestamp), p.price_e8)
+        (coin_id, _sample_bucket(p.timestamp), p.price_e8)
         for p in sorted(points, key=lambda p: p.timestamp)
     ]
     return db_write_many(

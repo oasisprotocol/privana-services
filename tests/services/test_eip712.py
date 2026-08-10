@@ -3,7 +3,6 @@ from eth_account import Account
 
 from src.core.eip712 import _to_bytes32, sign_transfer
 
-
 PRIVATE_KEY_1 = "0x4c0883a69102937d6231471b5dbb6204fe512961708279f69e0f0fcbf24b5830"
 PRIVATE_KEY_2 = "0x6370fd033278c143179d81c5526140625662532e7167470da27dbba4e8b3e0b0"
 TOKEN_ID = "0x" + "aa" * 32

@@ -6,7 +6,6 @@ import pytest
 
 from src.core.config import load_settings
 
-
 USDC_TOKEN_ID = "0x330ba47d00c7ce3018deee017b319fd7cc6473a2ddc9e6eba6ebb4207be15279"
 POOL_ID_HEX = "0x" + "ab" * 32
 POOL_ADDRESS = "0x152E6a7125665764a4F1F1df80E8f5D49Bf0239c"
@@ -341,7 +340,7 @@ class TestStrategyRouting:
         assert result["status"] == "completed"
         strategy.deposit_to_earn.assert_awaited_once_with(1000)
 
-    async def test_deposit_completes_when_strategy_routing_fails(self, test_db):
+    async def test_deposit_reports_undeployed_when_strategy_routing_fails(self, test_db):
         from src.services.earn.registry import StrategyRegistry
 
         registry = StrategyRegistry()
@@ -363,8 +362,19 @@ class TestStrategyRouting:
             POOL_ID_HEX, USER_ADDRESS, "1000", 5, "0x" + "aa" * 65
         )
 
-        assert result["status"] == "completed"
+        # Shares were minted, so this is not a "failed" deposit, but the funds
+        # never reached the strategy and must not be reported as settled.
+        assert result["status"] == "undeployed"
+        assert result["error"] is not None
+        assert result["tx_hash"] is not None
         strategy.deposit_to_earn.assert_awaited_once()
+
+        row = test_db.execute(
+            "SELECT status, error FROM earn_transactions WHERE id = ?",
+            (result["deposit_id"],),
+        ).fetchone()
+        assert row["status"] == "undeployed"
+        assert row["error"] is not None
 
     async def test_deposit_manual_strategy_skips_routing(self, test_db):
         service, contract, _, _ = _make_service()

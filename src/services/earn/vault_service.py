@@ -13,7 +13,12 @@ from src.core.abi import load_abi
 from src.core.config import load_settings
 from src.core.db import db_write, get_db
 from src.core.eip712 import sign_transfer
-from src.core.validation import sanitize_error, validate_address, validate_amount, validate_signature
+from src.core.validation import (
+    sanitize_error,
+    validate_address,
+    validate_amount,
+    validate_signature,
+)
 from src.services.earn.registry import StrategyRegistry, get_strategy_registry
 from src.services.earn.strategies.base import ApyPoint
 
@@ -26,6 +31,11 @@ EARN_OP_WITHDRAW = "withdraw"
 EARN_STATUS_PENDING = "pending"
 EARN_STATUS_COMPLETED = "completed"
 EARN_STATUS_FAILED = "failed"
+# Shares were minted on-chain but the funds never reached the yield strategy.
+# Distinct from "failed" because the user's deposit is real and irreversible,
+# and distinct from "completed" because the balance earns nothing until an
+# operator redeploys it.
+EARN_STATUS_UNDEPLOYED = "undeployed"
 
 
 def _exchange_rate(total_assets: int, total_shares: int) -> str:
@@ -330,14 +340,21 @@ class VaultService:
 
             self._update_transaction(tx_id, status=EARN_STATUS_COMPLETED, tx_hash=tx_hash)
 
+            deploy_error = None
             try:
                 await self._route_to_strategy(pool_id_hex, int(amount))
-            except Exception:
+            except Exception as exc:
                 logger.exception(
                     "Earn deposit %s minted shares but strategy routing failed; "
                     "funds are in pool balance pending redeploy",
                     tx_id,
                 )
+                deploy_error = sanitize_error(str(exc))
+                self._update_transaction(
+                    tx_id, status=EARN_STATUS_UNDEPLOYED, error=deploy_error
+                )
+
+        deploy_status = EARN_STATUS_UNDEPLOYED if deploy_error else EARN_STATUS_COMPLETED
 
         try:
             pool_after = self.get_pool(pool_id)
@@ -351,8 +368,8 @@ class VaultService:
                 "shares_minted": None,
                 "exchange_rate": _exchange_rate(effective_assets, pool_after["total_shares"]),
                 "tx_hash": tx_hash,
-                "status": "completed",
-                "error": None,
+                "status": deploy_status,
+                "error": deploy_error,
             }
         except Exception:
             logger.warning("Post-tx read failed for deposit %s, returning degraded response", tx_id)
@@ -363,8 +380,8 @@ class VaultService:
                 "shares_minted": None,
                 "exchange_rate": None,
                 "tx_hash": tx_hash,
-                "status": "completed",
-                "error": None,
+                "status": deploy_status,
+                "error": deploy_error,
             }
 
     async def withdraw(

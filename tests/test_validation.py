@@ -1,27 +1,47 @@
 import pytest
 
-from src.core.validation import validate_address, validate_amount, validate_signature, validate_token_id
+from src.core.validation import (
+    validate_address,
+    validate_amount,
+    validate_signature,
+    validate_token_id,
+)
+
+VALID_TOKEN_ID = "0x330ba47d00c7ce3018deee017b319fd7cc6473a2ddc9e6eba6ebb4207be15279"
 
 
 class TestValidateTokenId:
-    def test_valid_hex(self):
-        validate_token_id("0xabcdef1234567890")
+    def test_valid_bytes32(self):
+        validate_token_id(VALID_TOKEN_ID)
+
+    def test_accepts_uppercase_hex(self):
+        validate_token_id("0x" + "AB" * 32)
 
     def test_rejects_no_prefix(self):
-        with pytest.raises(ValueError, match="hex string"):
-            validate_token_id("abcdef")
+        with pytest.raises(ValueError, match="bytes32"):
+            validate_token_id(VALID_TOKEN_ID[2:])
 
     def test_rejects_empty(self):
-        with pytest.raises(ValueError, match="hex string"):
+        with pytest.raises(ValueError, match="bytes32"):
             validate_token_id("")
 
     def test_rejects_non_hex(self):
-        with pytest.raises(ValueError, match="hex string"):
+        with pytest.raises(ValueError, match="bytes32"):
             validate_token_id("0xghijkl")
 
     def test_rejects_bare_0x(self):
-        with pytest.raises(ValueError, match="hex string"):
+        with pytest.raises(ValueError, match="bytes32"):
             validate_token_id("0x")
+
+    def test_rejects_too_short(self):
+        # A short id used to pass validation and blow up later as an ABI
+        # encoding error, surfacing to the caller as a 500.
+        with pytest.raises(ValueError, match="bytes32"):
+            validate_token_id("0xdeadbeef")
+
+    def test_rejects_too_long(self):
+        with pytest.raises(ValueError, match="bytes32"):
+            validate_token_id(VALID_TOKEN_ID + "ab")
 
 
 class TestValidateAddress:

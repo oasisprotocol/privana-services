@@ -9,9 +9,9 @@ from src.clients.lifi import get_lifi_client
 from src.core.config import load_settings
 from src.core.db import db_write, get_db
 from src.core.fees import calculate_fee
+from src.core.validation import validate_address, validate_amount, validate_token_id
 from src.models.api import QuoteResponse
 from src.models.swap import SwapVenue
-from src.core.validation import validate_address, validate_amount, validate_token_id
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +94,7 @@ class QuoteService:
         if not routes:
             raise ValueError("No routes available for this swap")
         best_route = routes[0]
+        self._enforce_max_swap_size(best_route)
         to_amount_str = best_route.get("toAmount", "0")
         to_amount_min_str = best_route.get("toAmountMin", to_amount_str)
         route_tool = None
@@ -153,6 +154,28 @@ class QuoteService:
             expires_at=expires_at,
             venue=venue,
         )
+
+    def _enforce_max_swap_size(self, route: dict) -> None:
+        """Apply the ``MAX_SWAP_AMOUNT_USD`` per-swap cap to every venue.
+
+        A cap of 0 disables the check. When Li.Fi does not price the route we
+        let it through rather than rejecting on missing data, and say so in
+        the log so a silently unenforced cap is visible.
+        """
+        cap = self.settings.max_swap_amount_usd
+        if cap <= 0:
+            return
+
+        from_amount_usd = route.get("fromAmountUSD")
+        if from_amount_usd is None:
+            logger.warning(
+                "Route has no fromAmountUSD; MAX_SWAP_AMOUNT_USD=%d not enforced for this quote",
+                cap,
+            )
+            return
+
+        if float(from_amount_usd) > cap:
+            raise ValueError(f"Swap size exceeds the maximum of {cap} USD")
 
     async def _select_lifi_venue_or_raise(
         self,

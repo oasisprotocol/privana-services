@@ -11,7 +11,6 @@ from src.clients.privana import (
 )
 from src.core.config import load_settings
 
-
 LP_PRIVATE_KEY = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
 LP_ADDRESS = "0xd8991364507FAfC256EafF950d28618735753476"
 

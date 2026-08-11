@@ -86,6 +86,22 @@ MIGRATIONS = [
     );
     """,
     "CREATE INDEX IF NOT EXISTS idx_price_history_coin_ts ON token_price_history(coin_id, timestamp);",
+    # Raw share/asset components per pool over time. Stored as TEXT because they
+    # are wei-scale uint256 (past SQLite's 8-byte signed INTEGER), and stored as
+    # components rather than a pre-divided rate so the ERC4626 virtual offset
+    # survives — the value-per-share can only be derived losslessly from the two.
+    # Unbackfillable (Sapphire is non-archive, EarnManager emits no events), so
+    # every sampled row is the only record of that instant.
+    """
+    CREATE TABLE IF NOT EXISTS pool_rate_history (
+        pool_id      TEXT NOT NULL,
+        timestamp    INTEGER NOT NULL,
+        total_assets TEXT NOT NULL,
+        total_shares TEXT NOT NULL,
+        PRIMARY KEY (pool_id, timestamp)
+    );
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_pool_rate_pool_ts ON pool_rate_history(pool_id, timestamp);",
 ]
 
 

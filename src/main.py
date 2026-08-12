@@ -34,6 +34,8 @@ def _validate_settings() -> None:
         errors.append("EARN_MANAGER_CONTRACT_ADDRESS is not set")
     if not settings.privana_api_base_url:
         errors.append("PRIVANA_API_BASE_URL is not set")
+    if not settings.base_rpc_url:
+        errors.append("BASE_RPC_URL is not set")
     if errors and settings.environment.lower() != "development":
         raise RuntimeError(
             "Missing required configuration:\n  - " + "\n  - ".join(errors)

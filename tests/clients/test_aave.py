@@ -16,7 +16,7 @@ RAY = 10**27
 def _make_client(with_signer: bool = False):
     settings = replace(
         load_settings(),
-        base_sepolia_rpc_url="http://localhost:8545",
+        base_rpc_url="http://localhost:8545",
         aave_pool_address=POOL_ADDRESS,
         liquidity_provider_secret_key=TEST_LP_SK if with_signer else "",
     )

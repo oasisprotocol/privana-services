@@ -27,7 +27,7 @@ class Settings:
     max_swap_amount_usd: int
     lifi_token_map: str
 
-    base_sepolia_rpc_url: str
+    base_rpc_url: str
     base_mainnet_rpc_url: str
     aave_pool_address: str
     aave_pool_assets: str

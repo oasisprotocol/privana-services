@@ -1,5 +1,19 @@
-from src.services.portfolio.valuation import StepSeries, sample_grid
+from src.clients.coingecko import PricePoint
+from src.services.portfolio.reconstruction import BucketPoint
+from src.services.portfolio.valuation import (
+    BucketValuePoint,
+    StepSeries,
+    sample_grid,
+    value_buckets,
+)
 from src.services.price_history import SAMPLE_INTERVAL_SEC
+
+USDC = "0xc719650e9f4b0f27d956638c54518932ef9d15e720a1a2b2850250bcd0816514"
+WETH = "0x335b5cccd1e63b2fe79863a0db73fce430e4e66902e2b78424f8662621e29fb7"
+
+T0 = SAMPLE_INTERVAL_SEC * 10
+T1 = SAMPLE_INTERVAL_SEC * 11
+T2 = SAMPLE_INTERVAL_SEC * 12
 
 
 class TestSampleGrid:
@@ -50,3 +64,82 @@ class TestStepSeries:
 
         assert series.value_at(0) == 0
         assert series.value_at(10**12) == 0
+
+
+class TestValueBuckets:
+    def test_values_balance_times_price_normalised_by_decimals(self):
+        buckets = {USDC: [BucketPoint(timestamp=T0, available=5_000_000, locked=0)]}
+        prices = {USDC: [PricePoint(timestamp=T0, price_e8=100_000_000)]}
+
+        series = value_buckets(buckets, prices, {USDC: 6}, [T0])
+
+        assert series == [
+            BucketValuePoint(timestamp=T0, available_e8=500_000_000, locked_e8=0)
+        ]
+
+    def test_balances_and_prices_step_between_observations(self):
+        buckets = {
+            USDC: [
+                BucketPoint(timestamp=T0, available=5_000_000, locked=0),
+                BucketPoint(timestamp=T2, available=2_000_000, locked=3_000_000),
+            ]
+        }
+        prices = {
+            USDC: [
+                PricePoint(timestamp=T0, price_e8=100_000_000),
+                PricePoint(timestamp=T1, price_e8=200_000_000),
+            ]
+        }
+
+        series = value_buckets(buckets, prices, {USDC: 6}, [T0, T1, T2])
+
+        assert series == [
+            BucketValuePoint(timestamp=T0, available_e8=500_000_000, locked_e8=0),
+            BucketValuePoint(timestamp=T1, available_e8=1_000_000_000, locked_e8=0),
+            BucketValuePoint(timestamp=T2, available_e8=400_000_000, locked_e8=600_000_000),
+        ]
+
+    def test_tokens_sum_into_one_series(self):
+        buckets = {
+            USDC: [BucketPoint(timestamp=T0, available=5_000_000, locked=0)],
+            WETH: [BucketPoint(timestamp=T0, available=2 * 10**18, locked=0)],
+        }
+        prices = {
+            USDC: [PricePoint(timestamp=T0, price_e8=100_000_000)],
+            WETH: [PricePoint(timestamp=T0, price_e8=3_000 * 10**8)],
+        }
+
+        series = value_buckets(buckets, prices, {USDC: 6, WETH: 18}, [T0])
+
+        assert series[0].available_e8 == 500_000_000 + 6_000 * 10**8
+
+    def test_token_without_price_series_is_skipped(self):
+        buckets = {
+            USDC: [BucketPoint(timestamp=T0, available=5_000_000, locked=0)],
+            WETH: [BucketPoint(timestamp=T0, available=10**18, locked=0)],
+        }
+        prices = {USDC: [PricePoint(timestamp=T0, price_e8=100_000_000)]}
+
+        series = value_buckets(buckets, prices, {USDC: 6, WETH: 18}, [T0])
+
+        assert series[0].available_e8 == 500_000_000
+
+    def test_token_without_decimals_is_skipped(self):
+        buckets = {USDC: [BucketPoint(timestamp=T0, available=5_000_000, locked=0)]}
+        prices = {USDC: [PricePoint(timestamp=T0, price_e8=100_000_000)]}
+
+        series = value_buckets(buckets, prices, {}, [T0])
+
+        assert series == [BucketValuePoint(timestamp=T0, available_e8=0, locked_e8=0)]
+
+    def test_balance_before_first_price_sample_values_zero(self):
+        buckets = {USDC: [BucketPoint(timestamp=T0, available=5_000_000, locked=0)]}
+        prices = {USDC: [PricePoint(timestamp=T1, price_e8=100_000_000)]}
+
+        series = value_buckets(buckets, prices, {USDC: 6}, [T0, T1])
+
+        assert series[0].available_e8 == 0
+        assert series[1].available_e8 == 500_000_000
+
+    def test_empty_grid_yields_empty_series(self):
+        assert value_buckets({}, {}, {}, []) == []

@@ -1,6 +1,7 @@
 import logging
 from bisect import bisect_right
 from dataclasses import dataclass
+from typing import Protocol
 
 from src.clients.coingecko import PricePoint
 from src.services.portfolio.reconstruction import BucketPoint
@@ -105,5 +106,51 @@ def value_buckets(
             locked_e8 += locked.value_at(ts) * price_e8 // scale
         series.append(
             BucketValuePoint(timestamp=ts, available_e8=available_e8, locked_e8=locked_e8)
+        )
+    return series
+
+
+class EarnValueProvider(Protocol):
+    """Seam for the earn value series (plan step 4).
+
+    The earn component is owned by the rate-provider work: shares(t) x
+    rate(t) x price(t). Portfolio composition only needs a fiat value per
+    grid timestamp, so the whole dependency is this one method.
+    """
+
+    def earn_value_e8(self, timestamp: int) -> int: ...
+
+
+class ZeroEarnValue:
+    """Stand-in until the earn value series lands; values every position at 0."""
+
+    def earn_value_e8(self, timestamp: int) -> int:
+        return 0
+
+
+@dataclass(frozen=True)
+class PortfolioPoint:
+    timestamp: int
+    total_e8: int
+    available_e8: int
+    locked_e8: int
+    earn_e8: int
+
+
+def compose_portfolio(
+    bucket_values: list[BucketValuePoint],
+    earn: EarnValueProvider,
+) -> list[PortfolioPoint]:
+    series = []
+    for point in bucket_values:
+        earn_e8 = earn.earn_value_e8(point.timestamp)
+        series.append(
+            PortfolioPoint(
+                timestamp=point.timestamp,
+                total_e8=point.available_e8 + point.locked_e8 + earn_e8,
+                available_e8=point.available_e8,
+                locked_e8=point.locked_e8,
+                earn_e8=earn_e8,
+            )
         )
     return series

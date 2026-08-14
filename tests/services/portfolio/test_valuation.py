@@ -2,7 +2,10 @@ from src.clients.coingecko import PricePoint
 from src.services.portfolio.reconstruction import BucketPoint
 from src.services.portfolio.valuation import (
     BucketValuePoint,
+    PortfolioPoint,
     StepSeries,
+    ZeroEarnValue,
+    compose_portfolio,
     sample_grid,
     value_buckets,
 )
@@ -143,3 +146,40 @@ class TestValueBuckets:
 
     def test_empty_grid_yields_empty_series(self):
         assert value_buckets({}, {}, {}, []) == []
+
+
+class _FlatEarn:
+    def __init__(self, value_e8):
+        self._value_e8 = value_e8
+
+    def earn_value_e8(self, timestamp):
+        return self._value_e8
+
+
+class TestComposePortfolio:
+    def test_total_sums_all_three_components(self):
+        bucket_values = [
+            BucketValuePoint(timestamp=T0, available_e8=500, locked_e8=200),
+        ]
+
+        series = compose_portfolio(bucket_values, _FlatEarn(300))
+
+        assert series == [
+            PortfolioPoint(
+                timestamp=T0, total_e8=1000, available_e8=500, locked_e8=200, earn_e8=300
+            )
+        ]
+
+    def test_zero_earn_stub_leaves_totals_to_the_buckets(self):
+        bucket_values = [
+            BucketValuePoint(timestamp=T0, available_e8=500, locked_e8=200),
+            BucketValuePoint(timestamp=T1, available_e8=700, locked_e8=0),
+        ]
+
+        series = compose_portfolio(bucket_values, ZeroEarnValue())
+
+        assert [p.total_e8 for p in series] == [700, 700]
+        assert all(p.earn_e8 == 0 for p in series)
+
+    def test_empty_bucket_series_yields_empty_portfolio(self):
+        assert compose_portfolio([], ZeroEarnValue()) == []

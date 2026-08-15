@@ -24,3 +24,13 @@ class Balance(BaseModel):
     balance: str
     token_symbol: Optional[str] = None
     chain_id: Optional[str] = None
+
+
+class HistoryEntry(BaseModel):
+    kind: str
+    timestamp: int
+    token_id: Optional[str] = None
+    amount: Optional[str] = None
+    counterparty: Optional[str] = None
+    deposit_id: Optional[str] = None
+    chain_id: Optional[int] = None

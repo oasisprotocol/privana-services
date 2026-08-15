@@ -1,0 +1,95 @@
+{
+  "history": [
+    {
+      "kind": "deposit",
+      "timestamp": 1786000000,
+      "token_id": "0xc719650e9f4b0f27d956638c54518932ef9d15e720a1a2b2850250bcd0816514",
+      "amount": "10000000",
+      "counterparty": null,
+      "deposit_id": "0x11",
+      "chain_id": 84532
+    },
+    {
+      "kind": "createLock",
+      "timestamp": 1786010000,
+      "token_id": "0xc719650e9f4b0f27d956638c54518932ef9d15e720a1a2b2850250bcd0816514",
+      "amount": "4000000",
+      "counterparty": "0x9147000000000000000000000000000000000001",
+      "deposit_id": null,
+      "chain_id": 84532
+    },
+    {
+      "kind": "modifyLock",
+      "timestamp": 1786020000,
+      "token_id": "0xc719650e9f4b0f27d956638c54518932ef9d15e720a1a2b2850250bcd0816514",
+      "amount": "1000000",
+      "counterparty": "0x9147000000000000000000000000000000000001",
+      "deposit_id": null,
+      "chain_id": 84532
+    },
+    {
+      "kind": "transferFromLockOut",
+      "timestamp": 1786030000,
+      "token_id": "0xc719650e9f4b0f27d956638c54518932ef9d15e720a1a2b2850250bcd0816514",
+      "amount": "2000000",
+      "counterparty": "0x705b2433b76c383C20AE0d60803334f0AD13b6e8",
+      "deposit_id": null,
+      "chain_id": 84532
+    },
+    {
+      "kind": "unlockLock",
+      "timestamp": 1786040000,
+      "token_id": "0xc719650e9f4b0f27d956638c54518932ef9d15e720a1a2b2850250bcd0816514",
+      "amount": "3000000",
+      "counterparty": "0x9147000000000000000000000000000000000001",
+      "deposit_id": null,
+      "chain_id": 84532
+    },
+    {
+      "kind": "transferBalanceOut",
+      "timestamp": 1786050000,
+      "token_id": "0xc719650e9f4b0f27d956638c54518932ef9d15e720a1a2b2850250bcd0816514",
+      "amount": "1500000",
+      "counterparty": "0xFA4E20a8Ca6B671fDbC01bE3d7926696D7e594cd",
+      "deposit_id": null,
+      "chain_id": 84532
+    },
+    {
+      "kind": "transferFromLockIn",
+      "timestamp": 1786050000,
+      "token_id": "0xc719650e9f4b0f27d956638c54518932ef9d15e720a1a2b2850250bcd0816514",
+      "amount": "500000",
+      "counterparty": "0x705b2433b76c383C20AE0d60803334f0AD13b6e8",
+      "deposit_id": null,
+      "chain_id": 84532
+    },
+    {
+      "kind": "withdraw",
+      "timestamp": 1786060000,
+      "token_id": "0xc719650e9f4b0f27d956638c54518932ef9d15e720a1a2b2850250bcd0816514",
+      "amount": "2000000",
+      "counterparty": "0xd8991364507FAfC256EafF950d28618735753476",
+      "deposit_id": "0x12",
+      "chain_id": 84532
+    },
+    {
+      "kind": "deposit",
+      "timestamp": 1786015000,
+      "token_id": "0x335b5cccd1e63b2fe79863a0db73fce430e4e66902e2b78424f8662621e29fb7",
+      "amount": "700000000000000000",
+      "counterparty": null,
+      "deposit_id": "0x13",
+      "chain_id": 84532
+    },
+    {
+      "kind": "unknown",
+      "timestamp": 1786055000,
+      "token_id": null,
+      "amount": null,
+      "counterparty": null,
+      "deposit_id": null,
+      "chain_id": null
+    }
+  ],
+  "total": 10
+}

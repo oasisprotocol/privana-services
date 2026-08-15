@@ -14,6 +14,7 @@ from src.core.abi import load_abi
 from src.core.config import load_settings
 from src.models.common import (
     Balance,
+    HistoryEntry,
     TokenInfo,
 )
 
@@ -22,6 +23,7 @@ logger = logging.getLogger(__name__)
 MAX_RETRIES = 3
 RETRY_DELAY = 1.0
 JWT_SIWE_CACHE_SKEW_SECONDS = 30
+HISTORY_PAGE_LIMIT = 100
 
 
 @dataclass(frozen=True)
@@ -194,6 +196,35 @@ class AccountingClient:
 
     async def get_jwt_user_address(self, jwt_token: str) -> str:
         return (await self._exchange_jwt_for_siwe_auth(jwt_token)).address
+
+    async def get_user_history(self, siwe_token: str) -> list[HistoryEntry]:
+        """Page through the caller's full activity history, oldest first.
+
+        The endpoint pages by page number, not row offset: page 0 is the
+        oldest page, -1 the latest. Reading forward from page 0 keeps the
+        result stable while new entries append — they only extend the final
+        page. ``total`` is re-read per page so growth during the walk still
+        terminates, and a short page ends the loop even if ``total`` lies.
+        """
+        headers = {"X-SIWE-Token": siwe_token}
+        entries: list[HistoryEntry] = []
+        page_index = 0
+        while True:
+            response = await _request_with_retry(
+                self.client,
+                "GET",
+                f"{self.base_url}/v1/accounting/history"
+                f"?offset={page_index}&limit={HISTORY_PAGE_LIMIT}",
+                headers=headers,
+            )
+            data = response.json()
+            page = [HistoryEntry(**entry) for entry in data["history"]]
+            entries.extend(page)
+            if len(page) < HISTORY_PAGE_LIMIT or len(entries) >= int(data["total"]):
+                break
+            page_index += 1
+        entries.sort(key=lambda entry: entry.timestamp)
+        return entries
 
     async def get_transfer_nonce(self, user_address: str) -> int:
         """Read ``transferNonces[user]`` directly from the Accounting contract.

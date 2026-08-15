@@ -16,6 +16,7 @@ FIXTURES = Path(__file__).parent / "fixtures"
 
 USDC = "0xc719650e9f4b0f27d956638c54518932ef9d15e720a1a2b2850250bcd0816514"
 WETH = "0x335b5cccd1e63b2fe79863a0db73fce430e4e66902e2b78424f8662621e29fb7"
+USER = "0xd8991364507FAfC256EafF950d28618735753476"
 DECIMALS = {USDC: 6, WETH: 18}
 
 
@@ -33,7 +34,7 @@ def _flat_prices(grid, usdc_e8=100_000_000, weth_e8=3_000 * 10**8):
 
 class TestLifecycleToPortfolioSeries:
     def test_full_pipeline_produces_a_consistent_series(self):
-        series_by_token = replay_history(_entries())
+        series_by_token = replay_history(_entries(), USER)
         grid = sample_grid(1786000000, 1786060000 + SAMPLE_INTERVAL_SEC)
         prices = _flat_prices(grid)
 
@@ -52,7 +53,7 @@ class TestLifecycleToPortfolioSeries:
         assert final.locked_e8 == 0
 
     def test_locked_bucket_appears_while_the_lock_is_open(self):
-        series_by_token = replay_history(_entries())
+        series_by_token = replay_history(_entries(), USER)
         grid = sample_grid(1786000000, 1786060000 + SAMPLE_INTERVAL_SEC)
         prices = _flat_prices(grid)
 

@@ -10,6 +10,7 @@ from src.services.portfolio.reconstruction import BucketPoint, replay_history
 FIXTURES = Path(__file__).parent / "fixtures"
 
 USDC = "0xc719650e9f4b0f27d956638c54518932ef9d15e720a1a2b2850250bcd0816514"
+USER = "0xd8991364507FAfC256EafF950d28618735753476"
 
 
 def _client_returning(payload):
@@ -33,7 +34,7 @@ class TestHistoryToBucketsSeam:
         client = _client_returning(payload)
 
         history = await client.get_user_history("siwe-token")
-        series = replay_history(history)
+        series = replay_history(history, USER)
 
         assert series[USDC] == [
             BucketPoint(timestamp=1786364867, available=5000000, locked=0),
@@ -45,7 +46,7 @@ class TestHistoryToBucketsSeam:
         client = _client_returning(payload)
 
         history = await client.get_user_history("siwe-token")
-        series = replay_history(history)
+        series = replay_history(history, USER)
 
         assert series[USDC][-1] == BucketPoint(
             timestamp=1786060000, available=5000000, locked=0

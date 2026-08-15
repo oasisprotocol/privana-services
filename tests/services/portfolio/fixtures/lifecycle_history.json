@@ -68,7 +68,7 @@
       "timestamp": 1786060000,
       "token_id": "0xc719650e9f4b0f27d956638c54518932ef9d15e720a1a2b2850250bcd0816514",
       "amount": "2000000",
-      "counterparty": null,
+      "counterparty": "0xd8991364507FAfC256EafF950d28618735753476",
       "deposit_id": "0x12",
       "chain_id": 84532
     },

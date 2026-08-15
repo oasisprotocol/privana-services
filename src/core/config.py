@@ -29,6 +29,35 @@ def _get_int(name: str) -> int:
         raise ValueError(f"Environment variable {name} must be an integer") from exc
 
 
+def _get_base_rpc_url() -> Optional[str]:
+    """Resolve the RPC for the Base chain this deployment operates on.
+
+    The setting used to be called ``BASE_SEPOLIA_RPC_URL`` back when that chain
+    was the only Base we ran against. It is really "our Base chain" — Sepolia on
+    testnet, mainnet on mainnet — and reading a mainnet Aave pool through a
+    variable named "sepolia" is how a deploy ends up querying the wrong chain
+    and seeing every reserve as unlisted. ``BASE_RPC_URL`` is the name now.
+
+    The old name is still honored so existing deployments don't break on the
+    rename, with a warning so it doesn't stay that way forever. Distinct from
+    ``BASE_MAINNET_RPC_URL``, which is always Base mainnet because Midas only
+    exists there; on a mainnet deploy the two legitimately point at the same
+    endpoint.
+    """
+    url = os.getenv("BASE_RPC_URL")
+    if url:
+        return url
+
+    legacy = os.getenv("BASE_SEPOLIA_RPC_URL")
+    if legacy:
+        logger.warning(
+            "BASE_SEPOLIA_RPC_URL is deprecated; rename it to BASE_RPC_URL. "
+            "It names the Base chain this deployment operates on, which is not "
+            "Sepolia outside testnet."
+        )
+    return legacy
+
+
 def load_settings(refresh: bool = False) -> Settings:
     global _settings
     if _settings is None or refresh:
@@ -54,7 +83,7 @@ def load_settings(refresh: bool = False) -> Settings:
             fee_bps=_get_int("FEE_BPS"),
             max_swap_amount_usd=_get_int("MAX_SWAP_AMOUNT_USD"),
             lifi_token_map=os.getenv("LIFI_TOKEN_MAP"),
-            base_sepolia_rpc_url=os.getenv("BASE_SEPOLIA_RPC_URL"),
+            base_rpc_url=_get_base_rpc_url(),
             base_mainnet_rpc_url=os.getenv("BASE_MAINNET_RPC_URL"),
             aave_pool_address=os.getenv("AAVE_POOL_ADDRESS"),
             aave_pool_assets=os.getenv("AAVE_POOL_ASSETS"),

@@ -30,8 +30,8 @@ cp .env.localnet .env
 | `SWAP_MANAGER_CONTRACT_ADDRESS`  | `SwapManager` contract on Sapphire                                                                        |
 | `EARN_MANAGER_CONTRACT_ADDRESS`  | `EarnManager` proxy contract on Sapphire                                                                  |
 | `SAPPHIRE_RPC_URL`               | Sapphire RPC endpoint                                                                                     |
-| `BASE_SEPOLIA_RPC_URL`           | Base Sepolia RPC endpoint (for Aave reads/writes)                                                         |
-| `AAVE_POOL_ADDRESS`              | Aave V3 `Pool` on Base Sepolia                                                                            |
+| `BASE_RPC_URL`                   | RPC for the Base chain this deployment runs on — Sepolia on testnet, mainnet on mainnet (Aave, LiFi)      |
+| `AAVE_POOL_ADDRESS`              | Aave V3 `Pool` on the chain `BASE_RPC_URL` points at                                                      |
 | `AAVE_POOL_ASSETS`               | JSON map of `pool_id -> {token_id, asset_address}` registering Aave strategies at startup                 |
 | `BASE_MAINNET_RPC_URL`           | Base mainnet RPC endpoint (for Midas reads/writes)                                                        |
 | `MIDAS_ISSUANCE_VAULT_ADDRESS`   | Midas Issuance Vault proxy on Base mainnet (defaults to the canonical deployment)                         |

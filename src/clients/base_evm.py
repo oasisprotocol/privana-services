@@ -86,6 +86,6 @@ def get_base_evm_client() -> BaseEvmClient:
     if _client_instance is None:
         settings = load_settings()
         _client_instance = BaseEvmClient(
-            settings.base_sepolia_rpc_url, settings.liquidity_provider_secret_key
+            settings.base_rpc_url, settings.liquidity_provider_secret_key
         )
     return _client_instance

@@ -29,26 +29,34 @@ def sample_grid(start_ts: int, end_ts: int) -> list[int]:
 class StepSeries:
     """A right-continuous step function over (timestamp, value) change-points.
 
-    Balances and prices both behave this way between observations: the value
-    at t is the most recent point at or before t, and 0 before the first
-    point — a balance does not exist before its first event, and a token
-    contributes no value before its first price sample.
+    Balances and prices both hold their last observed value between
+    observations. Before the first point they differ: a balance does not
+    exist before its first event, so it reads 0, while a price series is
+    extrapolated flat from its first sample (extend_backward=True) — the same
+    rule the earn value history applies, so both valuations price the time
+    before the stored window identically.
     """
 
     timestamps: tuple[int, ...]
     values: tuple[int, ...]
+    extend_backward: bool = False
 
     @classmethod
-    def from_points(cls, points: list[tuple[int, int]]) -> "StepSeries":
+    def from_points(
+        cls, points: list[tuple[int, int]], extend_backward: bool = False
+    ) -> "StepSeries":
         ordered = sorted(points, key=lambda p: p[0])
         return cls(
             timestamps=tuple(p[0] for p in ordered),
             values=tuple(p[1] for p in ordered),
+            extend_backward=extend_backward,
         )
 
     def value_at(self, ts: int) -> int:
         index = bisect_right(self.timestamps, ts)
         if index == 0:
+            if self.extend_backward and self.values:
+                return self.values[0]
             return 0
         return self.values[index - 1]
 
@@ -71,10 +79,12 @@ def value_buckets(
     At each grid timestamp every token contributes balance x price, with the
     balance normalised out of its raw units: value_e8 = amount * price_e8 //
     10^decimals. Both inputs are step functions, so between observations the
-    last known balance and price hold. Tokens without a price series or
-    decimals are skipped loudly rather than valued wrong — a hole in config
-    should surface in logs, not in a silently lower total. Negative balances
-    from truncated histories value negative by design.
+    last known balance and price hold; before the first stored price sample
+    the series extends flat backwards, matching the earn value history.
+    Tokens without a price series or decimals are skipped loudly rather than
+    valued wrong — a hole in config should surface in logs, not in a silently
+    lower total. Negative balances from truncated histories value negative by
+    design.
     """
     valued_tokens = []
     for token_id, points in bucket_series.items():
@@ -91,7 +101,9 @@ def value_buckets(
             (
                 StepSeries.from_points([(p.timestamp, p.available) for p in points]),
                 StepSeries.from_points([(p.timestamp, p.locked) for p in points]),
-                StepSeries.from_points([(p.timestamp, p.price_e8) for p in prices]),
+                StepSeries.from_points(
+                    [(p.timestamp, p.price_e8) for p in prices], extend_backward=True
+                ),
                 10**decimals,
             )
         )

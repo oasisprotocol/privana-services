@@ -57,6 +57,17 @@ class TestStepSeries:
 
         assert series.value_at(99) == 0
 
+    def test_extended_series_holds_its_first_value_backwards(self):
+        series = StepSeries.from_points([(100, 5), (200, 8)], extend_backward=True)
+
+        assert series.value_at(0) == 5
+        assert series.value_at(150) == 5
+
+    def test_empty_extended_series_is_still_zero(self):
+        series = StepSeries.from_points([], extend_backward=True)
+
+        assert series.value_at(0) == 0
+
     def test_points_are_sorted_on_construction(self):
         series = StepSeries.from_points([(200, 8), (100, 5)])
 
@@ -135,13 +146,13 @@ class TestValueBuckets:
 
         assert series == [BucketValuePoint(timestamp=T0, available_e8=0, locked_e8=0)]
 
-    def test_balance_before_first_price_sample_values_zero(self):
+    def test_balance_before_first_price_sample_uses_the_first_price(self):
         buckets = {USDC: [BucketPoint(timestamp=T0, available=5_000_000, locked=0)]}
         prices = {USDC: [PricePoint(timestamp=T1, price_e8=100_000_000)]}
 
         series = value_buckets(buckets, prices, {USDC: 6}, [T0, T1])
 
-        assert series[0].available_e8 == 0
+        assert series[0].available_e8 == 500_000_000
         assert series[1].available_e8 == 500_000_000
 
     def test_empty_grid_yields_empty_series(self):

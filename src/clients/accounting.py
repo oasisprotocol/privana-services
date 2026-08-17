@@ -33,6 +33,14 @@ class _JwtSiweAuth:
     expires_at: float
 
 
+@dataclass(frozen=True)
+class JwtIdentity:
+    """Who a JWT belongs to, plus the SIWE token that reads on their behalf."""
+
+    siwe_token: str
+    address: str
+
+
 async def _request_with_retry(client: httpx.AsyncClient, method: str, url: str, **kwargs) -> httpx.Response:
     for attempt in range(MAX_RETRIES):
         try:
@@ -194,8 +202,14 @@ class AccountingClient:
     async def exchange_jwt_for_siwe_token(self, jwt_token: str) -> str:
         return (await self._exchange_jwt_for_siwe_auth(jwt_token)).siwe_token
 
-    async def get_jwt_user_address(self, jwt_token: str) -> str:
-        return (await self._exchange_jwt_for_siwe_auth(jwt_token)).address
+    async def get_jwt_identity(self, jwt_token: str) -> JwtIdentity:
+        """Address and SIWE token for a JWT, from one cached exchange.
+
+        Callers that only need the address pay nothing extra: both come back
+        from the same request the SIWE exchange already makes.
+        """
+        auth = await self._exchange_jwt_for_siwe_auth(jwt_token)
+        return JwtIdentity(siwe_token=auth.siwe_token, address=auth.address)
 
     async def get_user_history(self, siwe_token: str) -> list[HistoryEntry]:
         """Page through the caller's full activity history, oldest first.

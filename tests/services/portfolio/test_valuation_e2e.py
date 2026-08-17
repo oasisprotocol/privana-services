@@ -5,7 +5,7 @@ from src.clients.coingecko import PricePoint
 from src.models.common import HistoryEntry
 from src.services.portfolio.reconstruction import replay_history
 from src.services.portfolio.valuation import (
-    ZeroEarnValue,
+    EarnSeriesValues,
     compose_portfolio,
     sample_grid,
     value_buckets,
@@ -40,7 +40,7 @@ class TestLifecycleToPortfolioSeries:
 
         portfolio = compose_portfolio(
             value_buckets(series_by_token, prices, DECIMALS, grid),
-            ZeroEarnValue(),
+            EarnSeriesValues({}),
         )
 
         assert len(portfolio) == len(grid)
@@ -59,7 +59,7 @@ class TestLifecycleToPortfolioSeries:
 
         portfolio = compose_portfolio(
             value_buckets(series_by_token, prices, DECIMALS, grid),
-            ZeroEarnValue(),
+            EarnSeriesValues({}),
         )
 
         locked_values = {p.timestamp: p.locked_e8 for p in portfolio}

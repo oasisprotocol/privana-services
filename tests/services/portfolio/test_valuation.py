@@ -1,10 +1,13 @@
+from decimal import Decimal
+
 from src.clients.coingecko import PricePoint
+from src.services.earn.value_history import EarnValuePoint
 from src.services.portfolio.reconstruction import BucketPoint
 from src.services.portfolio.valuation import (
     BucketValuePoint,
+    EarnSeriesValues,
     PortfolioPoint,
     StepSeries,
-    ZeroEarnValue,
     compose_portfolio,
     sample_grid,
     value_buckets,
@@ -181,16 +184,83 @@ class TestComposePortfolio:
             )
         ]
 
-    def test_zero_earn_stub_leaves_totals_to_the_buckets(self):
+    def test_empty_earn_series_leaves_totals_to_the_buckets(self):
         bucket_values = [
             BucketValuePoint(timestamp=T0, available_e8=500, locked_e8=200),
             BucketValuePoint(timestamp=T1, available_e8=700, locked_e8=0),
         ]
 
-        series = compose_portfolio(bucket_values, ZeroEarnValue())
+        series = compose_portfolio(bucket_values, EarnSeriesValues({}))
 
         assert [p.total_e8 for p in series] == [700, 700]
         assert all(p.earn_e8 == 0 for p in series)
 
     def test_empty_bucket_series_yields_empty_portfolio(self):
-        assert compose_portfolio([], ZeroEarnValue()) == []
+        assert compose_portfolio([], EarnSeriesValues({})) == []
+
+
+class TestEarnSeriesValues:
+    def _series(self, monkeypatch, points):
+        async def fake_series(user_address, timestamps):
+            assert user_address == "0xuser"
+            assert list(timestamps) == [T0, T1]
+            return points
+
+        monkeypatch.setattr(
+            "src.services.portfolio.valuation.earn_value_series", fake_series
+        )
+
+    async def test_grid_values_aggregate_across_tokens(self, monkeypatch):
+        self._series(
+            monkeypatch,
+            [
+                EarnValuePoint(T0, USDC, 5_000_000, Decimal("5")),
+                EarnValuePoint(T0, WETH, 10**17, Decimal("300")),
+                EarnValuePoint(T1, USDC, 5_000_000, Decimal("5.5")),
+            ],
+        )
+
+        earn = await EarnSeriesValues.load("0xuser", [T0, T1])
+
+        assert earn.earn_value_e8(T0) == 305 * 10**8
+        assert earn.earn_value_e8(T1) == 550_000_000
+
+    async def test_unpriced_points_are_skipped_not_zeroed(self, monkeypatch, caplog):
+        self._series(
+            monkeypatch,
+            [
+                EarnValuePoint(T0, USDC, 5_000_000, Decimal("5")),
+                EarnValuePoint(T0, WETH, 10**17, None),
+            ],
+        )
+
+        earn = await EarnSeriesValues.load("0xuser", [T0, T1])
+
+        assert earn.earn_value_e8(T0) == 500_000_000
+        assert WETH in caplog.text
+
+    async def test_zero_value_unpriced_points_do_not_warn(self, monkeypatch, caplog):
+        self._series(monkeypatch, [EarnValuePoint(T0, WETH, 0, None)])
+
+        earn = await EarnSeriesValues.load("0xuser", [T0, T1])
+
+        assert earn.earn_value_e8(T0) == 0
+        assert WETH not in caplog.text
+
+    async def test_grid_timestamps_without_points_read_zero(self, monkeypatch):
+        self._series(monkeypatch, [])
+
+        earn = await EarnSeriesValues.load("0xuser", [T0, T1])
+
+        assert earn.earn_value_e8(T0) == 0
+        assert earn.earn_value_e8(T2) == 0
+
+    async def test_fiat_values_round_half_up_to_e8(self, monkeypatch):
+        self._series(
+            monkeypatch,
+            [EarnValuePoint(T0, USDC, 1, Decimal("0.000000005"))],
+        )
+
+        earn = await EarnSeriesValues.load("0xuser", [T0, T1])
+
+        assert earn.earn_value_e8(T0) == 1

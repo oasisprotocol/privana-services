@@ -1,9 +1,11 @@
 import logging
 from bisect import bisect_right
 from dataclasses import dataclass
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Protocol
 
 from src.clients.coingecko import PricePoint
+from src.services.earn.value_history import PRICE_E8, earn_value_series
 from src.services.portfolio.reconstruction import BucketPoint
 from src.services.price_history import SAMPLE_INTERVAL_SEC
 
@@ -125,19 +127,48 @@ def value_buckets(
 class EarnValueProvider(Protocol):
     """Seam for the earn value series (plan step 4).
 
-    The earn component is owned by the rate-provider work: shares(t) x
-    rate(t) x price(t). Portfolio composition only needs a fiat value per
-    grid timestamp, so the whole dependency is this one method.
+    Portfolio composition only needs a fiat value per grid timestamp, so the
+    whole dependency is this one method.
     """
 
     def earn_value_e8(self, timestamp: int) -> int: ...
 
 
-class ZeroEarnValue:
-    """Stand-in until the earn value series lands; values every position at 0."""
+class EarnSeriesValues:
+    """EarnValueProvider backed by the earn value history (plan step 4).
+
+    The series is async and per (timestamp, token) with fiat as Decimal or
+    None, while composition wants sync pre-aggregated lookups — so load()
+    fetches the whole grid up front and serves from a dict. Points whose fiat
+    value could not be resolved are skipped loudly, one warning per token,
+    mirroring how value_buckets treats tokens it cannot price.
+    """
+
+    def __init__(self, values_e8: dict[int, int]) -> None:
+        self._values_e8 = values_e8
+
+    @classmethod
+    async def load(cls, user_address: str, grid: list[int]) -> "EarnSeriesValues":
+        values_e8: dict[int, int] = dict.fromkeys(grid, 0)
+        unpriced_tokens = set()
+        for point in await earn_value_series(user_address, grid):
+            if point.earn_value_fiat is None:
+                if point.earn_value_base:
+                    unpriced_tokens.add(point.token_id)
+                continue
+            fiat_e8 = (point.earn_value_fiat * PRICE_E8).quantize(
+                Decimal(1), rounding=ROUND_HALF_UP
+            )
+            values_e8[point.timestamp] += int(fiat_e8)
+        for token_id in sorted(unpriced_tokens):
+            logger.warning(
+                "Skipping earn value for token %s: fiat conversion unavailable",
+                token_id,
+            )
+        return cls(values_e8)
 
     def earn_value_e8(self, timestamp: int) -> int:
-        return 0
+        return self._values_e8.get(timestamp, 0)
 
 
 @dataclass(frozen=True)

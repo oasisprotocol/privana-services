@@ -2,6 +2,8 @@ from contextlib import contextmanager
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 from src.clients.accounting import JwtIdentity
 from src.clients.coingecko import PricePoint
 from src.models.common import HistoryEntry, TokenInfo
@@ -114,8 +116,8 @@ class TestWindow:
         assert grid[1] - grid[0] == DAY_SEC
         assert len(grid) == FINE_GRAIN_DAYS + 2
 
-    def test_first_event_in_the_future_yields_no_grid(self):
-        assert _window(earliest_ts=NOW + DAY_SEC, days=None, now=NOW) == []
+    def test_first_event_in_the_future_is_clamped_to_now(self):
+        assert _window(earliest_ts=NOW + DAY_SEC, days=None, now=NOW) == [NOW]
 
 
 class TestPortfolioHistory:
@@ -156,13 +158,38 @@ class TestPortfolioHistory:
         assert all(p.earn_e8 == 5 * 10**8 for p in series)
 
     async def test_token_the_accounting_service_cannot_describe_is_skipped(self):
-        accounting = _accounting([_deposit(NOW - 2 * DAY_SEC)])
-        accounting.get_token_info = AsyncMock(side_effect=RuntimeError("token info down"))
+        weth = "0x335b5cccd1e63b2fe79863a0db73fce430e4e66902e2b78424f8662621e29fb7"
+        entries = [_deposit(NOW - 2 * DAY_SEC)]
+        entries.append(
+            HistoryEntry(
+                kind="deposit",
+                timestamp=NOW - 2 * DAY_SEC,
+                token_id=weth,
+                amount="1000000000000000000",
+                counterparty=None,
+                deposit_id="0x12",
+                chain_id=84532,
+            )
+        )
+        async def token_info(token_id):
+            if token_id == weth:
+                raise RuntimeError("token info down")
+            return _token_info()
+
+        accounting = _accounting(entries)
+        accounting.get_token_info = AsyncMock(side_effect=token_info)
         with _patched(accounting):
             series = await portfolio_history(IDENTITY, days=1)
 
-        assert series
-        assert all(p.total_e8 == 0 for p in series)
+        # The USDC leg still values; only the unreadable token drops out.
+        assert all(p.available_e8 == 10 * 10**8 for p in series)
+
+    async def test_losing_every_token_lookup_fails_the_request(self):
+        accounting = _accounting([_deposit(NOW - 2 * DAY_SEC)])
+        accounting.get_token_info = AsyncMock(side_effect=RuntimeError("token info down"))
+
+        with _patched(accounting), pytest.raises(RuntimeError, match="token info down"):
+            await portfolio_history(IDENTITY, days=1)
 
     async def test_long_window_is_sampled_daily(self):
         accounting = _accounting([_deposit(NOW - 200 * DAY_SEC)])

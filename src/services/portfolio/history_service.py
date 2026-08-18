@@ -63,30 +63,44 @@ def _window(earliest_ts: int, days: Optional[int], now: int) -> list[int]:
     """
     floor_ts = now - MAX_HISTORY_DAYS * DAY_SEC
     start = now - days * DAY_SEC if days is not None else earliest_ts
-    start = max(start, floor_ts)
-    if start > now:
-        return []
+    # An event stamped in the future would otherwise start the window after it
+    # ends; clamping keeps the series well defined and simply leaves that
+    # event's effect out until the clock catches up with it.
+    start = min(max(start, floor_ts), now)
     step = DAY_SEC if now - start > FINE_GRAIN_DAYS * DAY_SEC else SAMPLE_INTERVAL_SEC
     return sample_grid(start, now, step)
 
 
 async def _token_decimals(token_ids: list[str]) -> dict[str, int]:
     """Decimals per token; ones the accounting service will not describe are
-    left out, so valuation skips them loudly instead of scaling them wrong."""
+    left out, so valuation skips them loudly instead of scaling them wrong.
+
+    Losing every token is a different thing from losing one: it means the
+    lookup itself is broken, and answering with a portfolio worth nothing
+    would be worse than failing, so the read is re-raised for the route to
+    map.
+    """
     client = get_accounting_client()
     infos = await asyncio.gather(
         *(client.get_token_info(token_id) for token_id in token_ids),
         return_exceptions=True,
     )
     decimals = {}
+    failures = []
     for token_id, info in zip(token_ids, infos):
         if isinstance(info, BaseException):
-            logger.warning("Token info read failed for %s: %s", token_id, info)
+            logger.warning(
+                "Token info read failed for %s", token_id, exc_info=info
+            )
+            failures.append(info)
             continue
         if info.decimals is None:
             logger.warning("Token %s has no decimals on record", token_id)
             continue
         decimals[token_id] = info.decimals
+
+    if token_ids and not decimals and failures:
+        raise failures[0]
     return decimals
 
 

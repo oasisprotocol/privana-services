@@ -215,6 +215,20 @@ class TestEarnHistoryRoute:
 
         assert r.status_code == 400
 
+    async def test_maps_upstream_read_failure_to_502(self, api_client):
+        failure = AsyncMock(side_effect=httpx.ConnectError("accounting unreachable"))
+        with (
+            patch("src.api._auth.get_accounting_client", return_value=_auth_client()),
+            patch("src.api.earn.earn_history", failure),
+        ):
+            r = await api_client.get(
+                "/v1/earn/history",
+                headers={"Authorization": "Bearer user-jwt"},
+            )
+
+        assert r.status_code == 502
+        assert r.json()["detail"] == "Failed to read earn history"
+
     async def test_maps_unexpected_failure_to_500(self, api_client):
         failure = AsyncMock(side_effect=RuntimeError("boom"))
         with (

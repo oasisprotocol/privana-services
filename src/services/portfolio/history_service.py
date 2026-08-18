@@ -99,7 +99,7 @@ async def _token_decimals(token_ids: list[str]) -> dict[str, int]:
             continue
         decimals[token_id] = info.decimals
 
-    if token_ids and not decimals and failures:
+    if failures and not decimals:
         raise failures[0]
     return decimals
 

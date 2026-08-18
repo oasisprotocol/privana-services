@@ -2,6 +2,7 @@ import asyncio
 import logging
 from typing import Optional
 
+import httpx
 from fastapi import APIRouter, HTTPException, Query, Request
 
 from src.api._auth import auth_error, bearer_token, jwt_identity, resolve_via_accounting
@@ -231,6 +232,11 @@ async def get_earn_history(
     identity = await jwt_identity(request)
     try:
         series = await earn_history(identity.address, days)
+    except httpx.HTTPError as exc:
+        logger.warning("Earn history upstream read failed: %s", exc)
+        raise HTTPException(
+            status_code=502, detail="Failed to read earn history"
+        ) from exc
     except Exception as exc:
         logger.exception("Failed to build earn history")
         raise HTTPException(

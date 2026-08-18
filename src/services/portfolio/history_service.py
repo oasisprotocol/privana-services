@@ -57,7 +57,9 @@ def _window(earliest_ts: int, days: Optional[int], now: int) -> list[int]:
     A fixed range is anchored to now so the chart shows the window the client
     asked for, even when the user's first event predates it — balances carry
     forward across the window boundary. An "All" range starts at the first
-    event instead, clamped to MAX_HISTORY_DAYS.
+    event instead, clamped to MAX_HISTORY_DAYS. Either way the series opens on
+    the sampling slot at or before the start, so the range begins with a
+    sampled value rather than a gap.
     """
     floor_ts = now - MAX_HISTORY_DAYS * DAY_SEC
     start = now - days * DAY_SEC if days is not None else earliest_ts

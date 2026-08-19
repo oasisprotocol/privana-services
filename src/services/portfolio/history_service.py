@@ -57,9 +57,11 @@ def _window(earliest_ts: int, days: Optional[int], now: int) -> list[int]:
     A fixed range is anchored to now so the chart shows the window the client
     asked for, even when the user's first event predates it — balances carry
     forward across the window boundary. An "All" range starts at the first
-    event instead, clamped to MAX_HISTORY_DAYS. Either way the series opens on
-    the sampling slot at or before the start, so the range begins with a
-    sampled value rather than a gap.
+    event instead, clamped to MAX_HISTORY_DAYS. The series opens on the
+    sampling slot at or before the start, so the range begins with a sampled
+    value rather than a gap, and closes on now itself: every input is a step
+    function that answers at any timestamp, so the extra point is free and
+    the chart ends at request time instead of up to one step earlier.
     """
     floor_ts = now - MAX_HISTORY_DAYS * DAY_SEC
     start = now - days * DAY_SEC if days is not None else earliest_ts
@@ -68,17 +70,20 @@ def _window(earliest_ts: int, days: Optional[int], now: int) -> list[int]:
     # event's effect out until the clock catches up with it.
     start = min(max(start, floor_ts), now)
     step = DAY_SEC if now - start > FINE_GRAIN_DAYS * DAY_SEC else SAMPLE_INTERVAL_SEC
-    return sample_grid(start, now, step)
+    grid = sample_grid(start, now, step)
+    if grid and grid[-1] < now:
+        grid.append(now)
+    return grid
 
 
 async def _token_decimals(token_ids: list[str]) -> dict[str, int]:
-    """Decimals per token; ones the accounting service will not describe are
-    left out, so valuation skips them loudly instead of scaling them wrong.
+    """Decimals per token, for the tokens the accounting service describes.
 
-    Losing every token is a different thing from losing one: it means the
-    lookup itself is broken, and answering with a portfolio worth nothing
-    would be worse than failing, so the read is re-raised for the route to
-    map.
+    A token it answers for without decimals is left out, and valuation skips
+    it loudly rather than scaling it wrong. A read that fails outright is
+    different: dropping that token would quietly understate the total, which
+    a client cannot tell apart from the user holding less — so any failed
+    read is re-raised for the route to map to a retryable 502.
     """
     client = get_accounting_client()
     infos = await asyncio.gather(
@@ -86,21 +91,21 @@ async def _token_decimals(token_ids: list[str]) -> dict[str, int]:
         return_exceptions=True,
     )
     decimals = {}
-    failures = []
+    failure: BaseException | None = None
     for token_id, info in zip(token_ids, infos):
         if isinstance(info, BaseException):
             logger.warning(
                 "Token info read failed for %s", token_id, exc_info=info
             )
-            failures.append(info)
+            failure = failure or info
             continue
         if info.decimals is None:
             logger.warning("Token %s has no decimals on record", token_id)
             continue
         decimals[token_id] = info.decimals
 
-    if failures and not decimals:
-        raise failures[0]
+    if failure is not None:
+        raise failure
     return decimals
 
 

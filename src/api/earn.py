@@ -2,9 +2,10 @@ import asyncio
 import logging
 from typing import Optional
 
+import httpx
 from fastapi import APIRouter, HTTPException, Query, Request
 
-from src.api._auth import auth_error, bearer_token, resolve_via_accounting
+from src.api._auth import auth_error, bearer_token, jwt_identity, resolve_via_accounting
 from src.clients.accounting import get_accounting_client
 from src.models.earn import (
     ApyHistoryPoint,
@@ -20,8 +21,10 @@ from src.models.earn import (
     WithdrawRequest,
     WithdrawResponse,
 )
+from src.models.history import EarnHistoryPoint, EarnHistoryResponse, usd_string
 from src.services.earn.registry import get_strategy_registry
 from src.services.earn.vault_service import get_vault_service
+from src.services.portfolio.history_service import MAX_HISTORY_DAYS, earn_history
 
 logger = logging.getLogger(__name__)
 
@@ -205,6 +208,49 @@ async def get_withdraw_nonce(request: Request) -> dict:
     except Exception as exc:
         logger.exception("Failed to fetch withdraw nonce")
         raise HTTPException(status_code=500, detail="Failed to fetch withdraw nonce") from exc
+
+
+@router.get("/history", response_model=EarnHistoryResponse)
+async def get_earn_history(
+    request: Request,
+    days: Optional[int] = Query(
+        default=None,
+        ge=1,
+        le=MAX_HISTORY_DAYS,
+        description=(
+            "Limit the series to the most recent N days. Omit it for everything "
+            "since the user's first deposit, which is what a client should send "
+            "for an 'All' range."
+        ),
+    ),
+) -> EarnHistoryResponse:
+    """Value of the user's earn positions over time, oldest first.
+
+    Reads the same series the portfolio chart uses for its earn slice, so the
+    two charts always agree. Empty for a user who has never deposited.
+    """
+    identity = await jwt_identity(request)
+    try:
+        series = await earn_history(identity.address, days)
+    except httpx.HTTPError as exc:
+        logger.warning("Earn history upstream read failed: %s", exc)
+        raise HTTPException(
+            status_code=502, detail="Failed to read earn history"
+        ) from exc
+    except Exception as exc:
+        logger.exception("Failed to build earn history")
+        raise HTTPException(
+            status_code=500, detail="Failed to build earn history"
+        ) from exc
+
+    return EarnHistoryResponse(
+        points=[
+            EarnHistoryPoint(
+                timestamp=point.timestamp, value_usd=usd_string(point.value_e8)
+            )
+            for point in series
+        ]
+    )
 
 
 @router.get("/balance", response_model=BalanceListResponse)

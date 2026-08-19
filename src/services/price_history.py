@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import time
+from collections.abc import Sequence
 from typing import Optional
 
 from src.clients.coingecko import (
@@ -72,6 +73,20 @@ def read_points(coin_id: str, days: Optional[int] = None) -> list[PricePoint]:
 
     rows = get_db().execute(sql, tuple(params)).fetchall()
     return [PricePoint(timestamp=row["timestamp"], price_e8=row["price_e8"]) for row in rows]
+
+
+def price_series_for_tokens(token_ids: Sequence[str]) -> dict[str, list[PricePoint]]:
+    """Stored price series per accounting token id, oldest first.
+
+    A token with no configured CoinGecko id, or one configured but not yet
+    sampled, maps to an empty list — callers decide whether that is fatal.
+    """
+    mapping = parse_coingecko_token_ids(load_settings().coingecko_token_ids)
+    series = {}
+    for token_id in token_ids:
+        coin_id = mapping.get(token_id.lower())
+        series[token_id] = read_points(coin_id) if coin_id else []
+    return series
 
 
 class PriceSampler:

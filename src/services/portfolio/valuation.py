@@ -12,19 +12,22 @@ from src.services.price_history import SAMPLE_INTERVAL_SEC
 logger = logging.getLogger(__name__)
 
 
-def sample_grid(start_ts: int, end_ts: int) -> list[int]:
+def sample_grid(
+    start_ts: int, end_ts: int, step_sec: int = SAMPLE_INTERVAL_SEC
+) -> list[int]:
     """Timestamps of the shared sampling grid covering [start_ts, end_ts].
 
     Snaps to the same interval the price and pool-rate samplers write on, so
     valuation always lands on timestamps where a sample can exist. The first
     point is the grid slot at or before start_ts; the last is the slot at or
-    before end_ts.
+    before end_ts. A coarser step_sec thins a long range out; keep it a
+    multiple of the sampler interval so its points stay on sampled slots.
     """
     if end_ts < start_ts:
         return []
-    first = start_ts - (start_ts % SAMPLE_INTERVAL_SEC)
-    last = end_ts - (end_ts % SAMPLE_INTERVAL_SEC)
-    return list(range(first, last + 1, SAMPLE_INTERVAL_SEC))
+    first = start_ts - (start_ts % step_sec)
+    last = end_ts - (end_ts % step_sec)
+    return list(range(first, last + 1, step_sec))
 
 
 @dataclass(frozen=True)

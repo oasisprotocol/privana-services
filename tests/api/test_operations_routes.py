@@ -3,6 +3,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 from web3 import Web3
 
+from src.clients.accounting import JwtIdentity
 from src.core.db import db_write
 
 USER_ADDRESS = "0x1234567890abcdef1234567890abcdef12345678"
@@ -85,7 +86,9 @@ def _insert_earn(
 
 def _auth_client(address: str = USER_CHECKSUM) -> MagicMock:
     acct = MagicMock()
-    acct.get_jwt_user_address = AsyncMock(return_value=address)
+    acct.get_jwt_identity = AsyncMock(
+        return_value=JwtIdentity(siwe_token="0x" + "ee" * 32, address=address)
+    )
     return acct
 
 
@@ -105,14 +108,14 @@ class TestUnsettledOperationsRoute:
         _insert_earn(test_db, "earn-pending", status="pending", updated_at=100)
 
         acct = _auth_client()
-        with patch("src.api.operations.get_accounting_client", return_value=acct):
+        with patch("src.api._auth.get_accounting_client", return_value=acct):
             r = await api_client.get(
                 "/v1/operations/unsettled",
                 headers={"Authorization": "Bearer user-jwt"},
             )
 
         assert r.status_code == 200
-        acct.get_jwt_user_address.assert_awaited_once_with("user-jwt")
+        acct.get_jwt_identity.assert_awaited_once_with("user-jwt")
         operations = r.json()["operations"]
         assert [op["operation_id"] for op in operations] == [
             "earn-failed",
@@ -142,7 +145,7 @@ class TestUnsettledOperationsRoute:
         _insert_swap(test_db, "older", updated_at=100)
         _insert_earn(test_db, "newer", updated_at=200)
 
-        with patch("src.api.operations.get_accounting_client", return_value=_auth_client()):
+        with patch("src.api._auth.get_accounting_client", return_value=_auth_client()):
             r = await api_client.get(
                 "/v1/operations/unsettled",
                 params={"limit": 1},
@@ -154,7 +157,7 @@ class TestUnsettledOperationsRoute:
 
     async def test_returns_empty_list_when_user_has_no_unsettled_operations(self, api_client):
         acct = _auth_client()
-        with patch("src.api.operations.get_accounting_client", return_value=acct):
+        with patch("src.api._auth.get_accounting_client", return_value=acct):
             r = await api_client.get(
                 "/v1/operations/unsettled",
                 headers={"Authorization": "Bearer user-jwt"},
@@ -162,7 +165,7 @@ class TestUnsettledOperationsRoute:
 
         assert r.status_code == 200
         assert r.json() == {"operations": []}
-        acct.get_jwt_user_address.assert_awaited_once_with("user-jwt")
+        acct.get_jwt_identity.assert_awaited_once_with("user-jwt")
 
     async def test_rejects_missing_auth(self, api_client):
         r = await api_client.get("/v1/operations/unsettled")
@@ -183,11 +186,11 @@ class TestUnsettledOperationsRoute:
         request = httpx.Request("POST", "http://accounting/v1/accounting/auth/jwt/siwe-token")
         response = httpx.Response(401, request=request)
         acct = MagicMock()
-        acct.get_jwt_user_address = AsyncMock(
+        acct.get_jwt_identity = AsyncMock(
             side_effect=httpx.HTTPStatusError("invalid", request=request, response=response)
         )
 
-        with patch("src.api.operations.get_accounting_client", return_value=acct):
+        with patch("src.api._auth.get_accounting_client", return_value=acct):
             r = await api_client.get(
                 "/v1/operations/unsettled",
                 headers={"Authorization": "Bearer bad-jwt"},
@@ -200,11 +203,11 @@ class TestUnsettledOperationsRoute:
         request = httpx.Request("POST", "http://accounting/v1/accounting/auth/jwt/siwe-token")
         response = httpx.Response(500, request=request)
         acct = MagicMock()
-        acct.get_jwt_user_address = AsyncMock(
+        acct.get_jwt_identity = AsyncMock(
             side_effect=httpx.HTTPStatusError("failed", request=request, response=response)
         )
 
-        with patch("src.api.operations.get_accounting_client", return_value=acct):
+        with patch("src.api._auth.get_accounting_client", return_value=acct):
             r = await api_client.get(
                 "/v1/operations/unsettled",
                 headers={"Authorization": "Bearer user-jwt"},

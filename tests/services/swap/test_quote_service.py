@@ -55,6 +55,24 @@ class TestQuoteDeduplication:
         result = await service._find_existing_quote("0xuser", TOKEN_A, TOKEN_B, "9999999")
         assert result is None
 
+    async def test_reuse_returns_stored_fee_not_current_settings(self, insert_quote):
+        future = int(time.time()) + 300
+        insert_quote("q5", expires_at=future, fee_bps=25, fee_amount="2500")
+        service = self._make_service()
+        assert service.settings.fee_bps != 25
+        result = await service._find_existing_quote("0xuser", TOKEN_A, TOKEN_B, "1000000")
+        assert result.fee_bps == 25
+        assert result.fee_amount == "2500"
+
+    async def test_reuse_falls_back_to_global_fee_for_legacy_rows(self, insert_quote):
+        future = int(time.time()) + 300
+        insert_quote("q6", expires_at=future, fee_bps=None, fee_amount=None)
+        service = self._make_service()
+        result = await service._find_existing_quote("0xuser", TOKEN_A, TOKEN_B, "1000000")
+        assert result.fee_bps == service.settings.fee_bps
+        expected_fee = 1000000 * service.settings.fee_bps // 10_000
+        assert result.fee_amount == str(expected_fee)
+
 
 class TestExpiredQuoteCleanup:
     def _make_service(self):

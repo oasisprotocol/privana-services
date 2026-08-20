@@ -193,7 +193,7 @@ class SwapExecutor:
 
         quote = dict(row)
 
-        if int(time.time()) > quote["expires_at"]:
+        if int(time.time()) >= quote["expires_at"]:
             raise ValueError("Quote has expired")
 
         return quote

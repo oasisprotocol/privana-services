@@ -126,13 +126,15 @@ class QuoteService:
             """INSERT INTO quotes
                (id, user_address, from_token_id, to_token_id, from_chain_id, to_chain_id,
                 from_amount, to_amount_gross, to_amount_estimate, to_amount_min,
-                route_tool, liquidity_provider, expires_at, created_at, venue)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                route_tool, liquidity_provider, expires_at, created_at, venue,
+                fee_bps, fee_amount)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 quote_id, user_address.lower(), from_token_id.lower(), to_token_id.lower(),
                 from_chain_id, to_chain_id,
                 from_amount, to_amount_str, str(to_amount_after_fee), str(max(to_amount_min, 0)),
                 route_tool, liquidity_provider, expires_at, now, venue,
+                fee_bps, str(fee_amount),
             ),
         )
 
@@ -223,8 +225,15 @@ class QuoteService:
             return None
 
         quote = dict(row)
-        fee_bps = self.settings.fee_bps
-        _, fee_amount = calculate_fee(int(quote["to_amount_gross"]), fee_bps)
+        # The stored fee is the commercial commitment; a quote must not change
+        # between issuance and reuse. Rows predating the fee columns fall back
+        # to recomputing from the current global fee.
+        fee_bps = quote["fee_bps"]
+        if fee_bps is None:
+            fee_bps = self.settings.fee_bps
+            _, fee_amount = calculate_fee(int(quote["to_amount_gross"]), fee_bps)
+        else:
+            fee_amount = int(quote["fee_amount"])
         transfer_nonce = await self.accounting.get_transfer_nonce(user_address)
 
         return QuoteResponse(
@@ -251,7 +260,7 @@ class QuoteService:
         if now - self._last_cleanup < CLEANUP_INTERVAL:
             return 0
         db = get_db()
-        cursor = db_write(db, "DELETE FROM quotes WHERE expires_at < ?", (now,))
+        cursor = db_write(db, "DELETE FROM quotes WHERE expires_at <= ?", (now,))
         self._last_cleanup = now
         deleted = cursor.rowcount
         if deleted > 0:

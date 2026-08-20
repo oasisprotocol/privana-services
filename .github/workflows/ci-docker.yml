@@ -1,7 +1,6 @@
 name: ci-docker
 
 on:
-  pull_request:
   push:
     branches:
       - master
@@ -70,7 +69,6 @@ jobs:
           sbom: true
 
       - name: Prune old images
-        if: github.event_name != 'pull_request'
         uses: vlaurin/action-ghcr-prune@v0.6.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}

@@ -106,6 +106,7 @@ MIGRATIONS = [
     # global FEE_BPS when read.
     "ALTER TABLE quotes ADD COLUMN fee_bps INTEGER;",
     "ALTER TABLE quotes ADD COLUMN fee_amount TEXT;",
+    "ALTER TABLE quotes ADD COLUMN fee_policy_id TEXT;",
 ]
 
 

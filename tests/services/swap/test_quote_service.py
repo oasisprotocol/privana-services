@@ -474,3 +474,16 @@ class TestFeeExemption(TestGetQuote):
         assert result.fee_bps == 10
         assert result.fee_policy_id is None
         assert int(result.fee_amount) > 0
+
+    async def test_exempt_quote_reuse_honors_stored_fee_after_policy_removal(self, test_db):
+        self.set_policies([self._campaign()])
+        service = self._make_service()
+        first = await service.get_quote(TOKEN_A, TOKEN_B, "1000000", self.USER)
+        assert first.fee_bps == 0
+        fee_policy_module._policies = ()
+        existing = await service._find_existing_quote(self.USER, TOKEN_A, TOKEN_B, "1000000")
+        assert existing is not None
+        assert existing.quote_id == first.quote_id
+        assert existing.fee_bps == 0
+        assert existing.fee_amount == "0"
+        assert existing.fee_policy_id == "founding-members-2026"

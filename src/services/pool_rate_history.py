@@ -60,6 +60,34 @@ def read_points(pool_id: str, days: Optional[int] = None) -> list[PoolRatePoint]
     ]
 
 
+def read_point_before(
+    pool_id: str, ts_max: int, ts_min: Optional[int] = None
+) -> Optional[PoolRatePoint]:
+    """Newest sample taken at or before ``ts_max``, bounded below by ``ts_min``.
+
+    The lower bound keeps a long sampler outage from silently anchoring a
+    "24h ago" comparison to a week-old rate.
+    """
+    sql = (
+        "SELECT timestamp, total_assets, total_shares FROM pool_rate_history "
+        "WHERE pool_id = ? AND timestamp <= ?"
+    )
+    params: list[object] = [pool_id, ts_max]
+    if ts_min is not None:
+        sql += " AND timestamp >= ?"
+        params.append(ts_min)
+    sql += " ORDER BY timestamp DESC LIMIT 1"
+
+    row = get_db().execute(sql, tuple(params)).fetchone()
+    if row is None:
+        return None
+    return PoolRatePoint(
+        timestamp=row["timestamp"],
+        total_assets=row["total_assets"],
+        total_shares=row["total_shares"],
+    )
+
+
 class PoolRateSampler:
     def __init__(self, service: Optional[VaultService] = None) -> None:
         self._service = service

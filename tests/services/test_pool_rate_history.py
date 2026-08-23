@@ -166,3 +166,42 @@ class TestSampler:
                 await sampler._run()
 
         assert len(calls) == 2  # survived the first failure and ran again
+
+
+class TestReadPointBefore:
+    def test_returns_newest_at_or_before_bound(self):
+        from src.services.pool_rate_history import read_point_before
+
+        store_point(POOL_A, PoolRatePoint(JUN15, "100", "10"))
+        store_point(POOL_A, PoolRatePoint(JUN15 + SAMPLE_INTERVAL, "110", "10"))
+        store_point(POOL_A, PoolRatePoint(JUN16, "120", "10"))
+
+        point = read_point_before(POOL_A, ts_max=JUN16 - 1)
+        assert point is not None
+        assert point.timestamp == JUN15 + SAMPLE_INTERVAL
+        assert point.total_assets == "110"
+
+    def test_exact_bound_is_included(self):
+        from src.services.pool_rate_history import read_point_before
+
+        store_point(POOL_A, PoolRatePoint(JUN15, "100", "10"))
+        point = read_point_before(POOL_A, ts_max=JUN15)
+        assert point is not None
+        assert point.timestamp == JUN15
+
+    def test_lower_bound_excludes_stale_samples(self):
+        from src.services.pool_rate_history import read_point_before
+
+        store_point(POOL_A, PoolRatePoint(JUN15, "100", "10"))
+        assert read_point_before(POOL_A, ts_max=JUN16, ts_min=JUN15 + 1) is None
+
+    def test_no_samples_returns_none(self):
+        from src.services.pool_rate_history import read_point_before
+
+        assert read_point_before(POOL_A, ts_max=JUN16) is None
+
+    def test_other_pool_not_matched(self):
+        from src.services.pool_rate_history import read_point_before
+
+        store_point(POOL_B, PoolRatePoint(JUN15, "100", "10"))
+        assert read_point_before(POOL_A, ts_max=JUN16) is None

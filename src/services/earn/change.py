@@ -19,7 +19,6 @@ from decimal import Decimal
 from typing import Optional
 
 from src.core.db import get_db
-from src.services.pool_rate_history import read_point_before
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +70,10 @@ def change_24h(
 ) -> Optional[Change]:
     if not user_address or shares <= 0:
         return None
+
+    # Imported here: pool_rate_history's sampler pulls in vault_service, which
+    # imports this module — a top-level import would be circular.
+    from src.services.pool_rate_history import read_point_before
 
     window_start = now - WINDOW_SEC
     if _has_cashflow_since(user_address, pool_id, window_start):

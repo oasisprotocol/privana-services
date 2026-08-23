@@ -19,6 +19,7 @@ from src.core.validation import (
     validate_amount,
     validate_signature,
 )
+from src.services.earn.change import change_24h
 from src.services.earn.registry import StrategyRegistry, get_strategy_registry
 from src.services.earn.strategies.base import ApyPoint
 
@@ -626,13 +627,17 @@ class VaultService:
         values = list(fields.values()) + [tx_id]
         db_write(db, f"UPDATE earn_transactions SET {set_clause} WHERE id = ?", tuple(values))
 
-    async def get_all_balances(self, token_hex: str) -> list[dict]:
+    async def get_all_balances(
+        self, token_hex: str, user_address: Optional[str] = None
+    ) -> list[dict]:
         """Return the token-bearer's positions across every pool.
 
         Reads are SIWE-gated on the contract: the caller must obtain an
         encrypted auth token from accounting's ROFL service and pass it
         through. The backend never resolves the user address — that happens
-        on-chain inside ``getUserShares(poolId, token)``.
+        on-chain inside ``getUserShares(poolId, token)``. ``user_address`` is
+        only known on the JWT path and only feeds the 24h change fields, which
+        stay null without it.
         """
         if not token_hex:
             raise ValueError("token is required")
@@ -647,12 +652,26 @@ class VaultService:
                 return None
             underlying = await asyncio.to_thread(self.convert_to_assets, pool_id, shares)
             effective_assets = await self.effective_total_assets(pool["pool_id"], pool["total_assets"])
+            try:
+                change = change_24h(
+                    user_address,
+                    pool["pool_id"],
+                    shares,
+                    effective_assets,
+                    int(pool["total_shares"]),
+                    int(time.time()),
+                )
+            except Exception:
+                logger.exception("24h change failed for pool %s", pool["pool_id"])
+                change = None
             return {
                 "pool_id": pool["pool_id"],
                 "token_id": pool["token_id"],
                 "shares": str(shares),
                 "underlying_amount": str(underlying),
                 "exchange_rate": _exchange_rate(effective_assets, pool["total_shares"]),
+                "change_24h": change.amount if change else None,
+                "change_24h_pct": change.pct if change else None,
             }
 
         results = await asyncio.gather(*[fetch_balance(p) for p in pools])

@@ -701,3 +701,69 @@ class TestLiveAUMInResponses:
         balances = await service.get_all_balances(USER_ADDRESS)
         assert len(balances) == 1
         assert balances[0]["exchange_rate"] == "1.2"
+
+
+class TestGetAllBalancesChange:
+    def _seed_pool_contract(self, contract, total_assets=1050, total_shares=1000):
+        pool_id_bytes = bytes.fromhex(POOL_ID_HEX[2:])
+        contract.functions.getPoolCount.return_value.call.return_value = 1
+        contract.functions.poolIds.return_value.call.return_value = pool_id_bytes
+        contract.functions.pools.return_value.call.return_value = (
+            bytes.fromhex(USDC_TOKEN_ID[2:]),
+            POOL_ADDRESS,
+            total_shares, total_assets, True,
+        )
+        contract.functions.getUserShares.return_value.call.return_value = 500
+        contract.functions.convertToAssets.return_value.call.return_value = 525
+
+    @pytest.mark.asyncio
+    async def test_change_fields_populated_with_identity(self, test_db):
+        import time as time_module
+
+        from src.services.pool_rate_history import PoolRatePoint, store_point
+
+        service, contract, _, _ = _make_service()
+        self._seed_pool_contract(contract)
+        # rate 1.0 a day ago vs 1.05 now
+        store_point(
+            POOL_ID_HEX,
+            PoolRatePoint(int(time_module.time()) - 86400, "1000", "1000"),
+        )
+
+        balances = await service.get_all_balances(
+            SIWE_TOKEN, user_address="0x" + "d" * 40
+        )
+        assert len(balances) == 1
+        assert balances[0]["change_24h"] == "25"
+        assert balances[0]["change_24h_pct"] == "0.050000"
+
+    @pytest.mark.asyncio
+    async def test_change_fields_null_without_identity(self, test_db):
+        import time as time_module
+
+        from src.services.pool_rate_history import PoolRatePoint, store_point
+
+        service, contract, _, _ = _make_service()
+        self._seed_pool_contract(contract)
+        store_point(
+            POOL_ID_HEX,
+            PoolRatePoint(int(time_module.time()) - 86400, "1000", "1000"),
+        )
+
+        balances = await service.get_all_balances(SIWE_TOKEN)
+        assert len(balances) == 1
+        assert balances[0]["change_24h"] is None
+        assert balances[0]["change_24h_pct"] is None
+
+    @pytest.mark.asyncio
+    async def test_change_fields_null_without_history(self, test_db):
+        service, contract, _, _ = _make_service()
+        self._seed_pool_contract(contract)
+
+        balances = await service.get_all_balances(
+            SIWE_TOKEN, user_address="0x" + "d" * 40
+        )
+        assert len(balances) == 1
+        assert balances[0]["shares"] == "500"
+        assert balances[0]["change_24h"] is None
+        assert balances[0]["change_24h_pct"] is None

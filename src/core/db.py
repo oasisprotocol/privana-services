@@ -102,6 +102,10 @@ MIGRATIONS = [
     );
     """,
     "CREATE INDEX IF NOT EXISTS idx_pool_rate_pool_ts ON pool_rate_history(pool_id, timestamp);",
+    # Who authorized a withdrawal's share burn. user_address is the payout
+    # recipient and signer_address the pool's transfer signer, so without this
+    # column a withdrawal to another address is unattributable to its owner.
+    "ALTER TABLE earn_transactions ADD COLUMN consent_signer TEXT;",
 ]
 
 

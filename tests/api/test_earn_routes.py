@@ -43,63 +43,6 @@ class TestListPoolsRoute:
             assert data["pools"][0]["pool_id"] == POOL_ID
             assert data["pools"][0]["status"] == "active"
 
-    async def test_change_fields_pass_through(self, api_client):
-        with patch("src.api.earn.get_vault_service") as mock_svc:
-            svc = MagicMock()
-            svc.get_all_balances = AsyncMock(return_value=[{
-                "pool_id": POOL_ID,
-                "token_id": USDC_TOKEN_ID,
-                "shares": "500",
-                "underlying_amount": "525",
-                "exchange_rate": "1.05",
-                "change_24h": "25",
-                "change_24h_pct": "0.050000",
-            }])
-            mock_svc.return_value = svc
-
-            r = await api_client.get(
-                "/v1/earn/balance",
-                headers={"X-SIWE-Token": "0x" + "ee" * 32},
-            )
-            position = r.json()["positions"][0]
-            assert position["change_24h"] == "25"
-            assert position["change_24h_pct"] == "0.050000"
-
-    async def test_siwe_token_path_passes_no_identity(self, api_client):
-        with patch("src.api.earn.get_vault_service") as mock_svc:
-            svc = MagicMock()
-            svc.get_all_balances = AsyncMock(return_value=[])
-            mock_svc.return_value = svc
-
-            r = await api_client.get(
-                "/v1/earn/balance",
-                headers={"X-SIWE-Token": "0x" + "ee" * 32},
-            )
-            assert r.status_code == 200
-            svc.get_all_balances.assert_awaited_once_with(
-                "0x" + "ee" * 32, user_address=None
-            )
-
-    async def test_change_fields_default_null_in_response(self, api_client):
-        with patch("src.api.earn.get_vault_service") as mock_svc:
-            svc = MagicMock()
-            svc.get_all_balances = AsyncMock(return_value=[{
-                "pool_id": POOL_ID,
-                "token_id": USDC_TOKEN_ID,
-                "shares": "500",
-                "underlying_amount": "525",
-                "exchange_rate": "1.05",
-            }])
-            mock_svc.return_value = svc
-
-            r = await api_client.get(
-                "/v1/earn/balance",
-                headers={"X-SIWE-Token": "0x" + "ee" * 32},
-            )
-            position = r.json()["positions"][0]
-            assert position["change_24h"] is None
-            assert position["change_24h_pct"] is None
-
     async def test_returns_empty_list(self, api_client):
         with patch("src.api.earn.get_vault_service") as mock_svc:
             svc = _mock_service()
@@ -478,6 +421,63 @@ class TestBalanceRoute:
             assert r.status_code == 200
             assert r.json()["positions"] == []
 
+    async def test_change_fields_pass_through(self, api_client):
+        with patch("src.api.earn.get_vault_service") as mock_svc:
+            svc = MagicMock()
+            svc.get_all_balances = AsyncMock(return_value=[{
+                "pool_id": POOL_ID,
+                "token_id": USDC_TOKEN_ID,
+                "shares": "500",
+                "underlying_amount": "525",
+                "exchange_rate": "1.05",
+                "change_24h": "25",
+                "change_24h_pct": "0.050000",
+            }])
+            mock_svc.return_value = svc
+
+            r = await api_client.get(
+                "/v1/earn/balance",
+                headers={"X-SIWE-Token": "0x" + "ee" * 32},
+            )
+            position = r.json()["positions"][0]
+            assert position["change_24h"] == "25"
+            assert position["change_24h_pct"] == "0.050000"
+
+    async def test_siwe_token_path_passes_no_identity(self, api_client):
+        with patch("src.api.earn.get_vault_service") as mock_svc:
+            svc = MagicMock()
+            svc.get_all_balances = AsyncMock(return_value=[])
+            mock_svc.return_value = svc
+
+            r = await api_client.get(
+                "/v1/earn/balance",
+                headers={"X-SIWE-Token": "0x" + "ee" * 32},
+            )
+            assert r.status_code == 200
+            svc.get_all_balances.assert_awaited_once_with(
+                "0x" + "ee" * 32, user_address=None
+            )
+
+    async def test_change_fields_default_null_in_response(self, api_client):
+        with patch("src.api.earn.get_vault_service") as mock_svc:
+            svc = MagicMock()
+            svc.get_all_balances = AsyncMock(return_value=[{
+                "pool_id": POOL_ID,
+                "token_id": USDC_TOKEN_ID,
+                "shares": "500",
+                "underlying_amount": "525",
+                "exchange_rate": "1.05",
+            }])
+            mock_svc.return_value = svc
+
+            r = await api_client.get(
+                "/v1/earn/balance",
+                headers={"X-SIWE-Token": "0x" + "ee" * 32},
+            )
+            position = r.json()["positions"][0]
+            assert position["change_24h"] is None
+            assert position["change_24h_pct"] is None
+
     async def test_rejects_missing_auth(self, api_client):
         r = await api_client.get("/v1/earn/balance")
         assert r.status_code == 401
@@ -501,7 +501,9 @@ class TestWithdrawNonceRoute:
             patch("src.api.earn.get_accounting_client") as mock_acct,
         ):
             acct = MagicMock()
-            acct.exchange_jwt_for_siwe_token = AsyncMock(return_value="0x" + "ee" * 32)
+            acct.get_jwt_identity = AsyncMock(
+                return_value=JwtIdentity(siwe_token="0x" + "ee" * 32, address=USER_ADDRESS)
+            )
             mock_acct.return_value = acct
             svc = MagicMock()
             svc.get_withdraw_nonce_via_token.return_value = 7
@@ -514,7 +516,7 @@ class TestWithdrawNonceRoute:
 
             assert r.status_code == 200
             assert r.json()["nonce"] == 7
-            acct.exchange_jwt_for_siwe_token.assert_awaited_once_with("user-jwt")
+            acct.get_jwt_identity.assert_awaited_once_with("user-jwt")
             svc.get_withdraw_nonce_via_token.assert_called_once_with("0x" + "ee" * 32)
 
     async def test_accepts_legacy_siwe_header(self, api_client):

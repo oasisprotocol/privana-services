@@ -51,11 +51,13 @@ def _has_cashflow_since(user_address: str, pool_id: str, since: int) -> bool:
     (vault_service can crash between broadcast and the DB update), and a
     landed-but-uncounted cashflow is exactly the case that must null the badge.
     """
+    # pool_id casing in the ledger follows whatever the deposit payload sent,
+    # so the comparison must not be case-sensitive.
     row = get_db().execute(
         """SELECT 1 FROM earn_transactions
-           WHERE user_address = ? AND pool_id = ? AND status != 'failed'
+           WHERE user_address = ? AND LOWER(pool_id) = ? AND status != 'failed'
            AND MAX(created_at, updated_at) >= ? LIMIT 1""",
-        (user_address.lower(), pool_id, since),
+        (user_address.lower(), pool_id.lower(), since),
     ).fetchone()
     return row is not None
 

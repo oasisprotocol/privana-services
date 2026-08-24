@@ -124,3 +124,17 @@ class TestChange24h:
         result = change_24h(USER, POOL, shares, 130_001, 98_765, NOW)
         expected = shares * 130_001 // 98_765 - shares * 123_457 // 98_765
         assert result.amount == str(expected)
+
+    def test_mixed_case_ledger_pool_id_still_counts(self, test_db):
+        _store_rate(NOW - WINDOW_SEC, 100_000, 100_000)
+        db_write(
+            get_db(),
+            """INSERT INTO earn_transactions
+               (id, operation, pool_id, user_address, token_id, amount,
+                signer_address, nonce, signature, status, created_at, updated_at)
+               VALUES ('tx-case', 'deposit', ?, ?, '0xtok', '100', ?, 0, '0xsig',
+                       'completed', ?, ?)""",
+            (POOL.upper().replace("0X", "0x"), USER.lower(), USER.lower(),
+             NOW - 3600, NOW - 3600),
+        )
+        assert change_24h(USER, POOL, 500, 105_000, 100_000, NOW) is None

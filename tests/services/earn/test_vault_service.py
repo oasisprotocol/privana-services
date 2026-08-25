@@ -376,6 +376,53 @@ class TestStrategyRouting:
         assert row["status"] == "undeployed"
         assert row["error"] is not None
 
+    async def test_undeployed_deposit_records_why_the_bridge_refused(self, test_db):
+        """Regression for the testnet outage: the accounting SDK puts its
+        explanation on .detail and only "API request failed: 400 Bad Request"
+        reached the row, so nobody could tell the relay was out of gas."""
+        from src.services.earn.registry import StrategyRegistry
+
+        class ApiError(Exception):
+            def __init__(self, message, status_code, detail=None):
+                super().__init__(message)
+                self.status_code = status_code
+                self.detail = detail
+
+        registry = StrategyRegistry()
+        strategy = MagicMock()
+        strategy.name = "aave-v3"
+        strategy.deposit_to_earn = AsyncMock(
+            side_effect=ApiError(
+                "API request failed: 400 Bad Request",
+                400,
+                "Insufficient native balance on Base Sepolia. EVM address "
+                "0xE5A94d196DE8EeC7ABEc59aca32C322F3Dccc74A has 0 wei, "
+                "needs at least 10000000000000 wei.",
+            )
+        )
+        strategy.total_assets = AsyncMock(return_value=0)
+        registry.register(POOL_ID_HEX, strategy)
+
+        service, contract, _, _ = _make_service(registry=registry)
+        contract.functions.pools.return_value.call.return_value = (
+            bytes.fromhex(USDC_TOKEN_ID[2:]),
+            POOL_ADDRESS,
+            1000, 1050, True,
+        )
+        contract.functions.userShares.return_value.call.side_effect = [0, 952]
+
+        result = await service.deposit(
+            POOL_ID_HEX, USER_ADDRESS, "1000", 5, "0x" + "aa" * 65
+        )
+
+        assert result["status"] == "undeployed"
+        row = test_db.execute(
+            "SELECT error FROM earn_transactions WHERE id = ?",
+            (result["deposit_id"],),
+        ).fetchone()
+        assert "Insufficient native balance on Base Sepolia" in row["error"]
+        assert "0xE5A94d196DE8EeC7ABEc59aca32C322F3Dccc74A" in row["error"]
+
     async def test_deposit_manual_strategy_skips_routing(self, test_db):
         service, contract, _, _ = _make_service()
         contract.functions.pools.return_value.call.return_value = (

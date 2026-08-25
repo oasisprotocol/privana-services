@@ -105,19 +105,10 @@ class TestSanitizeError:
         )
 
 
-class TestIncidentEndToEnd:
-    def test_bridge_gas_failure_now_names_the_cause(self):
-        """The deposit path did sanitize_error(str(exc)) and recorded only
-        'API request failed: 400 Bad Request'. It should name the real cause."""
-        exc = _ApiError(
-            "API request failed: 400 Bad Request",
-            400,
-            "Insufficient native balance on Base Sepolia. EVM address "
-            "0xE5A94d196DE8EeC7ABEc59aca32C322F3Dccc74A has 0 wei, "
-            "needs at least 10000000000000 wei.",
+class TestComposed:
+    def test_helpers_compose_without_swallowing_the_detail(self):
+        exc = _ApiError("API request failed: 400 Bad Request", 400, "pool is paused")
+
+        assert sanitize_error(describe_error(exc)) == (
+            "API request failed: 400 Bad Request: pool is paused"
         )
-
-        recorded = sanitize_error(describe_error(exc))
-
-        assert "Insufficient native balance on Base Sepolia" in recorded
-        assert "0xE5A94d196DE8EeC7ABEc59aca32C322F3Dccc74A" in recorded

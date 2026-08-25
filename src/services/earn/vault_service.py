@@ -310,6 +310,8 @@ class VaultService:
                 signature=signature,
             )
 
+            shares_before = await self._total_shares_safe(pool_id)
+
             try:
                 tx_hash = await asyncio.to_thread(
                     self.sapphire.execute_contract_call,
@@ -340,6 +342,7 @@ class VaultService:
                 }
 
             self._update_transaction(tx_id, status=EARN_STATUS_COMPLETED, tx_hash=tx_hash)
+            await self._record_share_delta(tx_id, pool_id, shares_before)
 
             deploy_error = None
             try:
@@ -469,6 +472,8 @@ class VaultService:
                 consent_signer=consent_signer,
             )
 
+            shares_before = await self._total_shares_safe(pool_id)
+
             try:
                 tx_hash = await asyncio.to_thread(
                     self.sapphire.execute_contract_call,
@@ -499,6 +504,11 @@ class VaultService:
                     "status": "failed",
                     "error": error,
                 }
+
+            # Inside the lock: totalShares only moves through this service's
+            # own deposits and withdrawals, so the delta across the tx is this
+            # user's share movement exactly.
+            await self._record_share_delta(tx_id, pool_id, shares_before)
 
         self._update_transaction(tx_id, status=EARN_STATUS_COMPLETED, tx_hash=tx_hash)
 
@@ -693,6 +703,50 @@ class VaultService:
             operation, tx_id, signer_address, user_address, token_id, amount, nonce,
         )
         return tx_id
+
+    async def _total_shares_safe(self, pool_id: bytes) -> Optional[int]:
+        """Pool totalShares, or None if the read fails.
+
+        Only ever called inside the earn tx lock, where it pairs with a second
+        read to derive one cashflow's share movement. A failure here costs the
+        earned figure for that position, never the operation itself.
+        """
+        try:
+            pool = await asyncio.to_thread(self.get_pool, pool_id)
+            return int(pool["total_shares"])
+        except Exception:
+            logger.exception("totalShares read failed; share delta will be unrecorded")
+            return None
+
+    async def _record_share_delta(
+        self, tx_id: str, pool_id: bytes, shares_before: Optional[int]
+    ) -> None:
+        """Persist this cashflow's signed share movement and settlement rate.
+
+        Per-user share state is confidential on Sapphire, so the only way to
+        learn how many shares a cashflow moved is to bracket it: the pool's
+        public totalShares before and after, read under the tx lock that
+        serializes every mint and burn this service performs. Leaving the
+        columns NULL is the honest outcome when either read fails — the
+        completeness check downstream then refuses to report a figure rather
+        than reporting a wrong one.
+        """
+        if shares_before is None:
+            return
+        try:
+            pool_after = await asyncio.to_thread(self.get_pool, pool_id)
+        except Exception:
+            logger.exception("Post-tx totalShares read failed for %s", tx_id)
+            return
+
+        shares_after = int(pool_after["total_shares"])
+        self._update_transaction(
+            tx_id,
+            shares_delta=str(shares_after - shares_before),
+            exchange_rate=_exchange_rate(
+                int(pool_after["total_assets"]), shares_after
+            ),
+        )
 
     def _update_transaction(self, tx_id: str, **fields) -> None:
         db = get_db()

@@ -106,6 +106,9 @@ MIGRATIONS = [
     # recipient and signer_address the pool's transfer signer, so without this
     # column a withdrawal to another address is unattributable to its owner.
     "ALTER TABLE earn_transactions ADD COLUMN consent_signer TEXT;",
+    # When the rate was actually read. timestamp is floored to the sampling
+    # grid, so on its own it cannot tell a 24h-old anchor from a 30h-old one.
+    "ALTER TABLE pool_rate_history ADD COLUMN observed_at INTEGER;",
 ]
 
 

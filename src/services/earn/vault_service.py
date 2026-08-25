@@ -554,6 +554,29 @@ class VaultService:
             return on_chain_total
         return external if external > 0 else on_chain_total
 
+    async def strict_total_assets(self, pool_id_hex: str, on_chain_total: int) -> Optional[int]:
+        """AUM for rate snapshots: None instead of a silent fallback.
+
+        ``effective_total_assets`` degrades to the on-chain principal when the
+        strategy read fails, which is right for a balance read that should stay
+        available. It is wrong for a rate: on-chain totalAssets only moves on
+        sync, so comparing it against a stored yield-inclusive sample invents a
+        loss that never happened. Anything that stores or compares a rate takes
+        this form and skips instead of guessing.
+        """
+        strategy = self._registry.get(pool_id_hex)
+        if strategy.name == "manual":
+            return on_chain_total
+        try:
+            external = await strategy.total_assets()
+        except Exception:
+            logger.exception(
+                "strategy.total_assets failed pool=%s strategy=%s; no rate snapshot",
+                pool_id_hex, strategy.name,
+            )
+            return None
+        return external if external > 0 else on_chain_total
+
     async def sync_total_assets(self, pool_id_hex: str) -> Optional[int]:
         """Push the strategy's live AUM into EarnManager.totalAssets so
         share math reflects accrued yield.
@@ -671,16 +694,26 @@ class VaultService:
             if shares == 0:
                 return None
             underlying = await asyncio.to_thread(self.convert_to_assets, pool_id, shares)
-            effective_assets = await self.effective_total_assets(pool["pool_id"], pool["total_assets"])
+            # One strategy read serves both: the strict value drives the change,
+            # and the balance itself falls back to the on-chain total so a
+            # protocol outage still returns a position rather than an error.
+            strict_assets = await self.strict_total_assets(pool["pool_id"], pool["total_assets"])
+            effective_assets = (
+                strict_assets if strict_assets is not None else pool["total_assets"]
+            )
             try:
-                change = await asyncio.to_thread(
-                    change_24h,
-                    user_address,
-                    pool["pool_id"],
-                    shares,
-                    effective_assets,
-                    int(pool["total_shares"]),
-                    int(time.time()),
+                change = (
+                    await asyncio.to_thread(
+                        change_24h,
+                        user_address,
+                        pool["pool_id"],
+                        shares,
+                        strict_assets,
+                        int(pool["total_shares"]),
+                        int(time.time()),
+                    )
+                    if strict_assets is not None
+                    else None
                 )
             except Exception:
                 logger.exception("24h change failed for pool %s", pool["pool_id"])

@@ -81,18 +81,15 @@ def change_24h(
 
     # Imported here: pool_rate_history's sampler pulls in vault_service, which
     # imports this module — a top-level import would be circular.
-    from src.services.pool_rate_history import (
-        SAMPLE_INTERVAL_SEC,
-        read_point_before,
-    )
+    from src.services.pool_rate_history import read_point_before
 
-    # Sample timestamps are floored to the sampling grid, so a stored label
-    # understates the true sample time by up to one interval. Pushing ts_max
-    # back by that interval guarantees the anchor is genuinely >= 24h old;
-    # the window is therefore "at least 24h", never less.
+    # Bounds apply to the real reading time, so the anchor is genuinely at
+    # least 24h old and at most MAX_SAMPLE_AGE_SEC old. The sampler runs
+    # ~4x/day, so in practice the span lands close to 24h; the cap is what
+    # keeps "24h" from quietly meaning "since the sampler last worked".
     point = read_point_before(
         pool_id,
-        ts_max=now - WINDOW_SEC - SAMPLE_INTERVAL_SEC,
+        ts_max=now - WINDOW_SEC,
         ts_min=now - MAX_SAMPLE_AGE_SEC,
     )
     if point is None:
@@ -100,8 +97,9 @@ def change_24h(
 
     # Guard the whole measured span, not just the last 24h: the anchor can be
     # older than the nominal window, and a cashflow anywhere between anchor
-    # and now changes the share count mid-measurement. The floored label only
-    # widens the guard, which is the safe direction.
+    # and now changes the share count mid-measurement. Guard from the grid
+    # label rather than the reading time, since that is the earlier of the two
+    # and widening the guard is the safe direction.
     if _has_cashflow_since(user_address, pool_id, point.timestamp):
         return None
 

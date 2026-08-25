@@ -27,22 +27,40 @@ def _sample_bucket(timestamp: int) -> int:
 
 @dataclass(frozen=True)
 class PoolRatePoint:
+    """A rate observation.
+
+    ``timestamp`` is the grid slot the row is keyed on, which understates the
+    real reading time by up to one interval. ``observed_at`` is when the read
+    actually happened, so an age can be judged instead of guessed. It is None
+    for rows written before the column existed.
+    """
+
     timestamp: int
     total_assets: str
     total_shares: str
+    observed_at: Optional[int] = None
 
 
 def store_point(pool_id: str, point: PoolRatePoint) -> int:
     return db_write_many(
         get_db(),
         "INSERT OR IGNORE INTO pool_rate_history "
-        "(pool_id, timestamp, total_assets, total_shares) VALUES (?, ?, ?, ?)",
-        [(pool_id, _sample_bucket(point.timestamp), point.total_assets, point.total_shares)],
+        "(pool_id, timestamp, total_assets, total_shares, observed_at) VALUES (?, ?, ?, ?, ?)",
+        [(
+            pool_id,
+            _sample_bucket(point.timestamp),
+            point.total_assets,
+            point.total_shares,
+            point.observed_at if point.observed_at is not None else point.timestamp,
+        )],
     )
 
 
 def read_points(pool_id: str, days: Optional[int] = None) -> list[PoolRatePoint]:
-    sql = "SELECT timestamp, total_assets, total_shares FROM pool_rate_history WHERE pool_id = ?"
+    sql = (
+        "SELECT timestamp, total_assets, total_shares, observed_at "
+        "FROM pool_rate_history WHERE pool_id = ?"
+    )
     params: list[object] = [pool_id]
     if days is not None:
         sql += " AND timestamp >= ?"
@@ -55,28 +73,37 @@ def read_points(pool_id: str, days: Optional[int] = None) -> list[PoolRatePoint]
             timestamp=row["timestamp"],
             total_assets=row["total_assets"],
             total_shares=row["total_shares"],
+            observed_at=row["observed_at"],
         )
         for row in rows
     ]
 
 
+# When observed_at is missing the row predates the column and only the floored
+# slot is known; the true reading happened somewhere inside that slot, so the
+# end of it is the conservative stand-in for "no later than".
+_EFFECTIVE_TS = f"COALESCE(observed_at, timestamp + {SAMPLE_INTERVAL_SEC})"
+
+
 def read_point_before(
     pool_id: str, ts_max: int, ts_min: Optional[int] = None
 ) -> Optional[PoolRatePoint]:
-    """Newest sample taken at or before ``ts_max``, bounded below by ``ts_min``.
+    """Newest sample actually read at or before ``ts_max``, no older than ``ts_min``.
 
-    The lower bound keeps a long sampler outage from silently anchoring a
-    "24h ago" comparison to a week-old rate.
+    Both bounds are applied to the real reading time, not the grid label, so a
+    caller asking for a point at least 24h old genuinely gets one. The lower
+    bound keeps a long sampler outage from silently anchoring a "24h ago"
+    comparison to a week-old rate.
     """
     sql = (
-        "SELECT timestamp, total_assets, total_shares FROM pool_rate_history "
-        "WHERE pool_id = ? AND timestamp <= ?"
+        "SELECT timestamp, total_assets, total_shares, observed_at "
+        f"FROM pool_rate_history WHERE pool_id = ? AND {_EFFECTIVE_TS} <= ?"
     )
     params: list[object] = [pool_id, ts_max]
     if ts_min is not None:
-        sql += " AND timestamp >= ?"
+        sql += f" AND {_EFFECTIVE_TS} >= ?"
         params.append(ts_min)
-    sql += " ORDER BY timestamp DESC LIMIT 1"
+    sql += f" ORDER BY {_EFFECTIVE_TS} DESC LIMIT 1"
 
     row = get_db().execute(sql, tuple(params)).fetchone()
     if row is None:
@@ -85,6 +112,7 @@ def read_point_before(
         timestamp=row["timestamp"],
         total_assets=row["total_assets"],
         total_shares=row["total_shares"],
+        observed_at=row["observed_at"],
     )
 
 
@@ -114,8 +142,16 @@ class PoolRateSampler:
             try:
                 # Sample the strategy's live AUM, not the on-chain total_assets:
                 # for Aave-style pools that figure only moves on sync and would
-                # record a staircase instead of a yield curve.
-                assets = await service.effective_total_assets(pool_id, pool["total_assets"])
+                # record a staircase instead of a yield curve. Strict, because a
+                # stored principal-only fallback would read as a loss forever
+                # after against every later yield-inclusive sample.
+                assets = await service.strict_total_assets(pool_id, pool["total_assets"])
+                if assets is None:
+                    logger.warning(
+                        "Pool rate sample skipped pool=%s: no trustworthy AUM reading",
+                        pool_id,
+                    )
+                    continue
                 stored += store_point(
                     pool_id,
                     PoolRatePoint(

@@ -71,7 +71,7 @@ class TestSampler:
     async def test_sample_once_records_active_pools(self):
         service = MagicMock()
         service.list_pools = MagicMock(return_value=[_pool(POOL_A)])
-        service.effective_total_assets = AsyncMock(return_value=150)
+        service.strict_total_assets = AsyncMock(return_value=150)
 
         stored = await PoolRateSampler(service=service).sample_once()
 
@@ -84,29 +84,29 @@ class TestSampler:
         # total_assets (100) which only moves on sync.
         service = MagicMock()
         service.list_pools = MagicMock(return_value=[_pool(POOL_A, total_assets=100)])
-        service.effective_total_assets = AsyncMock(return_value=150)
+        service.strict_total_assets = AsyncMock(return_value=150)
 
         await PoolRateSampler(service=service).sample_once()
 
-        service.effective_total_assets.assert_awaited_once_with(POOL_A, 100)
+        service.strict_total_assets.assert_awaited_once_with(POOL_A, 100)
         assert read_points(POOL_A)[0].total_assets == "150"
 
     async def test_skips_inactive_pools(self):
         service = MagicMock()
         service.list_pools = MagicMock(return_value=[_pool(POOL_A, active=False), _pool(POOL_B)])
-        service.effective_total_assets = AsyncMock(return_value=150)
+        service.strict_total_assets = AsyncMock(return_value=150)
 
         stored = await PoolRateSampler(service=service).sample_once()
 
         assert stored == 1
         assert read_points(POOL_A) == []
         assert len(read_points(POOL_B)) == 1
-        service.effective_total_assets.assert_awaited_once_with(POOL_B, 100)
+        service.strict_total_assets.assert_awaited_once_with(POOL_B, 100)
 
     async def test_one_unreadable_pool_does_not_abort_the_others(self):
         service = MagicMock()
         service.list_pools = MagicMock(return_value=[_pool(POOL_A), _pool(POOL_B)])
-        service.effective_total_assets = AsyncMock(side_effect=[RuntimeError("rpc down"), 150])
+        service.strict_total_assets = AsyncMock(side_effect=[RuntimeError("rpc down"), 150])
 
         stored = await PoolRateSampler(service=service).sample_once()
 
@@ -114,18 +114,43 @@ class TestSampler:
         assert read_points(POOL_A) == []
         assert len(read_points(POOL_B)) == 1
 
+    async def test_unreadable_aum_stores_nothing_rather_than_a_fallback(self):
+        """A strategy read that fails must not land as a sample. The on-chain
+        total is principal only, so storing it would read as a permanent loss
+        against every later yield-inclusive sample."""
+        service = MagicMock()
+        service.list_pools = MagicMock(return_value=[_pool(POOL_A)])
+        service.strict_total_assets = AsyncMock(return_value=None)
+
+        stored = await PoolRateSampler(service=service).sample_once()
+
+        assert stored == 0
+        assert read_points(POOL_A) == []
+
+    async def test_samples_record_when_they_were_actually_read(self):
+        service = MagicMock()
+        service.list_pools = MagicMock(return_value=[_pool(POOL_A)])
+        service.strict_total_assets = AsyncMock(return_value=150)
+
+        with patch("src.services.pool_rate_history.time.time", return_value=1787184000 + 900):
+            await PoolRateSampler(service=service).sample_once()
+
+        point = read_points(POOL_A)[0]
+        assert point.timestamp == 1787184000  # grid slot
+        assert point.observed_at == 1787184000 + 900  # real reading time
+
     async def test_sample_once_survives_a_list_pools_failure(self):
         service = MagicMock()
         service.list_pools = MagicMock(side_effect=RuntimeError("chain down"))
-        service.effective_total_assets = AsyncMock()
+        service.strict_total_assets = AsyncMock()
 
         assert await PoolRateSampler(service=service).sample_once() == 0
-        service.effective_total_assets.assert_not_awaited()
+        service.strict_total_assets.assert_not_awaited()
 
     async def test_samples_snap_to_the_interval_boundary(self):
         service = MagicMock()
         service.list_pools = MagicMock(return_value=[_pool(POOL_A)])
-        service.effective_total_assets = AsyncMock(return_value=150)
+        service.strict_total_assets = AsyncMock(return_value=150)
 
         # 1781485337 is 2026-06-15 01:02:17 UTC, inside the 00:00 interval.
         with patch("src.services.pool_rate_history.time.time", return_value=1781485337):
@@ -136,7 +161,7 @@ class TestSampler:
     async def test_resampling_within_one_interval_does_not_duplicate(self):
         service = MagicMock()
         service.list_pools = MagicMock(return_value=[_pool(POOL_A)])
-        service.effective_total_assets = AsyncMock(return_value=150)
+        service.strict_total_assets = AsyncMock(return_value=150)
         sampler = PoolRateSampler(service=service)
 
         with patch("src.services.pool_rate_history.time.time", return_value=1781485337):

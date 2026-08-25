@@ -6,8 +6,7 @@ from src.services.pool_rate_history import PoolRatePoint, store_point
 POOL = "0xaaaa000000000000000000000000000000000000000000000000000000000001"
 USER = "0x" + "ab" * 20
 NOW = 1787184000  # aligned to the sampling grid so store_point keeps timestamps
-# Newest label accepted by the widened window: ts_max is one grid interval
-# behind now-24h because stored labels are grid-floored.
+# A comfortably-old anchor: one sampling interval beyond the 24h boundary.
 ANCHOR = NOW - WINDOW_SEC - 21600
 
 
@@ -68,7 +67,27 @@ class TestChange24h:
         assert change_24h(USER, POOL, 0, 105_000, 100_000, NOW) is None
 
     def test_no_sample_old_enough_returns_none(self, test_db):
-        _store_rate(NOW - WINDOW_SEC, 100_000, 100_000)  # label too fresh for the floored grid
+        _store_rate(NOW - WINDOW_SEC + 3600, 100_000, 100_000)  # only 23h old
+        assert change_24h(USER, POOL, 500, 105_000, 100_000, NOW) is None
+
+    def test_sample_exactly_at_the_boundary_is_accepted(self, test_db):
+        """observed_at records the real reading time, so a sample taken 24h ago
+        is 24h old and needs no padding to prove it."""
+        _store_rate(NOW - WINDOW_SEC, 100_000, 105_000)
+
+        assert change_24h(USER, POOL, 500, 105_000, 105_000, NOW) is not None
+
+    def test_legacy_row_without_observed_at_is_judged_conservatively(self, test_db):
+        """Rows written before observed_at existed only carry a floored label.
+        The true reading could be anywhere inside that slot, so the end of the
+        slot is used and a borderline row is refused rather than trusted."""
+        db_write(
+            get_db(),
+            "INSERT INTO pool_rate_history (pool_id, timestamp, total_assets, "
+            "total_shares, observed_at) VALUES (?, ?, ?, ?, NULL)",
+            (POOL, NOW - WINDOW_SEC, "100000", "100000"),
+        )
+
         assert change_24h(USER, POOL, 500, 105_000, 100_000, NOW) is None
 
     def test_stale_sample_returns_none(self, test_db):

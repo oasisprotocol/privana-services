@@ -14,6 +14,7 @@ from src.core.config import load_settings
 from src.core.db import db_write, get_db
 from src.core.eip712 import sign_transfer
 from src.core.validation import (
+    describe_error,
     sanitize_error,
     validate_address,
     validate_amount,
@@ -325,7 +326,7 @@ class VaultService:
                 )
             except Exception as exc:
                 logger.exception("Earn deposit %s failed", tx_id)
-                error = sanitize_error(str(exc))
+                error = sanitize_error(describe_error(exc))
                 self._update_transaction(tx_id, status=EARN_STATUS_FAILED, error=error)
                 return {
                     "deposit_id": tx_id,
@@ -349,7 +350,7 @@ class VaultService:
                     "funds are in pool balance pending redeploy",
                     tx_id,
                 )
-                deploy_error = sanitize_error(str(exc))
+                deploy_error = sanitize_error(describe_error(exc))
                 self._update_transaction(
                     tx_id, status=EARN_STATUS_UNDEPLOYED, error=deploy_error
                 )
@@ -469,7 +470,7 @@ class VaultService:
             except Exception as exc:
                 logger.exception("Earn withdraw %s failed", tx_id)
                 await self._rollback_reclaim(pool_id_hex, int(amount), tx_id)
-                error = sanitize_error(str(exc))
+                error = sanitize_error(describe_error(exc))
                 self._update_transaction(tx_id, status=EARN_STATUS_FAILED, error=error)
                 return {
                     "withdraw_id": tx_id,

@@ -29,11 +29,45 @@ def validate_amount(value: str, name: str = "amount") -> None:
 
 
 MAX_ERROR_LENGTH = 500
+MAX_REVERT_REASON_LENGTH = 200
+
+URL_PATTERN = re.compile(r"https?://\S+")
+# Only the remainder of the line the revert appears on: a provider can append
+# whole trace payloads after a newline and none of that belongs in an error a
+# caller reads. \b on both sides so "unreverted" is not a match.
+REVERT_PATTERN = re.compile(r"\breverted\b[:\s]*([^\n\r]*)", re.IGNORECASE)
+
+
+def describe_error(exc: BaseException) -> str:
+    """Render an exception together with any string detail attached to it.
+
+    The accounting SDK raises ``AccountingApiError(message, status_code,
+    detail)`` but only hands ``message`` to ``Exception``, so ``str(exc)`` is
+    a bare "API request failed: 400 Bad Request" while the server's actual
+    explanation sits unread on ``.detail``. Reading it back is the difference
+    between an operator seeing "400 Bad Request" and seeing which balance ran
+    out. Non-string details are ignored rather than stringified, so an
+    unrelated library that happens to hang an object off ``.detail`` cannot
+    widen an error message.
+    """
+    text = str(exc)
+    detail = getattr(exc, "detail", None)
+    if isinstance(detail, str) and detail and detail not in text:
+        return f"{text}: {detail}"
+    return text
 
 
 def sanitize_error(error: str) -> str:
     lower = error.lower()
-    if "reverted" in lower:
+    revert = REVERT_PATTERN.search(error)
+    if revert:
+        # Keep the revert reason: it is public on-chain data and it is the
+        # only thing that separates InsufficientShares from a bad signature
+        # or a nonce conflict. Take one line, drop URLs so an RPC endpoint
+        # never rides along, and cap the length.
+        reason = URL_PATTERN.sub("[url]", revert.group(1)).strip(" :;,-")
+        if reason:
+            return f"Transaction reverted: {reason[:MAX_REVERT_REASON_LENGTH]}"
         return "Transaction reverted on-chain"
     if "insufficient funds" in lower:
         return "Insufficient gas funds for transaction"

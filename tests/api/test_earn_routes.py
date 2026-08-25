@@ -1,5 +1,7 @@
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from src.clients.accounting import JwtIdentity
+
 USDC_TOKEN_ID = "0x330ba47d00c7ce3018deee017b319fd7cc6473a2ddc9e6eba6ebb4207be15279"
 POOL_ID = "0x" + "ab" * 32
 POOL_ADDRESS = "0x152E6a7125665764a4F1F1df80E8f5D49Bf0239c"
@@ -366,7 +368,9 @@ class TestBalanceRoute:
             patch("src.api.earn.get_accounting_client") as mock_acct,
         ):
             acct = MagicMock()
-            acct.exchange_jwt_for_siwe_token = AsyncMock(return_value="0x" + "ee" * 32)
+            acct.get_jwt_identity = AsyncMock(
+                return_value=JwtIdentity(siwe_token="0x" + "ee" * 32, address=USER_ADDRESS)
+            )
             mock_acct.return_value = acct
             svc = MagicMock()
             svc.get_all_balances = AsyncMock(return_value=[])
@@ -378,8 +382,10 @@ class TestBalanceRoute:
             )
 
             assert r.status_code == 200
-            acct.exchange_jwt_for_siwe_token.assert_awaited_once_with("user-jwt")
-            svc.get_all_balances.assert_awaited_once_with("0x" + "ee" * 32)
+            acct.get_jwt_identity.assert_awaited_once_with("user-jwt")
+            svc.get_all_balances.assert_awaited_once_with(
+                "0x" + "ee" * 32, user_address=USER_ADDRESS
+            )
 
     async def test_returns_200_with_positions(self, api_client):
         with patch("src.api.earn.get_vault_service") as mock_svc:

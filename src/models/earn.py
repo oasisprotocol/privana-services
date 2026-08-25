@@ -163,6 +163,11 @@ class BalanceResponse(BaseModel):
     shares: str
     underlying_amount: str
     exchange_rate: str
+    # Yield-only 24h change (EA-Products #168). Null hides the badge; never a
+    # fabricated zero. Both are signed decimal strings, amount in token base
+    # units, pct as a fraction of the value 24h ago.
+    change_24h: Optional[str] = None
+    change_24h_pct: Optional[str] = None
 
 
 class BalanceListResponse(BaseModel):

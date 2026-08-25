@@ -255,10 +255,33 @@ async def get_earn_history(
 
 @router.get("/balance", response_model=BalanceListResponse)
 async def get_balances(request: Request) -> BalanceListResponse:
-    token = await _private_read_token(request)
+    # The JWT exchange already returns the caller's address alongside the SIWE
+    # token, and the address unlocks the 24h change fields. A bare X-SIWE-Token
+    # authorises the read but identifies nobody, so change stays null there.
+    authorization = request.headers.get("authorization")
+    siwe_token = request.headers.get("x-siwe-token")
+    if authorization and siwe_token:
+        raise HTTPException(
+            status_code=400,
+            detail="Use either Authorization or X-SIWE-Token, not both",
+        )
+    user_address = None
+    if siwe_token:
+        token = siwe_token
+    elif authorization:
+        identity = await resolve_via_accounting(
+            lambda: get_accounting_client().get_jwt_identity(bearer_token(authorization)),
+            failure_detail="Accounting token exchange failed",
+            log_label="Accounting JWT exchange",
+        )
+        token = identity.siwe_token
+        user_address = identity.address
+    else:
+        raise auth_error()
+
     try:
         service = get_vault_service()
-        balances = await service.get_all_balances(token)
+        balances = await service.get_all_balances(token, user_address=user_address)
         return BalanceListResponse(
             positions=[BalanceResponse(**b) for b in balances]
         )

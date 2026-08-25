@@ -164,10 +164,23 @@ class BalanceResponse(BaseModel):
     underlying_amount: str
     exchange_rate: str
     # Yield-only 24h change (EA-Products #168). Null hides the badge; never a
-    # fabricated zero. Both are signed decimal strings, amount in token base
-    # units, pct as a fraction of the value 24h ago.
-    change_24h: Optional[str] = None
-    change_24h_pct: Optional[str] = None
+    # fabricated zero.
+    change_24h: Optional[str] = Field(
+        default=None,
+        description=(
+            "Yield earned over the last ~24h, in token base units, as a signed "
+            "decimal string. Null when it cannot be computed honestly, in which "
+            "case the client shows no badge rather than a zero."
+        ),
+    )
+    change_24h_pct: Optional[str] = Field(
+        default=None,
+        description=(
+            "change_24h as a fraction of the position's value at the start of "
+            'the window, as a signed decimal string. A fraction, not percent: '
+            '"0.008" means 0.8%, so multiply by 100 to display.'
+        ),
+    )
 
 
 class BalanceListResponse(BaseModel):

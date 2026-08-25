@@ -1,4 +1,3 @@
-import time
 
 from src.core.db import db_write, get_db
 from src.services.earn.change import MAX_SAMPLE_AGE_SEC, WINDOW_SEC, change_24h

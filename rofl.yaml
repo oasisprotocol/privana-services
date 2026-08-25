@@ -39,6 +39,25 @@ deployments:
         - any: {}
       fees: endorsing_node
       max_expiration: 3
+  mainnet:
+    app_id: rofl1qpvd3ssvc2pya3gv07uunwrq9u59v4mwyg9qjuz3
+    network: mainnet
+    paratime: sapphire
+    admin: privana_mainnet_bootstrap
+    trust_root:
+      height: 31507938
+      hash: 190345a5dfea60eff6f5f5d179865cd5935db154389b1acd8ee362736f13a85a
+    policy:
+      quotes:
+        pcs:
+          tcb_validity_period: 30
+          min_tcb_evaluation_data_number: 18
+          tdx: {}
+      enclaves: []
+      endorsements:
+        - any: {}
+      fees: endorsing_node
+      max_expiration: 3
   testnet:
     default: true
     app_id: rofl1qr38yckt9s7rzuadyzg0mu04jtctusftcy6t7rpy

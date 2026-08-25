@@ -727,7 +727,7 @@ class TestGetAllBalancesChange:
         # rate 1.0 a day ago vs 1.05 now
         store_point(
             POOL_ID_HEX,
-            PoolRatePoint(int(time_module.time()) - 86400, "1000", "1000"),
+            PoolRatePoint(int(time_module.time()) - 86400 - 21600, "1000", "1000"),
         )
 
         balances = await service.get_all_balances(
@@ -747,7 +747,7 @@ class TestGetAllBalancesChange:
         self._seed_pool_contract(contract)
         store_point(
             POOL_ID_HEX,
-            PoolRatePoint(int(time_module.time()) - 86400, "1000", "1000"),
+            PoolRatePoint(int(time_module.time()) - 86400 - 21600, "1000", "1000"),
         )
 
         balances = await service.get_all_balances(SIWE_TOKEN)

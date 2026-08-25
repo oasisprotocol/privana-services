@@ -23,9 +23,10 @@ from src.core.db import get_db
 logger = logging.getLogger(__name__)
 
 WINDOW_SEC = 24 * 3600
-# The rate sampler runs ~4x/day; allow one missed sample before declaring the
-# anchor too stale to trust.
-MAX_SAMPLE_AGE_SEC = 30 * 3600
+# The rate sampler runs ~4x/day and labels are grid-floored; allow roughly one
+# missed sample beyond the widened window before declaring the anchor too
+# stale to trust.
+MAX_SAMPLE_AGE_SEC = 36 * 3600
 
 _PCT_PRECISION = Decimal("0.000001")
 
@@ -50,14 +51,19 @@ def _has_cashflow_since(user_address: str, pool_id: str, since: int) -> bool:
     Pending rows count: a pending withdrawal may already have landed on-chain
     (vault_service can crash between broadcast and the DB update), and a
     landed-but-uncounted cashflow is exactly the case that must null the badge.
+    Withdrawals are matched on consent_signer too — user_address on a withdraw
+    row is the payout recipient, and shares burn from whoever signed the
+    consent.
     """
     # pool_id casing in the ledger follows whatever the deposit payload sent,
     # so the comparison must not be case-sensitive.
+    wallet = user_address.lower()
     row = get_db().execute(
         """SELECT 1 FROM earn_transactions
-           WHERE user_address = ? AND LOWER(pool_id) = ? AND status != 'failed'
+           WHERE (user_address = ? OR consent_signer = ?)
+           AND LOWER(pool_id) = ? AND status != 'failed'
            AND MAX(created_at, updated_at) >= ? LIMIT 1""",
-        (user_address.lower(), pool_id.lower(), since),
+        (wallet, wallet, pool_id.lower(), since),
     ).fetchone()
     return row is not None
 
@@ -75,16 +81,28 @@ def change_24h(
 
     # Imported here: pool_rate_history's sampler pulls in vault_service, which
     # imports this module — a top-level import would be circular.
-    from src.services.pool_rate_history import read_point_before
+    from src.services.pool_rate_history import (
+        SAMPLE_INTERVAL_SEC,
+        read_point_before,
+    )
 
-    window_start = now - WINDOW_SEC
-    if _has_cashflow_since(user_address, pool_id, window_start):
-        return None
-
+    # Sample timestamps are floored to the sampling grid, so a stored label
+    # understates the true sample time by up to one interval. Pushing ts_max
+    # back by that interval guarantees the anchor is genuinely >= 24h old;
+    # the window is therefore "at least 24h", never less.
     point = read_point_before(
-        pool_id, ts_max=window_start, ts_min=now - MAX_SAMPLE_AGE_SEC
+        pool_id,
+        ts_max=now - WINDOW_SEC - SAMPLE_INTERVAL_SEC,
+        ts_min=now - MAX_SAMPLE_AGE_SEC,
     )
     if point is None:
+        return None
+
+    # Guard the whole measured span, not just the last 24h: the anchor can be
+    # older than the nominal window, and a cashflow anywhere between anchor
+    # and now changes the share count mid-measurement. The floored label only
+    # widens the guard, which is the safe direction.
+    if _has_cashflow_since(user_address, pool_id, point.timestamp):
         return None
 
     value_then = _position_value(shares, int(point.total_assets), int(point.total_shares))

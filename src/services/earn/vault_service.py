@@ -12,7 +12,7 @@ from src.clients.sapphire import get_sapphire_client
 from src.core.abi import load_abi
 from src.core.config import load_settings
 from src.core.db import db_write, get_db
-from src.core.eip712 import sign_transfer
+from src.core.eip712 import recover_withdraw_signer, sign_transfer
 from src.core.validation import (
     sanitize_error,
     validate_address,
@@ -441,6 +441,22 @@ class VaultService:
             pool_sig_bytes = bytes.fromhex(pool_signature.removeprefix("0x"))
             user_sig_bytes = bytes.fromhex(signature.removeprefix("0x"))
 
+            # The recipient (user_address) and the share owner can differ; the
+            # owner is whoever signed the withdraw consent, and per-user
+            # attribution (e.g. the 24h change guard) must key on them.
+            try:
+                consent_signer = recover_withdraw_signer(
+                    chain_id=self.settings.accounting_chain_id,
+                    earn_manager_address=self.contract_address,
+                    pool_id=pool_id_hex,
+                    amount=int(amount),
+                    nonce=nonce,
+                    signature=signature,
+                )
+            except Exception:
+                logger.exception("Withdraw consent recovery failed")
+                consent_signer = None
+
             tx_id = self._record_transaction(
                 operation=EARN_OP_WITHDRAW,
                 pool_id_hex=pool_id_hex,
@@ -450,6 +466,7 @@ class VaultService:
                 signer_address=pool["pool_address"],
                 nonce=pool_nonce,
                 signature=pool_signature,
+                consent_signer=consent_signer,
             )
 
             try:
@@ -598,6 +615,7 @@ class VaultService:
         signer_address: str,
         nonce: int,
         signature: str,
+        consent_signer: Optional[str] = None,
     ) -> str:
         tx_id = str(uuid.uuid4())
         now = int(time.time())
@@ -606,12 +624,14 @@ class VaultService:
             db,
             """INSERT INTO earn_transactions
                (id, operation, pool_id, user_address, token_id, amount,
-                signer_address, nonce, signature, status, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                signer_address, nonce, signature, status, created_at, updated_at,
+                consent_signer)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 tx_id, operation, pool_id_hex, user_address.lower(), token_id, amount,
                 signer_address.lower(), nonce, signature,
                 EARN_STATUS_PENDING, now, now,
+                consent_signer.lower() if consent_signer else None,
             ),
         )
         logger.info(
@@ -653,7 +673,8 @@ class VaultService:
             underlying = await asyncio.to_thread(self.convert_to_assets, pool_id, shares)
             effective_assets = await self.effective_total_assets(pool["pool_id"], pool["total_assets"])
             try:
-                change = change_24h(
+                change = await asyncio.to_thread(
+                    change_24h,
                     user_address,
                     pool["pool_id"],
                     shares,

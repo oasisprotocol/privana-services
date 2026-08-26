@@ -347,7 +347,7 @@ class VaultService:
                 }
 
             self._update_transaction(tx_id, status=EARN_STATUS_COMPLETED, tx_hash=tx_hash)
-            await self._record_share_delta(tx_id, pool_id, shares_before)
+            await self._record_share_delta(tx_id, pool_id, shares_before, amount)
 
             deploy_error = None
             try:
@@ -513,7 +513,7 @@ class VaultService:
             # Inside the lock: totalShares only moves through this service's
             # own deposits and withdrawals, so the delta across the tx is this
             # user's share movement exactly.
-            await self._record_share_delta(tx_id, pool_id, shares_before)
+            await self._record_share_delta(tx_id, pool_id, shares_before, amount)
 
         self._update_transaction(tx_id, status=EARN_STATUS_COMPLETED, tx_hash=tx_hash)
 
@@ -724,7 +724,7 @@ class VaultService:
             return None
 
     async def _record_share_delta(
-        self, tx_id: str, pool_id: bytes, shares_before: Optional[int]
+        self, tx_id: str, pool_id: bytes, shares_before: Optional[int], amount: str
     ) -> None:
         """Persist this cashflow's signed share movement and settlement rate.
 
@@ -744,13 +744,19 @@ class VaultService:
             logger.exception("Post-tx totalShares read failed for %s", tx_id)
             return
 
-        shares_after = int(pool_after["total_shares"])
+        delta = int(pool_after["total_shares"]) - shares_before
+        # The settlement rate is what this cashflow actually paid per share,
+        # not whatever the pool reads back afterwards: syncTotalAssets runs
+        # outside this lock and can move the pool's ratio between the tx and
+        # the read.
+        rate = (
+            str(Decimal(int(amount)) / Decimal(abs(delta))) if delta else None
+        )
         self._update_transaction(
             tx_id,
-            shares_delta=str(shares_after - shares_before),
-            exchange_rate=_exchange_rate(
-                int(pool_after["total_assets"]), shares_after
-            ),
+            shares_delta=str(delta),
+            exchange_rate=rate,
+            settled_at=int(time.time()),
         )
 
     def _update_transaction(self, tx_id: str, **fields) -> None:
@@ -813,6 +819,7 @@ class VaultService:
                     pool["pool_id"],
                     shares,
                     underlying,
+                    int(pool["total_shares"]),
                 )
             except Exception:
                 logger.exception("earned failed for pool %s", pool["pool_id"])

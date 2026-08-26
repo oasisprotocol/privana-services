@@ -5,11 +5,18 @@ now minus what the user paid for the shares they still hold. It is derived
 from the settled cashflow ledger, never from the replayed chart series.
 
 Cost is tracked in integer base units rather than as a weighted-average rate
-per share, which is the same model expressed without floating point. A
-deposit adds its full amount to the basis; a withdrawal removes the basis
-proportional to the shares it burns, and the difference between what the user
-took out and the basis removed is realised yield. That keeps the spec's
-identity exact in integer arithmetic:
+per share. A deposit adds its full amount to the basis; a withdrawal removes
+the basis proportional to the shares it burns, and the difference between
+what the user took out and the basis removed is realised yield.
+
+This is the weighted-average model carried out in integers rather than an
+exact reproduction of it. Removing basis by floor division leaves the
+remainder with the shares still held, which shifts sub-unit dust from
+realised into cost and so reports active marginally low — never high — by
+under one base unit per withdrawal. The trade is deliberate: no floating
+point anywhere near money, and this identity stays exact regardless of
+rounding, because the same rounded amount is subtracted from cost and added
+to realised:
 
     active + realised == value_now - (deposited - withdrawn)
 
@@ -48,6 +55,32 @@ class Earned:
     first_deposit_at: Optional[int] = None
 
 
+def _pool_shares_accounted(pool_id: str) -> Optional[int]:
+    """Sum of every recorded share movement in a pool, or None if any is missing.
+
+    A per-user share match alone is not proof the history is complete: two
+    errors can cancel, for instance a deposit relayed straight to the
+    contract (``EarnManager.deposit`` is externally callable) paired with a
+    withdrawal this service could not attribute. Comparing the pool's whole
+    recorded movement against the chain's ``totalShares`` closes that gap.
+    """
+    row = get_db().execute(
+        """SELECT COUNT(*) AS missing FROM earn_transactions
+           WHERE LOWER(pool_id) = ? AND status != ? AND shares_delta IS NULL""",
+        (pool_id.lower(), _STATUS_FAILED),
+    ).fetchone()
+    if row["missing"]:
+        return None
+
+    row = get_db().execute(
+        """SELECT COALESCE(SUM(CAST(shares_delta AS INTEGER)), 0) AS total
+           FROM earn_transactions
+           WHERE LOWER(pool_id) = ? AND status != ?""",
+        (pool_id.lower(), _STATUS_FAILED),
+    ).fetchone()
+    return int(row["total"])
+
+
 def _read_cashflows(user_address: str, pool_id: str) -> list[dict]:
     """Settled and in-flight cashflows attributable to this user and pool.
 
@@ -59,7 +92,7 @@ def _read_cashflows(user_address: str, pool_id: str) -> list[dict]:
     """
     wallet = user_address.lower()
     rows = get_db().execute(
-        """SELECT operation, amount, shares_delta, status, created_at
+        """SELECT operation, amount, shares_delta, status, created_at, settled_at
            FROM earn_transactions
            WHERE LOWER(pool_id) = ? AND status != ?
            AND ((operation = ? AND user_address = ?)
@@ -75,6 +108,7 @@ def earned_active(
     pool_id: str,
     shares: int,
     value_now: int,
+    pool_total_shares: Optional[int] = None,
 ) -> Earned:
     """Yield on currently held shares.
 
@@ -106,7 +140,9 @@ def earned_active(
             cost_basis += amount
             deposit_count += 1
             if first_deposit_at is None:
-                first_deposit_at = row["created_at"]
+                # When the deposit settled, falling back to submission time
+                # for rows written before settled_at existed.
+                first_deposit_at = row["settled_at"] or row["created_at"]
             continue
 
         burned = -delta
@@ -131,6 +167,15 @@ def earned_active(
             pool_id, held, shares,
         )
         return Earned(active=None, status=STATUS_LEDGER_INCOMPLETE)
+
+    if pool_total_shares is not None:
+        accounted = _pool_shares_accounted(pool_id)
+        if accounted is None or accounted != pool_total_shares:
+            logger.info(
+                "earned pool ledger incomplete pool=%s accounted=%s chain=%d",
+                pool_id, accounted, pool_total_shares,
+            )
+            return Earned(active=None, status=STATUS_LEDGER_INCOMPLETE)
 
     return Earned(
         active=str(value_now - cost_basis),

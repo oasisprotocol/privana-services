@@ -913,8 +913,10 @@ class TestGetAllBalancesEarned:
         contract.functions.poolIds.return_value.call.return_value = bytes.fromhex(
             POOL_ID_HEX[2:]
         )
+        # Pool totalShares must equal everything the ledger accounts for, or
+        # the completeness check correctly refuses to report a figure.
         contract.functions.pools.return_value.call.return_value = (
-            bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1000, 1050, True,
+            bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 100, 1050, True,
         )
         contract.functions.getUserShares.return_value.call.return_value = 100
         # convertToAssets is authoritative for position value (virtual offsets).
@@ -967,3 +969,64 @@ class TestGetAllBalancesEarned:
         )
         assert balances[0]["earned_active"] is None
         assert balances[0]["earned_active_status"] == "ledger_incomplete"
+
+    async def test_settlement_rate_comes_from_the_cashflow_not_a_later_read(
+        self, test_db
+    ):
+        # syncTotalAssets runs outside the earn lock, so a post-tx pool read
+        # can show a ratio the cashflow never settled at. The stored rate is
+        # derived from the amount and shares that actually moved.
+        service, contract, _, _ = _make_service()
+        contract.functions.pools.return_value.call.side_effect = [
+            (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1000, 1050, True),
+            (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1000, 1050, True),
+            # Assets jumped between settlement and this read.
+            (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1100, 9_999_999, True),
+            (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1100, 9_999_999, True),
+        ]
+        await service.deposit(POOL_ID_HEX, USER_ADDRESS, "105", 5, "0x" + "aa" * 65)
+
+        row = test_db.execute("SELECT * FROM earn_transactions").fetchone()
+        assert row["shares_delta"] == "100"
+        assert row["exchange_rate"] == "1.05"  # 105 paid for 100 shares
+        assert row["settled_at"] is not None
+
+    async def test_delta_is_null_when_post_read_fails(self, test_db):
+        service, contract, _, _ = _make_service()
+        contract.functions.pools.return_value.call.side_effect = [
+            (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1000, 1050, True),
+            (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1000, 1050, True),
+            RuntimeError("rpc down"),
+            (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1100, 1155, True),
+        ]
+        result = await service.deposit(
+            POOL_ID_HEX, USER_ADDRESS, "105", 5, "0x" + "aa" * 65
+        )
+
+        assert result["status"] == "completed"
+        row = test_db.execute("SELECT * FROM earn_transactions").fetchone()
+        assert row["shares_delta"] is None
+
+    async def test_concurrent_mint_before_post_read_is_misattributed(self, test_db):
+        # Documents a known limitation: EarnManager.deposit is externally
+        # callable, so a mint landing between settlement and the post-read is
+        # absorbed into this row's delta. The pool-level completeness check is
+        # what stops a wrong delta from being reported as a real figure.
+        service, contract, _, _ = _make_service()
+        contract.functions.pools.return_value.call.side_effect = [
+            (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1000, 1050, True),
+            (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1000, 1050, True),
+            # Our +100 plus somebody else's +200 landed before we looked.
+            (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1300, 1365, True),
+            (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1300, 1365, True),
+        ]
+        await service.deposit(POOL_ID_HEX, USER_ADDRESS, "105", 5, "0x" + "aa" * 65)
+
+        row = test_db.execute("SELECT * FROM earn_transactions").fetchone()
+        assert row["shares_delta"] == "300"
+
+        from src.services.earn.earned import earned_active
+        # The user really holds 100 shares, so the inflated delta cannot pass.
+        assert earned_active(
+            USER_ADDRESS, POOL_ID_HEX, 100, 105, pool_total_shares=1300
+        ).status == "ledger_incomplete"

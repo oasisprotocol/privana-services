@@ -117,6 +117,16 @@ MIGRATIONS = [
     # unreportable rather than wrong.
     "ALTER TABLE earn_transactions ADD COLUMN shares_delta TEXT;",
     "ALTER TABLE earn_transactions ADD COLUMN exchange_rate TEXT;",
+    # When the cashflow actually settled on chain. created_at is set before
+    # the chain call, so a queued or retried deposit would otherwise report
+    # its request time as the moment the position started earning.
+    "ALTER TABLE earn_transactions ADD COLUMN settled_at INTEGER;",
+    # Earned replays a position's whole history on every balance poll, keyed
+    # by pool plus either the depositor or a withdrawal's consent signer.
+    "CREATE INDEX IF NOT EXISTS idx_earn_tx_pool_user "
+    "ON earn_transactions(LOWER(pool_id), user_address);",
+    "CREATE INDEX IF NOT EXISTS idx_earn_tx_pool_signer "
+    "ON earn_transactions(LOWER(pool_id), consent_signer);",
 ]
 
 

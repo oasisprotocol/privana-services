@@ -21,7 +21,8 @@ def settings():
 
 @pytest.fixture(autouse=True)
 def test_db():
-    conn = sqlite3.connect(":memory:")
+    # check_same_thread mirrors production get_db: reads may run via asyncio.to_thread
+    conn = sqlite3.connect(":memory:", check_same_thread=False)
     conn.row_factory = sqlite3.Row
     db_module._run_migrations(conn)
     db_module._connection = conn

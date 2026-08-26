@@ -31,7 +31,13 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1/earn", tags=["Earn"])
 
 
-async def _private_read_token(request: Request) -> str:
+async def _private_read_identity(request: Request) -> tuple[str, Optional[str]]:
+    """SIWE read token plus the caller's address where it is knowable.
+
+    The JWT exchange returns both from one cached accounting call; a bare
+    X-SIWE-Token authorises the read but identifies nobody, so the address
+    is None on that path.
+    """
     authorization = request.headers.get("authorization")
     siwe_token = request.headers.get("x-siwe-token")
     if authorization and siwe_token:
@@ -40,16 +46,22 @@ async def _private_read_token(request: Request) -> str:
             detail="Use either Authorization or X-SIWE-Token, not both",
         )
     if siwe_token:
-        return siwe_token
+        return siwe_token, None
     if not authorization:
         raise auth_error()
 
     token = bearer_token(authorization)
-    return await resolve_via_accounting(
-        lambda: get_accounting_client().exchange_jwt_for_siwe_token(token),
+    identity = await resolve_via_accounting(
+        lambda: get_accounting_client().get_jwt_identity(token),
         failure_detail="Accounting token exchange failed",
         log_label="Accounting JWT exchange",
     )
+    return identity.siwe_token, identity.address
+
+
+async def _private_read_token(request: Request) -> str:
+    token, _ = await _private_read_identity(request)
+    return token
 
 
 @router.get("/pools", response_model=PoolListResponse)
@@ -255,10 +267,11 @@ async def get_earn_history(
 
 @router.get("/balance", response_model=BalanceListResponse)
 async def get_balances(request: Request) -> BalanceListResponse:
-    token = await _private_read_token(request)
+    # The address, known only on the JWT path, unlocks the 24h change fields.
+    token, user_address = await _private_read_identity(request)
     try:
         service = get_vault_service()
-        balances = await service.get_all_balances(token)
+        balances = await service.get_all_balances(token, user_address=user_address)
         return BalanceListResponse(
             positions=[BalanceResponse(**b) for b in balances]
         )

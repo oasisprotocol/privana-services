@@ -376,6 +376,68 @@ class TestStrategyRouting:
         assert row["status"] == "undeployed"
         assert row["error"] is not None
 
+    async def test_rate_snapshot_pairs_assets_with_the_shares_of_one_instant(self):
+        from src.services.earn.registry import StrategyRegistry
+
+        registry = StrategyRegistry()
+        strategy = MagicMock()
+        strategy.name = "aave-v3"
+        strategy.total_assets = AsyncMock(return_value=1800)
+        strategy.idle_assets = AsyncMock(return_value=200)
+        registry.register(POOL_ID_HEX, strategy)
+
+        service, contract, _, _ = _make_service(registry=registry)
+        contract.functions.pools.return_value.call.return_value = (
+            bytes.fromhex(USDC_TOKEN_ID[2:]),
+            POOL_ADDRESS,
+            1000, 1500, True,
+        )
+
+        assets, shares = await service.rate_snapshot(POOL_ID_HEX)
+
+        # Deployed plus idle, so an undeployed deposit's shares stay backed.
+        assert assets == 2000
+        assert shares == 1000
+
+    async def test_rate_snapshot_refuses_when_shares_move_mid_read(self):
+        """A deposit landing between the share read and the asset read would
+        pair new assets with old shares and invent a jump in value."""
+        from src.services.earn.registry import StrategyRegistry
+
+        registry = StrategyRegistry()
+        strategy = MagicMock()
+        strategy.name = "aave-v3"
+        strategy.total_assets = AsyncMock(return_value=2000)
+        strategy.idle_assets = AsyncMock(return_value=0)
+        registry.register(POOL_ID_HEX, strategy)
+
+        service, contract, _, _ = _make_service(registry=registry)
+        contract.functions.pools.return_value.call.side_effect = [
+            (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1000, 1000, True),
+            (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 2000, 2000, True),
+        ]
+
+        assert await service.rate_snapshot(POOL_ID_HEX) is None
+
+    async def test_rate_snapshot_is_none_when_the_strategy_cannot_be_read(self):
+        from src.services.earn.registry import StrategyRegistry
+
+        registry = StrategyRegistry()
+        strategy = MagicMock()
+        strategy.name = "aave-v3"
+        strategy.total_assets = AsyncMock(side_effect=RuntimeError("rpc down"))
+        strategy.idle_assets = AsyncMock(return_value=0)
+        registry.register(POOL_ID_HEX, strategy)
+
+        service, contract, _, _ = _make_service(registry=registry)
+        contract.functions.pools.return_value.call.return_value = (
+            bytes.fromhex(USDC_TOKEN_ID[2:]),
+            POOL_ADDRESS,
+            1000, 1050, True,
+        )
+
+        assert await service.rate_snapshot(POOL_ID_HEX) is None
+
     async def test_deposit_manual_strategy_skips_routing(self, test_db):
         service, contract, _, _ = _make_service()
         contract.functions.pools.return_value.call.return_value = (
@@ -684,6 +746,7 @@ class TestLiveAUMInResponses:
         strategy = MagicMock()
         strategy.name = "aave-v3"
         strategy.total_assets = AsyncMock(return_value=1200)
+        strategy.idle_assets = AsyncMock(return_value=0)
         registry.register(POOL_ID_HEX, strategy)
 
         service, contract, _, _ = _make_service(registry=registry)
@@ -701,3 +764,69 @@ class TestLiveAUMInResponses:
         balances = await service.get_all_balances(USER_ADDRESS)
         assert len(balances) == 1
         assert balances[0]["exchange_rate"] == "1.2"
+
+
+class TestGetAllBalancesChange:
+    def _seed_pool_contract(self, contract, total_assets=1050, total_shares=1000):
+        pool_id_bytes = bytes.fromhex(POOL_ID_HEX[2:])
+        contract.functions.getPoolCount.return_value.call.return_value = 1
+        contract.functions.poolIds.return_value.call.return_value = pool_id_bytes
+        contract.functions.pools.return_value.call.return_value = (
+            bytes.fromhex(USDC_TOKEN_ID[2:]),
+            POOL_ADDRESS,
+            total_shares, total_assets, True,
+        )
+        contract.functions.getUserShares.return_value.call.return_value = 500
+        contract.functions.convertToAssets.return_value.call.return_value = 525
+
+    @pytest.mark.asyncio
+    async def test_change_fields_populated_with_identity(self, test_db):
+        import time as time_module
+
+        from src.services.pool_rate_history import PoolRatePoint, store_point
+
+        service, contract, _, _ = _make_service()
+        self._seed_pool_contract(contract)
+        # rate 1.0 a day ago vs 1.05 now
+        store_point(
+            POOL_ID_HEX,
+            PoolRatePoint(int(time_module.time()) - 86400 - 21600, "1000", "1000"),
+        )
+
+        balances = await service.get_all_balances(
+            SIWE_TOKEN, user_address="0x" + "d" * 40
+        )
+        assert len(balances) == 1
+        assert balances[0]["change_24h"] == "25"
+        assert balances[0]["change_24h_pct"] == "0.050000"
+
+    @pytest.mark.asyncio
+    async def test_change_fields_null_without_identity(self, test_db):
+        import time as time_module
+
+        from src.services.pool_rate_history import PoolRatePoint, store_point
+
+        service, contract, _, _ = _make_service()
+        self._seed_pool_contract(contract)
+        store_point(
+            POOL_ID_HEX,
+            PoolRatePoint(int(time_module.time()) - 86400 - 21600, "1000", "1000"),
+        )
+
+        balances = await service.get_all_balances(SIWE_TOKEN)
+        assert len(balances) == 1
+        assert balances[0]["change_24h"] is None
+        assert balances[0]["change_24h_pct"] is None
+
+    @pytest.mark.asyncio
+    async def test_change_fields_null_without_history(self, test_db):
+        service, contract, _, _ = _make_service()
+        self._seed_pool_contract(contract)
+
+        balances = await service.get_all_balances(
+            SIWE_TOKEN, user_address="0x" + "d" * 40
+        )
+        assert len(balances) == 1
+        assert balances[0]["shares"] == "500"
+        assert balances[0]["change_24h"] is None
+        assert balances[0]["change_24h_pct"] is None

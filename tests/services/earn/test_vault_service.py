@@ -900,3 +900,64 @@ class TestShareDeltaCapture:
         row = test_db.execute("SELECT * FROM earn_transactions").fetchone()
         assert row["shares_delta"] == "-400"
         assert row["exchange_rate"] == "1.05"
+
+
+class TestGetAllBalancesEarned:
+    def _seed(self, contract):
+        contract.functions.getPoolCount.return_value.call.return_value = 1
+        contract.functions.poolIds.return_value.call.return_value = bytes.fromhex(
+            POOL_ID_HEX[2:]
+        )
+        contract.functions.pools.return_value.call.return_value = (
+            bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1000, 1050, True,
+        )
+        contract.functions.getUserShares.return_value.call.return_value = 100
+        contract.functions.convertToAssets.return_value.call.return_value = 105
+
+    def _deposit_row(self, user):
+        from src.core.db import db_write, get_db
+        db_write(
+            get_db(),
+            """INSERT INTO earn_transactions
+               (id, operation, pool_id, user_address, token_id, amount,
+                signer_address, nonce, signature, status, created_at, updated_at,
+                shares_delta)
+               VALUES ('tx-1', 'deposit', ?, ?, '0xtok', '100', '0xsig', 0,
+                       '0xsig', 'completed', 100, 100, '100')""",
+            (POOL_ID_HEX, user.lower()),
+        )
+
+    @pytest.mark.asyncio
+    async def test_earned_populated_from_ledger(self, test_db):
+        service, contract, _, _ = _make_service()
+        self._seed(contract)
+        user = "0x" + "d" * 40
+        self._deposit_row(user)
+
+        balances = await service.get_all_balances(SIWE_TOKEN, user_address=user)
+        assert balances[0]["earned_active"] == "5"
+        assert balances[0]["earned_active_status"] == "ok"
+        assert balances[0]["cost_basis"] == "100"
+        assert balances[0]["deposit_count"] == 1
+        assert balances[0]["first_deposit_at"] == 100
+
+    @pytest.mark.asyncio
+    async def test_earned_unsupported_without_identity(self, test_db):
+        service, contract, _, _ = _make_service()
+        self._seed(contract)
+        self._deposit_row("0x" + "d" * 40)
+
+        balances = await service.get_all_balances(SIWE_TOKEN)
+        assert balances[0]["earned_active"] is None
+        assert balances[0]["earned_active_status"] == "unsupported"
+
+    @pytest.mark.asyncio
+    async def test_earned_incomplete_without_ledger_rows(self, test_db):
+        service, contract, _, _ = _make_service()
+        self._seed(contract)
+
+        balances = await service.get_all_balances(
+            SIWE_TOKEN, user_address="0x" + "d" * 40
+        )
+        assert balances[0]["earned_active"] is None
+        assert balances[0]["earned_active_status"] == "ledger_incomplete"

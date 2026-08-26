@@ -20,6 +20,11 @@ from src.core.validation import (
     validate_signature,
 )
 from src.services.earn.change import change_24h
+from src.services.earn.earned import (
+    STATUS_LEDGER_INCOMPLETE,
+    Earned,
+    earned_active,
+)
 from src.services.earn.registry import StrategyRegistry, get_strategy_registry
 from src.services.earn.strategies.base import ApyPoint
 
@@ -801,6 +806,18 @@ class VaultService:
             except Exception:
                 logger.exception("24h change failed for pool %s", pool["pool_id"])
                 change = None
+            try:
+                earned = await asyncio.to_thread(
+                    earned_active,
+                    user_address,
+                    pool["pool_id"],
+                    shares,
+                    effective_assets,
+                    int(pool["total_shares"]),
+                )
+            except Exception:
+                logger.exception("earned failed for pool %s", pool["pool_id"])
+                earned = Earned(active=None, status=STATUS_LEDGER_INCOMPLETE)
             return {
                 "pool_id": pool["pool_id"],
                 "token_id": pool["token_id"],
@@ -809,6 +826,11 @@ class VaultService:
                 "exchange_rate": _exchange_rate(effective_assets, pool["total_shares"]),
                 "change_24h": change.amount if change else None,
                 "change_24h_pct": change.pct if change else None,
+                "earned_active": earned.active,
+                "earned_active_status": earned.status,
+                "cost_basis": earned.cost_basis,
+                "deposit_count": earned.deposit_count,
+                "first_deposit_at": earned.first_deposit_at,
             }
 
         results = await asyncio.gather(*[fetch_balance(p) for p in pools])

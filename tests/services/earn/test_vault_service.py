@@ -376,6 +376,68 @@ class TestStrategyRouting:
         assert row["status"] == "undeployed"
         assert row["error"] is not None
 
+    async def test_rate_snapshot_pairs_assets_with_the_shares_of_one_instant(self):
+        from src.services.earn.registry import StrategyRegistry
+
+        registry = StrategyRegistry()
+        strategy = MagicMock()
+        strategy.name = "aave-v3"
+        strategy.total_assets = AsyncMock(return_value=1800)
+        strategy.idle_assets = AsyncMock(return_value=200)
+        registry.register(POOL_ID_HEX, strategy)
+
+        service, contract, _, _ = _make_service(registry=registry)
+        contract.functions.pools.return_value.call.return_value = (
+            bytes.fromhex(USDC_TOKEN_ID[2:]),
+            POOL_ADDRESS,
+            1000, 1500, True,
+        )
+
+        assets, shares = await service.rate_snapshot(POOL_ID_HEX)
+
+        # Deployed plus idle, so an undeployed deposit's shares stay backed.
+        assert assets == 2000
+        assert shares == 1000
+
+    async def test_rate_snapshot_refuses_when_shares_move_mid_read(self):
+        """A deposit landing between the share read and the asset read would
+        pair new assets with old shares and invent a jump in value."""
+        from src.services.earn.registry import StrategyRegistry
+
+        registry = StrategyRegistry()
+        strategy = MagicMock()
+        strategy.name = "aave-v3"
+        strategy.total_assets = AsyncMock(return_value=2000)
+        strategy.idle_assets = AsyncMock(return_value=0)
+        registry.register(POOL_ID_HEX, strategy)
+
+        service, contract, _, _ = _make_service(registry=registry)
+        contract.functions.pools.return_value.call.side_effect = [
+            (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1000, 1000, True),
+            (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 2000, 2000, True),
+        ]
+
+        assert await service.rate_snapshot(POOL_ID_HEX) is None
+
+    async def test_rate_snapshot_is_none_when_the_strategy_cannot_be_read(self):
+        from src.services.earn.registry import StrategyRegistry
+
+        registry = StrategyRegistry()
+        strategy = MagicMock()
+        strategy.name = "aave-v3"
+        strategy.total_assets = AsyncMock(side_effect=RuntimeError("rpc down"))
+        strategy.idle_assets = AsyncMock(return_value=0)
+        registry.register(POOL_ID_HEX, strategy)
+
+        service, contract, _, _ = _make_service(registry=registry)
+        contract.functions.pools.return_value.call.return_value = (
+            bytes.fromhex(USDC_TOKEN_ID[2:]),
+            POOL_ADDRESS,
+            1000, 1050, True,
+        )
+
+        assert await service.rate_snapshot(POOL_ID_HEX) is None
+
     async def test_deposit_manual_strategy_skips_routing(self, test_db):
         service, contract, _, _ = _make_service()
         contract.functions.pools.return_value.call.return_value = (
@@ -684,6 +746,7 @@ class TestLiveAUMInResponses:
         strategy = MagicMock()
         strategy.name = "aave-v3"
         strategy.total_assets = AsyncMock(return_value=1200)
+        strategy.idle_assets = AsyncMock(return_value=0)
         registry.register(POOL_ID_HEX, strategy)
 
         service, contract, _, _ = _make_service(registry=registry)

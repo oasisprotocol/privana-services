@@ -140,24 +140,25 @@ class PoolRateSampler:
                 continue
             pool_id = pool["pool_id"]
             try:
-                # Sample the strategy's live AUM, not the on-chain total_assets:
-                # for Aave-style pools that figure only moves on sync and would
-                # record a staircase instead of a yield curve. Strict, because a
-                # stored principal-only fallback would read as a loss forever
-                # after against every later yield-inclusive sample.
-                assets = await service.strict_total_assets(pool_id, pool["total_assets"])
-                if assets is None:
+                # Sample live AUM, not the on-chain total_assets: for Aave-style
+                # pools that figure only moves on sync and would record a
+                # staircase instead of a yield curve. A snapshot rather than two
+                # reads, because assets and shares paired from different instants
+                # would freeze a rate that never existed into the history.
+                snapshot = await service.rate_snapshot(pool_id)
+                if snapshot is None:
                     logger.warning(
-                        "Pool rate sample skipped pool=%s: no trustworthy AUM reading",
+                        "Pool rate sample skipped pool=%s: no coherent AUM reading",
                         pool_id,
                     )
                     continue
+                assets, shares = snapshot
                 stored += store_point(
                     pool_id,
                     PoolRatePoint(
                         timestamp=now,
                         total_assets=str(assets),
-                        total_shares=str(pool["total_shares"]),
+                        total_shares=str(shares),
                     ),
                 )
             except Exception:

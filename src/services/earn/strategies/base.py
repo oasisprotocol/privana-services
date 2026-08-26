@@ -63,6 +63,16 @@ class BaseStrategy(ABC):
         externally (e.g. manual).
         """
 
+    async def idle_assets(self) -> int:
+        """Pool funds credited to the pool but not deployed to the external
+        protocol: an undeployed deposit, or a reclaim awaiting redeploy.
+
+        Shares were already minted against these, so leaving them out of AUM
+        understates the rate and shows a loss that never happened. Defaults to
+        0 for strategies that hold nothing off to one side.
+        """
+        return 0
+
     @abstractmethod
     async def is_healthy(self) -> bool:
         """Cheap liveness probe for the external protocol. False means the

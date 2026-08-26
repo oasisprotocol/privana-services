@@ -555,7 +555,7 @@ class VaultService:
         return external if external > 0 else on_chain_total
 
     async def strict_total_assets(self, pool_id_hex: str, on_chain_total: int) -> Optional[int]:
-        """AUM for rate snapshots: None instead of a silent fallback.
+        """Every asset the pool's shares are backed by, or None.
 
         ``effective_total_assets`` degrades to the on-chain principal when the
         strategy read fails, which is right for a balance read that should stay
@@ -563,19 +563,50 @@ class VaultService:
         sync, so comparing it against a stored yield-inclusive sample invents a
         loss that never happened. Anything that stores or compares a rate takes
         this form and skips instead of guessing.
+
+        Idle funds count too. An undeployed deposit has shares against it while
+        the money sits in the pool's accounting balance rather than in Aave, so
+        counting only the strategy would report those shares as backed by
+        nothing.
         """
         strategy = self._registry.get(pool_id_hex)
         if strategy.name == "manual":
             return on_chain_total
         try:
             external = await strategy.total_assets()
+            idle = await strategy.idle_assets()
         except Exception:
             logger.exception(
-                "strategy.total_assets failed pool=%s strategy=%s; no rate snapshot",
+                "strategy AUM read failed pool=%s strategy=%s; no rate snapshot",
                 pool_id_hex, strategy.name,
             )
             return None
-        return external if external > 0 else on_chain_total
+        total = external + idle
+        return total if total > 0 else on_chain_total
+
+    async def rate_snapshot(self, pool_id_hex: str) -> Optional[tuple[int, int]]:
+        """A coherent ``(total_assets, total_shares)`` pair, or None.
+
+        Assets sit in the strategy and in the pool's accounting balance while
+        shares live on-chain, so no single read returns both. Read the share
+        count, read the assets, then read the share count again: if it moved, a
+        cashflow landed mid-read and the pair describes no one instant. A
+        same-rate deposit caught that way would otherwise pair new assets with
+        old shares and look like a jump in value.
+        """
+        pool_id = bytes.fromhex(pool_id_hex.removeprefix("0x"))
+        before = await asyncio.to_thread(self.get_pool, pool_id)
+        assets = await self.strict_total_assets(pool_id_hex, before["total_assets"])
+        if assets is None:
+            return None
+        after = await asyncio.to_thread(self.get_pool, pool_id)
+        if int(after["total_shares"]) != int(before["total_shares"]):
+            logger.info(
+                "Pool %s share count moved while reading assets; no rate snapshot",
+                pool_id_hex,
+            )
+            return None
+        return assets, int(before["total_shares"])
 
     async def sync_total_assets(self, pool_id_hex: str) -> Optional[int]:
         """Push the strategy's live AUM into EarnManager.totalAssets so
@@ -694,13 +725,11 @@ class VaultService:
             if shares == 0:
                 return None
             underlying = await asyncio.to_thread(self.convert_to_assets, pool_id, shares)
-            # One strategy read serves both: the strict value drives the change,
-            # and the balance itself falls back to the on-chain total so a
-            # protocol outage still returns a position rather than an error.
-            strict_assets = await self.strict_total_assets(pool["pool_id"], pool["total_assets"])
-            effective_assets = (
-                strict_assets if strict_assets is not None else pool["total_assets"]
-            )
+            # The change needs assets and shares from one instant; the balance
+            # itself only needs to stay available, so it falls back to the
+            # on-chain total when no coherent snapshot can be taken.
+            snapshot = await self.rate_snapshot(pool["pool_id"])
+            effective_assets = snapshot[0] if snapshot else pool["total_assets"]
             try:
                 change = (
                     await asyncio.to_thread(
@@ -708,11 +737,11 @@ class VaultService:
                         user_address,
                         pool["pool_id"],
                         shares,
-                        strict_assets,
-                        int(pool["total_shares"]),
+                        snapshot[0],
+                        snapshot[1],
                         int(time.time()),
                     )
-                    if strict_assets is not None
+                    if snapshot
                     else None
                 )
             except Exception:

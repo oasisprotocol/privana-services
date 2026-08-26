@@ -912,6 +912,7 @@ class TestGetAllBalancesEarned:
             bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1000, 1050, True,
         )
         contract.functions.getUserShares.return_value.call.return_value = 100
+        # convertToAssets is authoritative for position value (virtual offsets).
         contract.functions.convertToAssets.return_value.call.return_value = 105
 
     def _deposit_row(self, user):

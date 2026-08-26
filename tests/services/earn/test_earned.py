@@ -47,7 +47,7 @@ class TestEarnedActive:
     def test_deposit_then_yield(self, test_db):
         # Deposit 100 for 100 shares (rate 1.0), pool now worth 1.05/share.
         _cashflow(amount="100", shares_delta="100")
-        result = earned_active(USER, POOL, 100, 1050, 1000)
+        result = earned_active(USER, POOL, 100, 105)
         assert result.status == STATUS_OK
         assert result.active == "5"
         assert result.cost_basis == "100"
@@ -56,20 +56,20 @@ class TestEarnedActive:
 
     def test_brand_new_position_earns_zero_not_null(self, test_db):
         _cashflow(amount="100", shares_delta="100")
-        result = earned_active(USER, POOL, 100, 1000, 1000)
+        result = earned_active(USER, POOL, 100, 100)
         assert result.status == STATUS_OK
         assert result.active == "0"
 
     def test_loss_is_negative(self, test_db):
         _cashflow(amount="100", shares_delta="100")
-        result = earned_active(USER, POOL, 100, 970, 1000)
+        result = earned_active(USER, POOL, 100, 97)
         assert result.status == STATUS_OK
         assert result.active == "-3"
 
     def test_multiple_deposits_blend_the_basis(self, test_db):
         _cashflow(amount="100", shares_delta="100", created_at=T0)
         _cashflow(amount="105", shares_delta="100", created_at=T0 + 10)
-        result = earned_active(USER, POOL, 200, 2200, 2000)
+        result = earned_active(USER, POOL, 200, 220)
         # basis 205, value 200 * 1.1 = 220
         assert result.status == STATUS_OK
         assert result.cost_basis == "205"
@@ -82,7 +82,7 @@ class TestEarnedActive:
             operation="withdraw", amount="15", shares_delta="-14",
             created_at=T0 + 10, user=OTHER, consent_signer=USER,
         )
-        result = earned_active(USER, POOL, 86, 1050, 1000)
+        result = earned_active(USER, POOL, 86, 90)
         assert result.status == STATUS_OK
         # basis out = 100 * 14 // 100 = 14, realised = 15 - 14 = 1
         assert result.realised == "1"
@@ -100,11 +100,10 @@ class TestEarnedActive:
         _cashflow(amount="500", shares_delta="450", created_at=T0 + 20)
 
         shares = 1000 - 280 + 450
-        total_assets, total_shares = 13_000, 10_000
-        result = earned_active(USER, POOL, shares, total_assets, total_shares)
+        value_now = 1_521  # what convertToAssets reports for these shares
+        result = earned_active(USER, POOL, shares, value_now)
         assert result.status == STATUS_OK
 
-        value_now = shares * total_assets // total_shares
         deposited, withdrawn = 1000 + 500, 300
         assert int(result.active) + int(result.realised) == value_now - (
             deposited - withdrawn
@@ -118,7 +117,7 @@ class TestEarnedActive:
         )
         _cashflow(amount="50", shares_delta="50", created_at=T0 + 20)
 
-        result = earned_active(USER, POOL, 50, 1000, 1000)
+        result = earned_active(USER, POOL, 50, 50)
         assert result.status == STATUS_OK
         assert result.realised == "20"
         assert result.cost_basis == "50"
@@ -128,24 +127,24 @@ class TestEarnedActive:
 class TestEarnedStatuses:
     def test_no_identity_is_unsupported(self, test_db):
         _cashflow()
-        assert earned_active(None, POOL, 100, 1050, 1000).status == STATUS_UNSUPPORTED
+        assert earned_active(None, POOL, 100, 105).status == STATUS_UNSUPPORTED
 
     def test_pending_row_blocks_the_figure(self, test_db):
         _cashflow(status="pending")
-        result = earned_active(USER, POOL, 100, 1050, 1000)
+        result = earned_active(USER, POOL, 100, 105)
         assert result.status == STATUS_PENDING_SETTLEMENT
         assert result.active is None
 
     def test_missing_shares_delta_is_incomplete(self, test_db):
         _cashflow(shares_delta=None)
-        result = earned_active(USER, POOL, 100, 1050, 1000)
+        result = earned_active(USER, POOL, 100, 105)
         assert result.status == STATUS_LEDGER_INCOMPLETE
         assert result.active is None
 
     def test_share_count_mismatch_is_incomplete(self, test_db):
         # Chain says 500 shares, ledger only accounts for 100.
         _cashflow(amount="100", shares_delta="100")
-        result = earned_active(USER, POOL, 500, 1050, 1000)
+        result = earned_active(USER, POOL, 500, 525)
         assert result.status == STATUS_LEDGER_INCOMPLETE
         assert result.active is None
 
@@ -157,7 +156,7 @@ class TestEarnedStatuses:
             operation="withdraw", amount="50", shares_delta="-50",
             created_at=T0 + 10, user=USER, consent_signer=None,
         )
-        result = earned_active(USER, POOL, 50, 1050, 1000)
+        result = earned_active(USER, POOL, 50, 52)
         assert result.status == STATUS_LEDGER_INCOMPLETE
 
     def test_failed_rows_are_ignored(self, test_db):
@@ -165,22 +164,22 @@ class TestEarnedStatuses:
         _cashflow(
             amount="999", shares_delta="999", status="failed", created_at=T0 + 10
         )
-        assert earned_active(USER, POOL, 100, 1050, 1000).status == STATUS_OK
+        assert earned_active(USER, POOL, 100, 105).status == STATUS_OK
 
     def test_undeployed_rows_count_as_settled(self, test_db):
         _cashflow(amount="100", shares_delta="100", status="undeployed")
-        result = earned_active(USER, POOL, 100, 1050, 1000)
+        result = earned_active(USER, POOL, 100, 105)
         assert result.status == STATUS_OK
         assert result.active == "5"
 
     def test_other_users_cashflows_are_not_borrowed(self, test_db):
         _cashflow(amount="100", shares_delta="100", user=OTHER)
-        result = earned_active(USER, POOL, 100, 1050, 1000)
+        result = earned_active(USER, POOL, 100, 105)
         assert result.status == STATUS_LEDGER_INCOMPLETE
 
     def test_other_pools_cashflows_are_not_borrowed(self, test_db):
         _cashflow(amount="100", shares_delta="100", pool="0x" + "99" * 32)
-        result = earned_active(USER, POOL, 100, 1050, 1000)
+        result = earned_active(USER, POOL, 100, 105)
         assert result.status == STATUS_LEDGER_INCOMPLETE
 
     def test_burn_against_empty_position_is_incomplete(self, test_db):
@@ -188,5 +187,5 @@ class TestEarnedStatuses:
             operation="withdraw", amount="50", shares_delta="-50",
             user=OTHER, consent_signer=USER,
         )
-        result = earned_active(USER, POOL, 0, 1050, 1000)
+        result = earned_active(USER, POOL, 0, 0)
         assert result.status == STATUS_LEDGER_INCOMPLETE

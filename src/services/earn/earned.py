@@ -74,9 +74,15 @@ def earned_active(
     user_address: Optional[str],
     pool_id: str,
     shares: int,
-    total_assets: int,
-    total_shares: int,
+    value_now: int,
 ) -> Earned:
+    """Yield on currently held shares.
+
+    ``value_now`` must be the same position value the response reports, which
+    is the contract's ``convertToAssets``. Deriving it here from the pool
+    ratio would drop the contract's virtual share offset and produce an
+    "earned" that does not reconcile with the balance shown beside it.
+    """
     if not user_address:
         return Earned(active=None, status=STATUS_UNSUPPORTED)
 
@@ -126,10 +132,6 @@ def earned_active(
         )
         return Earned(active=None, status=STATUS_LEDGER_INCOMPLETE)
 
-    if total_shares <= 0:
-        return Earned(active=None, status=STATUS_LEDGER_INCOMPLETE)
-
-    value_now = shares * total_assets // total_shares
     return Earned(
         active=str(value_now - cost_basis),
         status=STATUS_OK,

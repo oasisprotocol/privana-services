@@ -812,8 +812,7 @@ class VaultService:
                     user_address,
                     pool["pool_id"],
                     shares,
-                    effective_assets,
-                    int(pool["total_shares"]),
+                    underlying,
                 )
             except Exception:
                 logger.exception("earned failed for pool %s", pool["pool_id"])

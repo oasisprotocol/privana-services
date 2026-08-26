@@ -786,11 +786,16 @@ class TestGetAllBalancesChange:
         from src.services.pool_rate_history import PoolRatePoint, store_point
 
         service, contract, _, _ = _make_service()
-        self._seed_pool_contract(contract)
-        # rate 1.0 a day ago vs 1.05 now
+        # Pool totals scaled so the contract's virtual offsets give exact
+        # rates: 1.0 at the anchor, 1.05 now.
+        self._seed_pool_contract(contract, total_assets=1_049_999_999,
+                                 total_shares=999_000_000)
         store_point(
             POOL_ID_HEX,
-            PoolRatePoint(int(time_module.time()) - 86400 - 21600, "1000", "1000"),
+            PoolRatePoint(
+                int(time_module.time()) - 86400 - 21600,
+                "999999999", "999000000",
+            ),
         )
 
         balances = await service.get_all_balances(

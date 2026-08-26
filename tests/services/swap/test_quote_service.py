@@ -58,23 +58,58 @@ class TestQuoteDeduplication:
         result = await service._find_existing_quote("0xuser", TOKEN_A, TOKEN_B, "9999999")
         assert result is None
 
-    async def test_reuse_returns_stored_fee_not_current_settings(self, insert_quote):
+    async def test_reuse_resolves_the_global_fee_for_a_non_exempt_wallet(self, insert_quote):
         future = int(time.time()) + 300
-        insert_quote("q5", expires_at=future, fee_bps=25, fee_amount="2500")
-        service = self._make_service()
-        assert service.settings.fee_bps != 25
-        result = await service._find_existing_quote("0xuser", TOKEN_A, TOKEN_B, "1000000")
-        assert result.fee_bps == 25
-        assert result.fee_amount == "2500"
-
-    async def test_reuse_falls_back_to_global_fee_for_legacy_rows(self, insert_quote):
-        future = int(time.time()) + 300
-        insert_quote("q6", expires_at=future, fee_bps=None, fee_amount=None)
+        insert_quote("q5", expires_at=future, venue="internal")
         service = self._make_service()
         result = await service._find_existing_quote("0xuser", TOKEN_A, TOKEN_B, "1000000")
         assert result.fee_bps == service.settings.fee_bps
         expected_fee = 1000000 * service.settings.fee_bps // 10_000
         assert result.fee_amount == str(expected_fee)
+        assert result.fee_policy_id is None
+
+    async def test_reuse_applies_the_exemption_for_a_covered_wallet(
+        self, insert_quote, monkeypatch
+    ):
+        now = int(time.time())
+        policy = parse_fee_policies(
+            json.dumps([{
+                "id": "founding-2026", "fee_bps": 0,
+                "valid_from": now - 3600, "valid_until": now + 3600,
+                "wallets": ["0x" + "d8" * 20],
+            }])
+        )
+        monkeypatch.setattr(fee_policy_module, "_policies", policy)
+
+        insert_quote("q6", expires_at=now + 300, venue="internal", user_address="0x" + "d8" * 20)
+        service = self._make_service()
+        result = await service._find_existing_quote(
+            "0x" + "d8" * 20, TOKEN_A, TOKEN_B, "1000000"
+        )
+        assert result.fee_bps == 0
+        assert result.fee_amount == "0"
+        assert result.fee_policy_id == "founding-2026"
+
+    async def test_reuse_of_a_lifi_quote_never_takes_an_exemption(
+        self, insert_quote, monkeypatch
+    ):
+        now = int(time.time())
+        policy = parse_fee_policies(
+            json.dumps([{
+                "id": "founding-2026", "fee_bps": 0,
+                "valid_from": now - 3600, "valid_until": now + 3600,
+                "wallets": ["0x" + "d8" * 20],
+            }])
+        )
+        monkeypatch.setattr(fee_policy_module, "_policies", policy)
+
+        insert_quote("q7", expires_at=now + 300, venue="lifi", user_address="0x" + "d8" * 20)
+        service = self._make_service()
+        result = await service._find_existing_quote(
+            "0x" + "d8" * 20, TOKEN_A, TOKEN_B, "1000000"
+        )
+        assert result.fee_bps == service.settings.fee_bps
+        assert result.fee_policy_id is None
 
 
 class TestExpiredQuoteCleanup:
@@ -475,7 +510,12 @@ class TestFeeExemption(TestGetQuote):
         assert result.fee_policy_id is None
         assert int(result.fee_amount) > 0
 
-    async def test_exempt_quote_reuse_honors_stored_fee_after_policy_removal(self, test_db):
+    async def test_exempt_quote_reuse_reresolves_after_policy_removal(self, test_db):
+        """Fees are not persisted: the policy config is the source of truth, so
+        pulling the campaign re-prices even an already-issued quote. The window
+        clamp on expiry means a live policy can never be missed while a quote is
+        still valid; removing it by hand is the one case that re-prices, and
+        that is the accepted tradeoff for not storing a commitment."""
         self.set_policies([self._campaign()])
         service = self._make_service()
         first = await service.get_quote(TOKEN_A, TOKEN_B, "1000000", self.USER)
@@ -484,6 +524,5 @@ class TestFeeExemption(TestGetQuote):
         existing = await service._find_existing_quote(self.USER, TOKEN_A, TOKEN_B, "1000000")
         assert existing is not None
         assert existing.quote_id == first.quote_id
-        assert existing.fee_bps == 0
-        assert existing.fee_amount == "0"
-        assert existing.fee_policy_id == "founding-members-2026"
+        assert existing.fee_bps == service.settings.fee_bps
+        assert existing.fee_policy_id is None

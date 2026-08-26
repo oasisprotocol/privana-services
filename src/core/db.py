@@ -102,11 +102,6 @@ MIGRATIONS = [
     );
     """,
     "CREATE INDEX IF NOT EXISTS idx_pool_rate_pool_ts ON pool_rate_history(pool_id, timestamp);",
-    # Nullable: rows created before these columns existed fall back to the
-    # global FEE_BPS when read.
-    "ALTER TABLE quotes ADD COLUMN fee_bps INTEGER;",
-    "ALTER TABLE quotes ADD COLUMN fee_amount TEXT;",
-    "ALTER TABLE quotes ADD COLUMN fee_policy_id TEXT;",
 ]
 
 

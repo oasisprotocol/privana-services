@@ -137,15 +137,13 @@ class QuoteService:
             """INSERT INTO quotes
                (id, user_address, from_token_id, to_token_id, from_chain_id, to_chain_id,
                 from_amount, to_amount_gross, to_amount_estimate, to_amount_min,
-                route_tool, liquidity_provider, expires_at, created_at, venue,
-                fee_bps, fee_amount, fee_policy_id)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                route_tool, liquidity_provider, expires_at, created_at, venue)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 quote_id, user_address.lower(), from_token_id.lower(), to_token_id.lower(),
                 from_chain_id, to_chain_id,
                 from_amount, to_amount_str, str(to_amount_after_fee), str(max(to_amount_min, 0)),
                 route_tool, liquidity_provider, expires_at, now, venue,
-                decision.fee_bps, str(fee_amount), decision.policy_id,
             ),
         )
 
@@ -237,15 +235,17 @@ class QuoteService:
             return None
 
         quote = dict(row)
-        # The stored fee is the commercial commitment; a quote must not change
-        # between issuance and reuse. Rows predating the fee columns fall back
-        # to recomputing from the current global fee.
-        fee_bps = quote["fee_bps"]
-        if fee_bps is None:
-            fee_bps = self.settings.fee_bps
-            _, fee_amount = calculate_fee(int(quote["to_amount_gross"]), fee_bps)
+        # Re-resolve the fee rather than storing it: the policy config is the
+        # source of truth and cannot have changed under a quote that is still
+        # valid, since a quote's expiry is clamped to its policy window at
+        # issuance. An exemption only ever applies to an internal fill; a LiFi
+        # quote always carries the global fee.
+        if quote["venue"] == SwapVenue.INTERNAL.value:
+            decision = resolve_internal_fee(user_address, now)
         else:
-            fee_amount = int(quote["fee_amount"])
+            decision = FeeDecision(fee_bps=self.settings.fee_bps)
+        fee_bps = decision.fee_bps
+        _, fee_amount = calculate_fee(int(quote["to_amount_gross"]), fee_bps)
         transfer_nonce = await self.accounting.get_transfer_nonce(user_address)
 
         return QuoteResponse(
@@ -260,7 +260,7 @@ class QuoteService:
             to_amount_min=quote["to_amount_min"],
             fee_bps=fee_bps,
             fee_amount=str(fee_amount),
-            fee_policy_id=quote.get("fee_policy_id"),
+            fee_policy_id=decision.policy_id,
             tool_used=quote["route_tool"],
             liquidity_provider=quote["liquidity_provider"],
             transfer_nonce=transfer_nonce,

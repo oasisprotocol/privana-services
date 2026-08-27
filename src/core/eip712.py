@@ -112,6 +112,41 @@ def recover_transfer_signer(
     return Account.recover_message(signable, signature=signature)
 
 
+def recover_withdraw_signer(
+    chain_id: int,
+    earn_manager_address: str,
+    pool_id: str,
+    amount: int,
+    nonce: int,
+    signature: str,
+) -> str:
+    """Recover the signer of an EIP-712 ``Withdraw`` consent.
+
+    The contract burns shares from whoever signed the consent, not from the
+    payout recipient, so anything that attributes a withdrawal to a user must
+    key on this address.
+    """
+    domain_data = {
+        "name": "EarnManager",
+        "version": "1",
+        "chainId": chain_id,
+        "verifyingContract": earn_manager_address,
+    }
+
+    message_data = {
+        "poolId": _to_bytes32(pool_id),
+        "amount": amount,
+        "nonce": nonce,
+    }
+
+    signable = encode_typed_data(
+        domain_data=domain_data,
+        message_types=WITHDRAW_TYPES,
+        message_data=message_data,
+    )
+    return Account.recover_message(signable, signature=signature)
+
+
 def sign_withdraw_consent(
     private_key: str,
     chain_id: int,

@@ -71,7 +71,7 @@ class TestSampler:
     async def test_sample_once_records_active_pools(self):
         service = MagicMock()
         service.list_pools = MagicMock(return_value=[_pool(POOL_A)])
-        service.effective_total_assets = AsyncMock(return_value=150)
+        service.rate_snapshot = AsyncMock(return_value=(150, 50))
 
         stored = await PoolRateSampler(service=service).sample_once()
 
@@ -84,29 +84,29 @@ class TestSampler:
         # total_assets (100) which only moves on sync.
         service = MagicMock()
         service.list_pools = MagicMock(return_value=[_pool(POOL_A, total_assets=100)])
-        service.effective_total_assets = AsyncMock(return_value=150)
+        service.rate_snapshot = AsyncMock(return_value=(150, 50))
 
         await PoolRateSampler(service=service).sample_once()
 
-        service.effective_total_assets.assert_awaited_once_with(POOL_A, 100)
+        service.rate_snapshot.assert_awaited_once_with(POOL_A)
         assert read_points(POOL_A)[0].total_assets == "150"
 
     async def test_skips_inactive_pools(self):
         service = MagicMock()
         service.list_pools = MagicMock(return_value=[_pool(POOL_A, active=False), _pool(POOL_B)])
-        service.effective_total_assets = AsyncMock(return_value=150)
+        service.rate_snapshot = AsyncMock(return_value=(150, 50))
 
         stored = await PoolRateSampler(service=service).sample_once()
 
         assert stored == 1
         assert read_points(POOL_A) == []
         assert len(read_points(POOL_B)) == 1
-        service.effective_total_assets.assert_awaited_once_with(POOL_B, 100)
+        service.rate_snapshot.assert_awaited_once_with(POOL_B)
 
     async def test_one_unreadable_pool_does_not_abort_the_others(self):
         service = MagicMock()
         service.list_pools = MagicMock(return_value=[_pool(POOL_A), _pool(POOL_B)])
-        service.effective_total_assets = AsyncMock(side_effect=[RuntimeError("rpc down"), 150])
+        service.rate_snapshot = AsyncMock(side_effect=[RuntimeError("rpc down"), (150, 50)])
 
         stored = await PoolRateSampler(service=service).sample_once()
 
@@ -114,18 +114,43 @@ class TestSampler:
         assert read_points(POOL_A) == []
         assert len(read_points(POOL_B)) == 1
 
+    async def test_unreadable_aum_stores_nothing_rather_than_a_fallback(self):
+        """A strategy read that fails must not land as a sample. The on-chain
+        total is principal only, so storing it would read as a permanent loss
+        against every later yield-inclusive sample."""
+        service = MagicMock()
+        service.list_pools = MagicMock(return_value=[_pool(POOL_A)])
+        service.rate_snapshot = AsyncMock(return_value=None)
+
+        stored = await PoolRateSampler(service=service).sample_once()
+
+        assert stored == 0
+        assert read_points(POOL_A) == []
+
+    async def test_samples_record_when_they_were_actually_read(self):
+        service = MagicMock()
+        service.list_pools = MagicMock(return_value=[_pool(POOL_A)])
+        service.rate_snapshot = AsyncMock(return_value=(150, 50))
+
+        with patch("src.services.pool_rate_history.time.time", return_value=1787184000 + 900):
+            await PoolRateSampler(service=service).sample_once()
+
+        point = read_points(POOL_A)[0]
+        assert point.timestamp == 1787184000  # grid slot
+        assert point.observed_at == 1787184000 + 900  # real reading time
+
     async def test_sample_once_survives_a_list_pools_failure(self):
         service = MagicMock()
         service.list_pools = MagicMock(side_effect=RuntimeError("chain down"))
-        service.effective_total_assets = AsyncMock()
+        service.rate_snapshot = AsyncMock()
 
         assert await PoolRateSampler(service=service).sample_once() == 0
-        service.effective_total_assets.assert_not_awaited()
+        service.rate_snapshot.assert_not_awaited()
 
     async def test_samples_snap_to_the_interval_boundary(self):
         service = MagicMock()
         service.list_pools = MagicMock(return_value=[_pool(POOL_A)])
-        service.effective_total_assets = AsyncMock(return_value=150)
+        service.rate_snapshot = AsyncMock(return_value=(150, 50))
 
         # 1781485337 is 2026-06-15 01:02:17 UTC, inside the 00:00 interval.
         with patch("src.services.pool_rate_history.time.time", return_value=1781485337):
@@ -136,7 +161,7 @@ class TestSampler:
     async def test_resampling_within_one_interval_does_not_duplicate(self):
         service = MagicMock()
         service.list_pools = MagicMock(return_value=[_pool(POOL_A)])
-        service.effective_total_assets = AsyncMock(return_value=150)
+        service.rate_snapshot = AsyncMock(return_value=(150, 50))
         sampler = PoolRateSampler(service=service)
 
         with patch("src.services.pool_rate_history.time.time", return_value=1781485337):
@@ -166,3 +191,42 @@ class TestSampler:
                 await sampler._run()
 
         assert len(calls) == 2  # survived the first failure and ran again
+
+
+class TestReadPointBefore:
+    def test_returns_newest_at_or_before_bound(self):
+        from src.services.pool_rate_history import read_point_before
+
+        store_point(POOL_A, PoolRatePoint(JUN15, "100", "10"))
+        store_point(POOL_A, PoolRatePoint(JUN15 + SAMPLE_INTERVAL, "110", "10"))
+        store_point(POOL_A, PoolRatePoint(JUN16, "120", "10"))
+
+        point = read_point_before(POOL_A, ts_max=JUN16 - 1)
+        assert point is not None
+        assert point.timestamp == JUN15 + SAMPLE_INTERVAL
+        assert point.total_assets == "110"
+
+    def test_exact_bound_is_included(self):
+        from src.services.pool_rate_history import read_point_before
+
+        store_point(POOL_A, PoolRatePoint(JUN15, "100", "10"))
+        point = read_point_before(POOL_A, ts_max=JUN15)
+        assert point is not None
+        assert point.timestamp == JUN15
+
+    def test_lower_bound_excludes_stale_samples(self):
+        from src.services.pool_rate_history import read_point_before
+
+        store_point(POOL_A, PoolRatePoint(JUN15, "100", "10"))
+        assert read_point_before(POOL_A, ts_max=JUN16, ts_min=JUN15 + 1) is None
+
+    def test_no_samples_returns_none(self):
+        from src.services.pool_rate_history import read_point_before
+
+        assert read_point_before(POOL_A, ts_max=JUN16) is None
+
+    def test_other_pool_not_matched(self):
+        from src.services.pool_rate_history import read_point_before
+
+        store_point(POOL_B, PoolRatePoint(JUN15, "100", "10"))
+        assert read_point_before(POOL_A, ts_max=JUN16) is None

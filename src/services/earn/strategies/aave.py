@@ -411,6 +411,13 @@ class AaveStrategy(BaseStrategy):
             self._pool_address,
         )
 
+    async def idle_assets(self) -> int:
+        """The pool's accounting balance: deposits whose bridge to Base never
+        completed, and reclaims not yet re-supplied. Both carry minted shares,
+        so they belong in AUM even though Aave cannot see them.
+        """
+        return await self._read_pool_balance()
+
     async def is_healthy(self) -> bool:
         """Treat a successful supply-rate read as a cheap liveness proxy. If
         getReserveData throws, the pool is unreachable or the asset isn't

@@ -8,8 +8,8 @@ services:
     image: "ghcr.io/oasisprotocol/privana-services:testnet"
     platform: linux/amd64
     environment:
-      - LIQUIDITY_PROVIDER_SECRET_KEY=${LIQUIDITY_PROVIDER_SECRET_KEY}
-      - LIFI_API_KEY=${LIFI_API_KEY}
+      - LIQUIDITY_PROVIDER_SECRET_KEY
+      - LIFI_API_KEY
     volumes:
       - /run/rofl-appd.sock:/run/rofl-appd.sock
       - data:/app/data

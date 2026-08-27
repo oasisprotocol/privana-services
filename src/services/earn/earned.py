@@ -1,4 +1,4 @@
-"""Accrued yield per earn position (EA-Products #167, Phase 1).
+"""Accrued yield per earn position.
 
 ``earned_active`` is yield on money currently deployed: the position's value
 now minus what the user paid for the shares they still hold. It is derived

@@ -8,6 +8,7 @@ from src.clients.accounting import get_accounting_client
 from src.clients.lifi import get_lifi_client
 from src.core.config import load_settings
 from src.core.db import db_write, get_db
+from src.core.fee_policy import FeeDecision, resolve_internal_fee
 from src.core.fees import calculate_fee
 from src.core.validation import validate_address, validate_amount, validate_token_id
 from src.models.api import QuoteResponse
@@ -102,9 +103,12 @@ class QuoteService:
         if steps:
             route_tool = steps[0].get("tool")
 
-        fee_bps = self.settings.fee_bps
-        to_amount_after_fee, fee_amount = calculate_fee(int(to_amount_str), fee_bps)
-        to_amount_min = int(to_amount_min_str) - fee_amount
+        now = int(time.time())
+        # The internal-candidate fee must be resolved before the venue check:
+        # the LP has to cover the user's payout, and a fee exemption raises
+        # that payout to the full gross amount.
+        decision = resolve_internal_fee(user_address, now)
+        to_amount_after_fee, fee_amount = calculate_fee(int(to_amount_str), decision.fee_bps)
 
         liquidity_provider = self.settings.liquidity_provider_address
         lp_balance = await self.accounting.get_lp_balance(to_token_id)
@@ -113,12 +117,19 @@ class QuoteService:
             venue = await self._select_lifi_venue_or_raise(
                 from_chain_id, to_chain_id, from_on_chain, to_on_chain, from_amount
             )
+            # Exemptions never apply to LiFi routed swaps.
+            decision = FeeDecision(fee_bps=self.settings.fee_bps)
+            to_amount_after_fee, fee_amount = calculate_fee(
+                int(to_amount_str), decision.fee_bps
+            )
+        to_amount_min = int(to_amount_min_str) - fee_amount
 
         transfer_nonce = await self.accounting.get_transfer_nonce(user_address)
 
         quote_id = str(uuid.uuid4())
-        now = int(time.time())
         expires_at = now + self.settings.quote_ttl
+        if decision.valid_until is not None:
+            expires_at = min(expires_at, decision.valid_until)
 
         db = get_db()
         db_write(
@@ -146,8 +157,9 @@ class QuoteService:
             to_amount_gross=to_amount_str,
             to_amount_estimate=str(to_amount_after_fee),
             to_amount_min=str(max(to_amount_min, 0)),
-            fee_bps=fee_bps,
+            fee_bps=decision.fee_bps,
             fee_amount=str(fee_amount),
+            fee_policy_id=decision.policy_id,
             tool_used=route_tool,
             liquidity_provider=liquidity_provider,
             transfer_nonce=transfer_nonce,
@@ -223,7 +235,16 @@ class QuoteService:
             return None
 
         quote = dict(row)
-        fee_bps = self.settings.fee_bps
+        # Re-resolve the fee rather than storing it: the policy config is the
+        # source of truth and cannot have changed under a quote that is still
+        # valid, since a quote's expiry is clamped to its policy window at
+        # issuance. An exemption only ever applies to an internal fill; a LiFi
+        # quote always carries the global fee.
+        if quote["venue"] == SwapVenue.INTERNAL.value:
+            decision = resolve_internal_fee(user_address, now)
+        else:
+            decision = FeeDecision(fee_bps=self.settings.fee_bps)
+        fee_bps = decision.fee_bps
         _, fee_amount = calculate_fee(int(quote["to_amount_gross"]), fee_bps)
         transfer_nonce = await self.accounting.get_transfer_nonce(user_address)
 
@@ -239,6 +260,7 @@ class QuoteService:
             to_amount_min=quote["to_amount_min"],
             fee_bps=fee_bps,
             fee_amount=str(fee_amount),
+            fee_policy_id=decision.policy_id,
             tool_used=quote["route_tool"],
             liquidity_provider=quote["liquidity_provider"],
             transfer_nonce=transfer_nonce,
@@ -251,7 +273,7 @@ class QuoteService:
         if now - self._last_cleanup < CLEANUP_INTERVAL:
             return 0
         db = get_db()
-        cursor = db_write(db, "DELETE FROM quotes WHERE expires_at < ?", (now,))
+        cursor = db_write(db, "DELETE FROM quotes WHERE expires_at <= ?", (now,))
         self._last_cleanup = now
         deleted = cursor.rowcount
         if deleted > 0:

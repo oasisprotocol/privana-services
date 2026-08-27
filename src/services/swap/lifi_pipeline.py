@@ -196,7 +196,7 @@ class LifiSwapPipeline:
             from_address=self.evm.address,
         )
         net_min, _ = calculate_fee(
-            int(exec_quote["estimate"]["toAmountMin"]), self.settings.fee_bps
+            int(exec_quote["estimate"]["toAmountMin"]), self._quote_fee_bps(quote)
         )
         if net_min < int(quote["to_amount_min"]):
             raise RuntimeError(
@@ -274,8 +274,14 @@ class LifiSwapPipeline:
             to_info.chain_id, deposit_tx, received, quote["to_token_id"], pre_internal
         )
 
+    def _quote_fee_bps(self, quote: dict) -> int:
+        # Recovery rebuilds a partial quote without fee columns, and rows
+        # predating them store NULL; both fall back to the global fee.
+        fee_bps = quote.get("fee_bps")
+        return self.settings.fee_bps if fee_bps is None else fee_bps
+
     async def _credit(self, quote: dict, received: int) -> int:
-        credited, _ = calculate_fee(received, self.settings.fee_bps)
+        credited, _ = calculate_fee(received, self._quote_fee_bps(quote))
         await self._lp_transfer(quote["user_address"], quote["to_token_id"], credited)
         return credited
 

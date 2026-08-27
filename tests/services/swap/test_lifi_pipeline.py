@@ -313,3 +313,23 @@ class TestExecutorDispatch:
             result = await executor.execute_swap("q_disp", 5, sig)
         assert result is fake_record
         fake_pipeline.launch.assert_awaited_once()
+
+
+class TestQuoteFeeBps:
+    def test_uses_stored_fee(self, settings):
+        pipeline = _make_pipeline(settings)
+        assert pipeline._quote_fee_bps({"fee_bps": 25}) == 25
+        assert pipeline._quote_fee_bps({"fee_bps": 0}) == 0
+
+    def test_falls_back_to_global_fee(self, settings):
+        pipeline = _make_pipeline(settings)
+        assert pipeline._quote_fee_bps({}) == pipeline.settings.fee_bps
+        assert pipeline._quote_fee_bps({"fee_bps": None}) == pipeline.settings.fee_bps
+
+    async def test_credit_deducts_stored_quote_fee(self, settings):
+        pipeline = _make_pipeline(settings)
+        pipeline._lp_transfer = AsyncMock()
+        quote = {"user_address": "0x" + "ab" * 20, "to_token_id": "0xbbbb", "fee_bps": 100}
+        credited = await pipeline._credit(quote, 10_000)
+        assert credited == 9_900
+        pipeline._lp_transfer.assert_awaited_once_with("0x" + "ab" * 20, "0xbbbb", 9_900)

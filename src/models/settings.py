@@ -24,6 +24,7 @@ class Settings:
 
     quote_ttl: int
     fee_bps: int
+    fee_policies_json: str
     max_swap_amount_usd: int
     lifi_token_map: str
 

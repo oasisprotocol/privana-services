@@ -168,7 +168,7 @@ def test_name(strategy) -> None:
 
 async def test_idle_assets_reports_the_pool_accounting_balance(strategy) -> None:
     # A Midas deposit whose issuance never completed leaves USDC idle in the
-    # pool balance, still backing minted shares; it must count (C-0017).
+    # pool balance, still backing minted shares; it must count.
     with patch.object(strategy, "_read_pool_balance", AsyncMock(return_value=9100)):
         assert await strategy.idle_assets() == 9100
 

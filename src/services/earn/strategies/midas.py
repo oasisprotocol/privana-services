@@ -406,8 +406,8 @@ class MidasStrategy(BaseStrategy):
     async def idle_assets(self) -> int:
         """The pool's accounting balance: deposits whose issuance never
         completed, and redemptions not yet redeployed. Both carry minted
-        shares, so they belong in AUM even though the mTBILL position does not
-        reflect them (EA-Products C-0017)."""
+        shares, so they belong in AUM even though the mTBILL position does
+        not reflect them."""
         return await self._read_pool_balance()
 
     async def is_healthy(self) -> bool:

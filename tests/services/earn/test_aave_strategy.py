@@ -155,7 +155,7 @@ def test_name(strategy) -> None:
 
 async def test_idle_assets_reports_the_pool_accounting_balance(strategy) -> None:
     # Funds credited to the pool but not yet in Aave still back minted shares,
-    # so they must count toward AUM (EA-Products C-0017).
+    # so they must count toward AUM.
     with patch.object(strategy, "_read_pool_balance", AsyncMock(return_value=4200)):
         assert await strategy.idle_assets() == 4200
 

@@ -70,10 +70,7 @@ class BaseStrategy(ABC):
 
         Shares are already minted against these, so leaving them out of AUM
         understates the share-math denominator and lets the next deposit mint
-        against a false low value (EA-Products C-0017). Abstract on purpose: a
-        strategy that holds funds off to one side and silently inherited a
-        zero here is exactly how that hole reopens, so every strategy must
-        state its answer (0 only if it genuinely parks nothing)."""
+        against a false low value."""
 
     @abstractmethod
     async def is_healthy(self) -> bool:

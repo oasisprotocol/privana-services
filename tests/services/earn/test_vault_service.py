@@ -459,7 +459,7 @@ class TestStrategyRouting:
     async def _spy_sync_lock_state(self, service):
         """Replace sync_total_assets with a spy that records whether the LP
         lock was held at each call, so a test can prove the sync is serialized
-        with strategy movement rather than racing it (EA-Products C-0017).
+        with strategy movement rather than racing it.
         Returns a confirmed value so the deposit fail-closed guard passes."""
         held = []
 
@@ -520,7 +520,7 @@ class TestStrategyRouting:
 
     async def test_deposit_refuses_to_mint_when_aum_unconfirmed(self, test_db):
         """Fail closed: if the pool valuation cannot be confirmed, minting
-        against a stale or manipulated denominator is refused (C-0017)."""
+        against a stale or manipulated denominator is refused."""
         from src.services.earn.registry import StrategyRegistry
 
         registry = StrategyRegistry()
@@ -549,7 +549,7 @@ class TestStrategyRouting:
         leaves the reclaimed funds idle. Backing is conserved (Aave + idle ==
         the original total), so the idle-inclusive resync must not push a
         denominator below it. An external-only resync would write the reduced
-        Aave balance and inflate the next deposit (C-0017)."""
+        Aave balance and inflate the next deposit."""
         from src.services.earn.registry import StrategyRegistry
 
         registry = StrategyRegistry()
@@ -625,6 +625,9 @@ class TestStrategyRouting:
         strategy = MagicMock()
         strategy.name = "aave-v3"
         strategy.withdraw_from_earn = AsyncMock(side_effect=RuntimeError("aave rpc down"))
+        strategy.deposit_to_earn = AsyncMock()
+        strategy.total_assets = AsyncMock(return_value=1050)
+        strategy.idle_assets = AsyncMock(return_value=0)
         registry.register(POOL_ID_HEX, strategy)
 
         service, contract, sapphire, _ = _make_service(registry=registry)
@@ -637,10 +640,11 @@ class TestStrategyRouting:
         contract.functions.convertToAssets.return_value.call.return_value = 525
 
         with patch("src.services.earn.vault_service.sign_transfer", return_value="0x" + "bb" * 65):
-            with pytest.raises(RuntimeError, match="aave rpc down"):
+            with pytest.raises(ValueError, match="Withdraw failed"):
                 await service.withdraw(POOL_ID_HEX, USER_ADDRESS, "500", 0, USER_WITHDRAW_SIG)
 
         strategy.withdraw_from_earn.assert_awaited_once()
+        strategy.deposit_to_earn.assert_awaited_once_with(500)
         sapphire.execute_contract_call.assert_not_called()
 
     async def test_withdraw_onchain_revert_resupplies_reclaimed_funds(self, test_db):
@@ -684,11 +688,26 @@ class TestEffectiveTotalAssets:
         strategy = MagicMock()
         strategy.name = "aave-v3"
         strategy.total_assets = AsyncMock(return_value=1100)
+        strategy.idle_assets = AsyncMock(return_value=0)
         registry.register(POOL_ID_HEX, strategy)
 
         service, _, _, _ = _make_service(registry=registry)
 
         assert await service.effective_total_assets(POOL_ID_HEX, 1000) == 1100
+
+    async def test_idle_funds_count_toward_live_aum(self):
+        from src.services.earn.registry import StrategyRegistry
+
+        registry = StrategyRegistry()
+        strategy = MagicMock()
+        strategy.name = "aave-v3"
+        strategy.total_assets = AsyncMock(return_value=1100)
+        strategy.idle_assets = AsyncMock(return_value=200)
+        registry.register(POOL_ID_HEX, strategy)
+
+        service, _, _, _ = _make_service(registry=registry)
+
+        assert await service.effective_total_assets(POOL_ID_HEX, 1000) == 1300
 
     async def test_strategy_failure_falls_back_to_on_chain(self):
         from src.services.earn.registry import StrategyRegistry
@@ -710,6 +729,7 @@ class TestEffectiveTotalAssets:
         strategy = MagicMock()
         strategy.name = "aave-v3"
         strategy.total_assets = AsyncMock(return_value=0)
+        strategy.idle_assets = AsyncMock(return_value=0)
         registry.register(POOL_ID_HEX, strategy)
 
         service, _, _, _ = _make_service(registry=registry)
@@ -836,6 +856,54 @@ class TestSyncTotalAssets:
 
         assert result is None
         sapphire.execute_contract_call.assert_not_called()
+
+    async def test_refuses_a_large_unexplained_drop(self):
+        """A partially credited reclaim reads as a big dip in backing. Writing
+        it would hand the next deposit a false low denominator, so the sync
+        must refuse rather than pass the transient through on-chain."""
+        from src.services.earn.registry import StrategyRegistry
+
+        registry = StrategyRegistry()
+        strategy = MagicMock()
+        strategy.name = "aave-v3"
+        strategy.total_assets = AsyncMock(return_value=800)
+        strategy.idle_assets = AsyncMock(return_value=0)
+        registry.register(POOL_ID_HEX, strategy)
+
+        service, contract, sapphire, _ = _make_service(registry=registry)
+        contract.functions.pools.return_value.call.return_value = (
+            bytes.fromhex(USDC_TOKEN_ID[2:]),
+            POOL_ADDRESS,
+            1000, 1000, True,
+        )
+
+        result = await service.sync_total_assets(POOL_ID_HEX)
+
+        assert result is None
+        sapphire.execute_contract_call.assert_not_called()
+
+    async def test_small_drop_within_tolerance_still_syncs(self):
+        from src.services.earn.registry import StrategyRegistry
+
+        registry = StrategyRegistry()
+        strategy = MagicMock()
+        strategy.name = "aave-v3"
+        strategy.total_assets = AsyncMock(return_value=995)
+        strategy.idle_assets = AsyncMock(return_value=0)
+        registry.register(POOL_ID_HEX, strategy)
+
+        service, contract, sapphire, _ = _make_service(registry=registry)
+        contract.functions.pools.return_value.call.return_value = (
+            bytes.fromhex(USDC_TOKEN_ID[2:]),
+            POOL_ADDRESS,
+            1000, 1000, True,
+        )
+
+        result = await service.sync_total_assets(POOL_ID_HEX)
+
+        assert result == 995
+        call_kwargs = sapphire.execute_contract_call.call_args.kwargs
+        assert call_kwargs["args"][1] == 995
 
     async def test_strategy_read_failure_returns_none(self):
         from src.services.earn.registry import StrategyRegistry

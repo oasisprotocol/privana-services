@@ -38,6 +38,8 @@ EARN_STATUS_FAILED = "failed"
 # operator redeploys it.
 EARN_STATUS_UNDEPLOYED = "undeployed"
 
+SYNC_MAX_DROP_BPS = 100
+
 
 def _exchange_rate(total_assets: int, total_shares: int) -> str:
     if total_shares == 0:
@@ -301,7 +303,7 @@ class VaultService:
             # it as the contract's share-math denominator, so it must not run
             # while another op has assets in flight. Outside the lock a deposit
             # could sync a transient balance mid-reclaim and mint against a
-            # false denominator (EA-Products C-0017).
+            # false denominator.
             #
             # Fail closed: minting divides by this denominator, so a deposit
             # that cannot confirm it is refused rather than priced against a
@@ -438,9 +440,22 @@ class VaultService:
         async with self._lp_tx_lock:
             # Sync inside the lock, before moving any strategy assets, so a
             # concurrent deposit can never sync the transient balance this
-            # reclaim is about to create (EA-Products C-0017).
+            # reclaim is about to create.
             await self.sync_total_assets(pool_id_hex)
-            await self._reclaim_from_strategy(pool_id_hex, int(amount))
+            reclaim_tx_id = str(uuid.uuid4())
+            try:
+                await self._reclaim_from_strategy(pool_id_hex, int(amount))
+            except Exception as exc:
+                # A partial reclaim (redeemed from the protocol but never
+                # credited to the pool) must not escape the lock with the
+                # denominator understated: roll back what moved, restore the
+                # authoritative AUM, then surface the failure.
+                logger.exception("Earn withdraw %s: reclaim failed", reclaim_tx_id)
+                await self._rollback_reclaim(pool_id_hex, int(amount), reclaim_tx_id)
+                await self.sync_total_assets(pool_id_hex)
+                raise ValueError(
+                    f"Withdraw failed: {sanitize_error(str(exc))}"
+                ) from exc
 
             pool_nonce = await self.accounting.get_transfer_nonce(pool["pool_address"])
 
@@ -507,7 +522,7 @@ class VaultService:
                 # rollback puts the assets back in the strategy, but the
                 # contract's totalAssets still reflects the reclaimed-out state
                 # until this resync, and the next op under the lock would
-                # otherwise mint against that false denominator (C-0017).
+                # otherwise mint against that false denominator.
                 await self.sync_total_assets(pool_id_hex)
                 error = sanitize_error(str(exc))
                 self._update_transaction(tx_id, status=EARN_STATUS_FAILED, error=error)
@@ -568,13 +583,15 @@ class VaultService:
             return on_chain_total
         try:
             external = await strategy.total_assets()
+            idle = await strategy.idle_assets()
         except Exception:
             logger.exception(
-                "strategy.total_assets failed pool=%s strategy=%s; falling back to on-chain",
+                "strategy AUM read failed pool=%s strategy=%s; falling back to on-chain",
                 pool_id_hex, strategy.name,
             )
             return on_chain_total
-        return external if external > 0 else on_chain_total
+        total = external + idle
+        return total if total > 0 else on_chain_total
 
     async def strict_total_assets(self, pool_id_hex: str, on_chain_total: int) -> Optional[int]:
         """Every asset the pool's shares are backed by, or None.
@@ -640,10 +657,11 @@ class VaultService:
         awaiting redeploy). Counting only the strategy would understate the
         denominator whenever funds sit idle — including right after a failed
         withdrawal rollback — and let the next deposit mint against a false,
-        low denominator (EA-Products C-0017).
+        low denominator.
 
         None means "could not confirm": the strategy read failed, the sync tx
-        failed, or the reading would zero out a non-zero denominator. Deposit
+        failed, or the reading would lower the denominator by more than
+        SYNC_MAX_DROP_BPS. Deposit
         treats None as fail-closed and refuses to mint; withdraw treats it as
         best-effort, since burning shares on a stale rate cannot inflate the
         pool and users must always be able to exit.
@@ -669,13 +687,18 @@ class VaultService:
         backing = external + idle
         if backing == on_chain:
             return on_chain
-        if backing <= 0 < on_chain:
-            # A zero reading against a non-zero denominator is far more likely
-            # a transient than a real full exit; refuse to zero it out.
+        if backing < on_chain and (on_chain - backing) * 10_000 > on_chain * SYNC_MAX_DROP_BPS:
+            # A large drop is far more likely a transient — funds mid-flight
+            # between the protocol and the pool balance, e.g. a partially
+            # credited reclaim — than a real loss. Writing it would let the
+            # next deposit mint against the dip, so refuse and leave the
+            # denominator where it is; a genuine loss needs an operator sync.
+            # Small drops within SYNC_MAX_DROP_BPS still sync, covering
+            # issuance fees and slippage drift.
             logger.warning(
-                "sync_total_assets read backing=0 against on_chain=%d pool=%s; "
-                "refusing to zero the denominator",
-                on_chain, pool_id_hex,
+                "sync_total_assets read backing=%d against on_chain=%d pool=%s; "
+                "drop exceeds %d bps, refusing to lower the denominator",
+                backing, on_chain, pool_id_hex, SYNC_MAX_DROP_BPS,
             )
             return None
 

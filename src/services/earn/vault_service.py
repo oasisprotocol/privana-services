@@ -294,11 +294,16 @@ class VaultService:
         if not pool["active"]:
             raise ValueError("Pool is not active")
 
-        await self.sync_total_assets(pool_id_hex)
-
         sig_bytes = bytes.fromhex(signature.removeprefix("0x"))
 
         async with self._lp_tx_lock:
+            # Sync under the lock: it reads the strategy's live AUM and writes
+            # it as the contract's share-math denominator, so it must not run
+            # while another op has assets in flight. Outside the lock a deposit
+            # could sync a transient balance mid-reclaim and mint against a
+            # false denominator (EA-Products C-0017).
+            await self.sync_total_assets(pool_id_hex)
+
             tx_id = self._record_transaction(
                 operation=EARN_OP_DEPOSIT,
                 pool_id_hex=pool_id_hex,
@@ -421,9 +426,11 @@ class VaultService:
             raise ValueError("Pool not found")
         # No active check — users must always be able to exit paused pools.
 
-        await self.sync_total_assets(pool_id_hex)
-
         async with self._lp_tx_lock:
+            # Sync inside the lock, before moving any strategy assets, so a
+            # concurrent deposit can never sync the transient balance this
+            # reclaim is about to create (EA-Products C-0017).
+            await self.sync_total_assets(pool_id_hex)
             await self._reclaim_from_strategy(pool_id_hex, int(amount))
 
             pool_nonce = await self.accounting.get_transfer_nonce(pool["pool_address"])
@@ -487,6 +494,12 @@ class VaultService:
             except Exception as exc:
                 logger.exception("Earn withdraw %s failed", tx_id)
                 await self._rollback_reclaim(pool_id_hex, int(amount), tx_id)
+                # Restore the authoritative AUM before the lock releases: the
+                # rollback puts the assets back in the strategy, but the
+                # contract's totalAssets still reflects the reclaimed-out state
+                # until this resync, and the next op under the lock would
+                # otherwise mint against that false denominator (C-0017).
+                await self.sync_total_assets(pool_id_hex)
                 error = sanitize_error(str(exc))
                 self._update_transaction(tx_id, status=EARN_STATUS_FAILED, error=error)
                 return {

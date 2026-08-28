@@ -453,6 +453,66 @@ class TestStrategyRouting:
 
         assert result["status"] == "completed"
 
+    async def _spy_sync_lock_state(self, service):
+        """Replace sync_total_assets with a spy that records whether the LP
+        lock was held at each call, so a test can prove the sync is serialized
+        with strategy movement rather than racing it (EA-Products C-0017)."""
+        held = []
+
+        async def spy(pool_id_hex):
+            held.append(service._lp_tx_lock.locked())
+
+        service.sync_total_assets = spy
+        return held
+
+    async def test_deposit_syncs_under_the_lock(self, test_db):
+        from src.services.earn.registry import StrategyRegistry
+
+        registry = StrategyRegistry()
+        strategy = MagicMock()
+        strategy.name = "aave-v3"
+        strategy.deposit_to_earn = AsyncMock()
+        registry.register(POOL_ID_HEX, strategy)
+
+        service, contract, _, _ = _make_service(registry=registry)
+        contract.functions.pools.return_value.call.return_value = (
+            bytes.fromhex(USDC_TOKEN_ID[2:]),
+            POOL_ADDRESS,
+            1000, 1050, True,
+        )
+        held = await self._spy_sync_lock_state(service)
+
+        await service.deposit(POOL_ID_HEX, USER_ADDRESS, "1000", 5, "0x" + "aa" * 65)
+
+        assert held == [True]
+
+    async def test_failed_withdraw_resyncs_under_the_lock(self, test_db):
+        from src.services.earn.registry import StrategyRegistry
+
+        registry = StrategyRegistry()
+        strategy = MagicMock()
+        strategy.name = "aave-v3"
+        strategy.withdraw_from_earn = AsyncMock()
+        strategy.deposit_to_earn = AsyncMock()
+        registry.register(POOL_ID_HEX, strategy)
+
+        service, contract, sapphire, _ = _make_service(registry=registry)
+        contract.functions.pools.return_value.call.return_value = (
+            bytes.fromhex(USDC_TOKEN_ID[2:]),
+            POOL_ADDRESS,
+            1000, 1050, True,
+        )
+        sapphire.execute_contract_call.side_effect = RuntimeError("InsufficientShares")
+        held = await self._spy_sync_lock_state(service)
+
+        with patch("src.services.earn.vault_service.sign_transfer", return_value="0x" + "bb" * 65):
+            result = await service.withdraw(POOL_ID_HEX, USER_ADDRESS, "500", 0, USER_WITHDRAW_SIG)
+
+        assert result["status"] == "failed"
+        # Once before the reclaim, once after the rollback; both under the lock.
+        assert held == [True, True]
+        strategy.deposit_to_earn.assert_awaited_once_with(500)
+
     async def test_withdraw_reclaims_from_strategy(self, test_db):
         from src.services.earn.registry import StrategyRegistry
 

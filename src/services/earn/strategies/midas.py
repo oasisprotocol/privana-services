@@ -403,6 +403,13 @@ class MidasStrategy(BaseStrategy):
         price, decimals = await asyncio.to_thread(self._read_oracle_price)
         return self.convert_mtbill_to_usdc_amount(mtbill_bal, price, decimals)
 
+    async def idle_assets(self) -> int:
+        """The pool's accounting balance: deposits whose issuance never
+        completed, and redemptions not yet redeployed. Both carry minted
+        shares, so they belong in AUM even though the mTBILL position does not
+        reflect them (EA-Products C-0017)."""
+        return await self._read_pool_balance()
+
     async def is_healthy(self) -> bool:
         """Refuses routing when:
           1. The Issuance Vault is paused.

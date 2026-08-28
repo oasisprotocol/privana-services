@@ -302,7 +302,16 @@ class VaultService:
             # while another op has assets in flight. Outside the lock a deposit
             # could sync a transient balance mid-reclaim and mint against a
             # false denominator (EA-Products C-0017).
-            await self.sync_total_assets(pool_id_hex)
+            #
+            # Fail closed: minting divides by this denominator, so a deposit
+            # that cannot confirm it is refused rather than priced against a
+            # stale or manipulated value. Withdraw, which burns rather than
+            # mints, stays best-effort.
+            if await self.sync_total_assets(pool_id_hex) is None:
+                raise ValueError(
+                    "Pool valuation could not be confirmed; deposit refused. "
+                    "Retry shortly."
+                )
 
             tx_id = self._record_transaction(
                 operation=EARN_OP_DEPOSIT,
@@ -622,34 +631,53 @@ class VaultService:
         return assets, int(before["total_shares"])
 
     async def sync_total_assets(self, pool_id_hex: str) -> Optional[int]:
-        """Push the strategy's live AUM into EarnManager.totalAssets so
-        share math reflects accrued yield.
+        """Confirm EarnManager.totalAssets equals every asset backing the
+        pool's shares, syncing it on-chain if not, and return that confirmed
+        value — or None if it could not be established.
 
-        No-ops for manual pools (no external capital) and when the strategy
-        already matches on-chain. Best-effort: a failed sync logs and
-        returns None instead of raising, so deposit and withdraw paths can
-        still proceed against a slightly stale exchange rate. Calls
-        `EarnManager.syncTotalAssets(poolId, newTotalAssets)` on Sapphire.
+        Backing is strategy assets PLUS idle assets (funds credited to the
+        pool but not yet deployed, e.g. an undeployed deposit or a reclaim
+        awaiting redeploy). Counting only the strategy would understate the
+        denominator whenever funds sit idle — including right after a failed
+        withdrawal rollback — and let the next deposit mint against a false,
+        low denominator (EA-Products C-0017).
+
+        None means "could not confirm": the strategy read failed, the sync tx
+        failed, or the reading would zero out a non-zero denominator. Deposit
+        treats None as fail-closed and refuses to mint; withdraw treats it as
+        best-effort, since burning shares on a stale rate cannot inflate the
+        pool and users must always be able to exit.
         """
         strategy = self._registry.get(pool_id_hex)
-        if strategy.name == "manual":
-            return None
-
         pool_id = bytes.fromhex(pool_id_hex.removeprefix("0x"))
+        on_chain = self.get_pool(pool_id)["total_assets"]
+        # Manual pools hold no external capital, so on-chain totalAssets is
+        # already authoritative — nothing to read or write.
+        if strategy.name == "manual":
+            return on_chain
+
         try:
             external = await strategy.total_assets()
+            idle = await strategy.idle_assets()
         except Exception:
             logger.exception(
                 "sync_total_assets read failed pool=%s strategy=%s",
                 pool_id_hex, strategy.name,
             )
             return None
-        if external <= 0:
-            return None
 
-        on_chain = self.get_pool(pool_id)["total_assets"]
-        if external == on_chain:
+        backing = external + idle
+        if backing == on_chain:
             return on_chain
+        if backing <= 0 < on_chain:
+            # A zero reading against a non-zero denominator is far more likely
+            # a transient than a real full exit; refuse to zero it out.
+            logger.warning(
+                "sync_total_assets read backing=0 against on_chain=%d pool=%s; "
+                "refusing to zero the denominator",
+                on_chain, pool_id_hex,
+            )
+            return None
 
         try:
             await asyncio.to_thread(
@@ -657,19 +685,19 @@ class VaultService:
                 contract_address=self.contract_address,
                 abi=EARN_MANAGER_ABI,
                 function_name="syncTotalAssets",
-                args=[pool_id, external],
+                args=[pool_id, backing],
             )
         except Exception:
             logger.exception(
                 "syncTotalAssets tx failed pool=%s old=%d new=%d",
-                pool_id_hex, on_chain, external,
+                pool_id_hex, on_chain, backing,
             )
             return None
         logger.info(
             "syncTotalAssets succeeded pool=%s old=%d new=%d",
-            pool_id_hex, on_chain, external,
+            pool_id_hex, on_chain, backing,
         )
-        return external
+        return backing
 
     def _record_transaction(
         self,

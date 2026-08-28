@@ -63,15 +63,17 @@ class BaseStrategy(ABC):
         externally (e.g. manual).
         """
 
+    @abstractmethod
     async def idle_assets(self) -> int:
         """Pool funds credited to the pool but not deployed to the external
         protocol: an undeployed deposit, or a reclaim awaiting redeploy.
 
-        Shares were already minted against these, so leaving them out of AUM
-        understates the rate and shows a loss that never happened. Defaults to
-        0 for strategies that hold nothing off to one side.
-        """
-        return 0
+        Shares are already minted against these, so leaving them out of AUM
+        understates the share-math denominator and lets the next deposit mint
+        against a false low value (EA-Products C-0017). Abstract on purpose: a
+        strategy that holds funds off to one side and silently inherited a
+        zero here is exactly how that hole reopens, so every strategy must
+        state its answer (0 only if it genuinely parks nothing)."""
 
     @abstractmethod
     async def is_healthy(self) -> bool:

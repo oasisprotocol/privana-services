@@ -153,6 +153,13 @@ def test_name(strategy) -> None:
     assert strategy.name == "aave-v3"
 
 
+async def test_idle_assets_reports_the_pool_accounting_balance(strategy) -> None:
+    # Funds credited to the pool but not yet in Aave still back minted shares,
+    # so they must count toward AUM (EA-Products C-0017).
+    with patch.object(strategy, "_read_pool_balance", AsyncMock(return_value=4200)):
+        assert await strategy.idle_assets() == 4200
+
+
 def test_asset_address_is_retained(strategy) -> None:
     assert strategy.asset_address == ASSET_ADDRESS
 

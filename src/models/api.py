@@ -25,6 +25,7 @@ class QuoteResponse(BaseModel):
     to_amount_min: str
     fee_bps: int
     fee_amount: str
+    fee_policy_id: Optional[str] = None
     tool_used: Optional[str] = None
     liquidity_provider: str
     transfer_nonce: int

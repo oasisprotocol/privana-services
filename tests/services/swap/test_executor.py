@@ -420,3 +420,67 @@ class TestExecuteSwap:
 
         assert len(nonce_call_times) == 2
         assert abs(nonce_call_times[1] - nonce_call_times[0]) >= 0.04
+
+
+class TestExpiryBoundary:
+    def test_quote_at_exact_expiry_raises(self, test_db, settings, insert_quote):
+        insert_quote("q_boundary", expires_at=int(time.time()))
+        executor = _make_executor(settings)
+        with pytest.raises(ValueError, match="Quote has expired"):
+            executor._validate_quote("q_boundary")
+
+
+class TestZeroFeeExecution:
+    @pytest.fixture
+    def input_signature(self, settings):
+        return sign_transfer(
+            private_key=USER_SK,
+            chain_id=settings.accounting_chain_id,
+            verifying_contract=settings.accounting_contract_address,
+            to_address=settings.liquidity_provider_address,
+            token_id="0xaaaa",
+            amount=1000000,
+            nonce=0,
+        )
+
+    def _zero_fee_quote(self, insert_quote, quote_id):
+        gross = "45000000000000000"
+        insert_quote(
+            quote_id,
+            user_address=USER_ADDRESS.lower(),
+            from_token_id="0xaaaa",
+            to_token_id="0xbbbb",
+            from_amount="1000000",
+            to_amount_gross=gross,
+            to_amount_estimate=gross,
+            to_amount_min=gross,
+            route_tool="okx",
+            fee_bps=0,
+            fee_amount="0",
+        )
+        return int(gross)
+
+    async def test_zero_fee_quote_executes_when_lp_covers_gross(
+        self, test_db, settings, insert_quote, input_signature
+    ):
+        gross = self._zero_fee_quote(insert_quote, "q_zero_fee")
+        executor = _make_executor(settings)
+        executor.accounting.get_lp_balance = AsyncMock(
+            return_value=Balance(user_address="0xlp", token_id="0xbbbb", balance=str(gross))
+        )
+        result = await executor.execute_swap("q_zero_fee", 0, input_signature)
+        assert result.status == SwapStatus.COMPLETED.value
+        assert result.to_amount_estimate == str(gross)
+
+    async def test_zero_fee_quote_rejected_when_lp_below_gross(
+        self, test_db, settings, insert_quote, input_signature
+    ):
+        gross = self._zero_fee_quote(insert_quote, "q_zero_fee_short")
+        executor = _make_executor(settings)
+        executor.accounting.get_lp_balance = AsyncMock(
+            return_value=Balance(
+                user_address="0xlp", token_id="0xbbbb", balance=str(gross - 1)
+            )
+        )
+        with pytest.raises(ValueError, match="Insufficient liquidity"):
+            await executor.execute_swap("q_zero_fee_short", 0, input_signature)

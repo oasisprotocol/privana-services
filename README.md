@@ -57,6 +57,14 @@ cp .env.localnet .env
 
 ## Deployed Addresses
 
+### Sapphire (chainId 23294)
+
+| Contract | Address |
+|----------|---------|
+| SwapManager | `0x2fE030BcD7aaB3C65fcF8Bd6702BB73b82e0BC63` |
+| EarnManager | `0xB6969826E642E1E53024E65b2A99A0a93984F2aE` |
+| Accounting (proxy) | `0x5f16C90a0F410AE4Cdb76d9964f5FFDDeE305876` |
+
 ### Sapphire Testnet (chainId 23295)
 
 | Contract | Address |

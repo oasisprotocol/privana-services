@@ -1,5 +1,5 @@
 name: privana-services
-version: 0.1.0
+version: 0.1.1
 tee: tdx
 kind: container
 resources:
@@ -44,6 +44,10 @@ deployments:
     network: mainnet
     paratime: sapphire
     admin: privana_mainnet_bootstrap
+    oci_repository: rofl.sh/122faf04-3137-479b-8484-22e42503c845:1787841446
+    artifacts:
+      container:
+        compose: compose.mainnet.yaml
     trust_root:
       height: 31507938
       hash: 190345a5dfea60eff6f5f5d179865cd5935db154389b1acd8ee362736f13a85a
@@ -53,11 +57,23 @@ deployments:
           tcb_validity_period: 30
           min_tcb_evaluation_data_number: 18
           tdx: {}
-      enclaves: []
+      enclaves:
+        - id: /kFAr7L4FY3m6dxCXtC1A4q6gotSgxuVd2AqXKCM6/cAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
+        - id: iVDu/qjNrwngHNA70vCEXlXe1uhi2OtiTEdo0FyCaowAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
       endorsements:
         - any: {}
       fees: endorsing_node
       max_expiration: 3
+    secrets:
+      - name: LIQUIDITY_PROVIDER_SECRET_KEY
+        value: pGJwa1ggh6fiMzshzjBAEFHyCz+7e79U+jSXFXLxR3QOxsm4aCxkbmFtZVgt8cK9Dq/uIOKTahzuUCkcRoWAdVPR2TpQxZ6AYqH6dKx79F8RHvxgDEdQt6PNZW5vbmNlT2ESVl7amg5Jd9LD5g7T62V2YWx1ZVhSZPYN3L8A4YchXpCz/plNg9uwmlLnCRzUxrGIKyXcmSmU7XDMv0UDEmwbUcGGqg36h+Vy+BO3ZGGjLId5iI9wcOlq9gT8AjhjQ010TtP79utpvQ==
+      - name: LIFI_API_KEY
+        value: pGJwa1gg5FzX/+hc/r/JaOiLEgeTfCfQZs6fV68854SfhlzJZFlkbmFtZVgc4JFhLow3YXhKxuDs9GH2FOvVc8ANXF2ogC216mVub25jZU/R+1NM8D7QsZleCLy8WjdldmFsdWVYWciv7Ci/zOsriI14YOoHRhXD1qYKMllHDc89Ag7dQ67FoeSArCF964ezk2h7pP56fp/SQTzbPoDTFOITIPUB51WjlAz18ISShvp12iniWPoxOX4AhJRGfcyE
+    machines:
+      default:
+        provider: oasis1qzc8pldvm8vm3duvdrj63wgvkw34y9ucfcxzetqr
+        offer: internal_large
+        id: "0000000000000113"
   testnet:
     default: true
     app_id: rofl1qr38yckt9s7rzuadyzg0mu04jtctusftcy6t7rpy

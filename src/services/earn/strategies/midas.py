@@ -46,6 +46,12 @@ _USDC_DECIMALS = 6
 _MTBILL_DECIMALS = 18
 _DECIMAL_BALANCE = _MTBILL_DECIMALS - _USDC_DECIMALS
 
+# Midas vaults denominate every amountToken / minReceiveAmount argument in
+# base-18 units regardless of the token's own decimals. Token-native amounts
+# (USDC base units here) must be scaled up before crossing that boundary;
+# ERC20 approvals stay in token-native units.
+_BASE18_SCALE = 10 ** _DECIMAL_BALANCE
+
 
 class MidasInstantUnavailableError(RuntimeError):
     """Raised when `redeemInstant` reverts. The likely causes are the daily
@@ -242,9 +248,9 @@ class MidasStrategy(BaseStrategy):
           2. Approve the Issuance Vault if allowance is short.
           3. Price the deposit: read oracle, compute expected mTBILL out,
              apply slippage tolerance to derive min_receive_amount.
-          4. depositInstant(USDC, amount, min_receive, referrerId=0). mTBILL
-             is minted to the LP EOA on success; vault sweeps USDC to its
-             configured tokensReceiver atomically.
+          4. depositInstant(USDC, amount in base-18, min_receive,
+             referrerId=0). mTBILL is minted to the LP EOA on success; vault
+             sweeps USDC to its configured tokensReceiver atomically.
         """
         if amount <= 0:
             raise ValueError(f"deposit_to_earn requires a positive amount, got {amount}")
@@ -275,7 +281,7 @@ class MidasStrategy(BaseStrategy):
         tx_hash = await asyncio.to_thread(
             self._client.deposit_instant,
             self._asset_address,
-            amount,
+            amount * _BASE18_SCALE,
             min_receive,
         )
         logger.info(
@@ -293,7 +299,8 @@ class MidasStrategy(BaseStrategy):
           1. Snapshot the pool's accounting balance (for the credit poll).
           2. Read oracle and the redemption-side instantFee. Compute the
              mTBILL amount to redeem, including a fee-rate buffer so that
-             post-fee USDC out >= target. Compute min_receive_usdc.
+             post-fee USDC out >= target. Compute min_receive_usdc in
+             base-18. Top up the vault's mTBILL allowance if short.
           3. redeemInstant(USDC, mtbill_in, min_receive_usdc). On revert
              (daily limit, swapper out of liquidity, paused) raise
              MidasInstantUnavailableError; the API layer surfaces this as
@@ -314,7 +321,27 @@ class MidasStrategy(BaseStrategy):
         fee_bps = await asyncio.to_thread(self._client.get_redemption_instant_fee_bps)
         baseline_mtbill = self.convert_usdc_to_mtbill_amount(amount, price, decimals)
         mtbill_to_redeem = baseline_mtbill * (10_000 + fee_bps) // 10_000
-        min_receive_usdc = amount * (10_000 - self._slippage_bps) // 10_000
+        min_receive_usdc = (
+            amount * (10_000 - self._slippage_bps) // 10_000 * _BASE18_SCALE
+        )
+
+        mtbill_allowance = await asyncio.to_thread(
+            self._client.get_allowance,
+            self._client.mtbill_address,
+            self._client.redemption_vault_address,
+        )
+        if mtbill_allowance < mtbill_to_redeem:
+            logger.info(
+                "MidasStrategy.withdraw_from_earn: topping up mTBILL allowance "
+                "current=%d needed=%d",
+                mtbill_allowance, mtbill_to_redeem,
+            )
+            await asyncio.to_thread(
+                self._client.approve,
+                self._client.mtbill_address,
+                self._client.redemption_vault_address,
+                mtbill_to_redeem,
+            )
 
         lp_usdc_before = await asyncio.to_thread(
             self._client.get_erc20_balance, self._asset_address,

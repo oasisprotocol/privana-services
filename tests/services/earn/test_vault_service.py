@@ -322,6 +322,7 @@ class TestStrategyRouting:
         registry = StrategyRegistry()
         strategy = MagicMock()
         strategy.name = "aave-v3"
+        strategy.is_healthy = AsyncMock(return_value=True)
         strategy.deposit_to_earn = AsyncMock()
         strategy.total_assets = AsyncMock(return_value=1050)
         strategy.idle_assets = AsyncMock(return_value=0)
@@ -348,6 +349,7 @@ class TestStrategyRouting:
         registry = StrategyRegistry()
         strategy = MagicMock()
         strategy.name = "aave-v3"
+        strategy.is_healthy = AsyncMock(return_value=True)
         strategy.deposit_to_earn = AsyncMock(side_effect=RuntimeError("aave rpc down"))
         strategy.total_assets = AsyncMock(return_value=1050)
         strategy.idle_assets = AsyncMock(return_value=0)
@@ -385,6 +387,7 @@ class TestStrategyRouting:
         registry = StrategyRegistry()
         strategy = MagicMock()
         strategy.name = "aave-v3"
+        strategy.is_healthy = AsyncMock(return_value=True)
         strategy.total_assets = AsyncMock(return_value=1800)
         strategy.idle_assets = AsyncMock(return_value=200)
         registry.register(POOL_ID_HEX, strategy)
@@ -410,6 +413,7 @@ class TestStrategyRouting:
         registry = StrategyRegistry()
         strategy = MagicMock()
         strategy.name = "aave-v3"
+        strategy.is_healthy = AsyncMock(return_value=True)
         strategy.total_assets = AsyncMock(return_value=2000)
         strategy.idle_assets = AsyncMock(return_value=0)
         registry.register(POOL_ID_HEX, strategy)
@@ -428,6 +432,7 @@ class TestStrategyRouting:
         registry = StrategyRegistry()
         strategy = MagicMock()
         strategy.name = "aave-v3"
+        strategy.is_healthy = AsyncMock(return_value=True)
         strategy.total_assets = AsyncMock(side_effect=RuntimeError("rpc down"))
         strategy.idle_assets = AsyncMock(return_value=0)
         registry.register(POOL_ID_HEX, strategy)
@@ -476,6 +481,7 @@ class TestStrategyRouting:
         registry = StrategyRegistry()
         strategy = MagicMock()
         strategy.name = "aave-v3"
+        strategy.is_healthy = AsyncMock(return_value=True)
         strategy.deposit_to_earn = AsyncMock()
         registry.register(POOL_ID_HEX, strategy)
 
@@ -497,6 +503,7 @@ class TestStrategyRouting:
         registry = StrategyRegistry()
         strategy = MagicMock()
         strategy.name = "aave-v3"
+        strategy.is_healthy = AsyncMock(return_value=True)
         strategy.withdraw_from_earn = AsyncMock()
         strategy.deposit_to_earn = AsyncMock()
         registry.register(POOL_ID_HEX, strategy)
@@ -518,6 +525,30 @@ class TestStrategyRouting:
         assert held == [True, True]
         strategy.deposit_to_earn.assert_awaited_once_with(500)
 
+    async def test_deposit_refuses_when_strategy_unhealthy(self, test_db):
+        from src.services.earn.registry import StrategyRegistry
+
+        registry = StrategyRegistry()
+        strategy = MagicMock()
+        strategy.name = "aave-v3"
+        strategy.is_healthy = AsyncMock(return_value=False)
+        strategy.deposit_to_earn = AsyncMock()
+        registry.register(POOL_ID_HEX, strategy)
+
+        service, contract, sapphire, _ = _make_service(registry=registry)
+        contract.functions.pools.return_value.call.return_value = (
+            bytes.fromhex(USDC_TOKEN_ID[2:]),
+            POOL_ADDRESS,
+            1000, 1050, True,
+        )
+
+        with pytest.raises(ValueError, match="unhealthy"):
+            await service.deposit(POOL_ID_HEX, USER_ADDRESS, "1000", 5, "0x" + "aa" * 65)
+
+        sapphire.execute_contract_call.assert_not_called()
+        strategy.deposit_to_earn.assert_not_awaited()
+        assert test_db.execute("SELECT COUNT(*) c FROM earn_transactions").fetchone()["c"] == 0
+
     async def test_deposit_refuses_to_mint_when_aum_unconfirmed(self, test_db):
         """Fail closed: if the pool valuation cannot be confirmed, minting
         against a stale or manipulated denominator is refused."""
@@ -526,6 +557,7 @@ class TestStrategyRouting:
         registry = StrategyRegistry()
         strategy = MagicMock()
         strategy.name = "aave-v3"
+        strategy.is_healthy = AsyncMock(return_value=True)
         strategy.deposit_to_earn = AsyncMock()
         strategy.total_assets = AsyncMock(side_effect=RuntimeError("base rpc down"))
         strategy.idle_assets = AsyncMock(return_value=0)
@@ -555,6 +587,7 @@ class TestStrategyRouting:
         registry = StrategyRegistry()
         strategy = MagicMock()
         strategy.name = "aave-v3"
+        strategy.is_healthy = AsyncMock(return_value=True)
         strategy.withdraw_from_earn = AsyncMock()
         # Rollback re-supply fails, so the reclaimed funds stay idle.
         strategy.deposit_to_earn = AsyncMock(side_effect=RuntimeError("rollback failed"))
@@ -598,6 +631,7 @@ class TestStrategyRouting:
         registry = StrategyRegistry()
         strategy = MagicMock()
         strategy.name = "aave-v3"
+        strategy.is_healthy = AsyncMock(return_value=True)
         strategy.withdraw_from_earn = AsyncMock()
         strategy.total_assets = AsyncMock(return_value=1050)
         strategy.idle_assets = AsyncMock(return_value=0)
@@ -624,6 +658,7 @@ class TestStrategyRouting:
         registry = StrategyRegistry()
         strategy = MagicMock()
         strategy.name = "aave-v3"
+        strategy.is_healthy = AsyncMock(return_value=True)
         strategy.withdraw_from_earn = AsyncMock(side_effect=RuntimeError("aave rpc down"))
         strategy.deposit_to_earn = AsyncMock()
         strategy.total_assets = AsyncMock(return_value=1050)
@@ -653,6 +688,7 @@ class TestStrategyRouting:
         registry = StrategyRegistry()
         strategy = MagicMock()
         strategy.name = "aave-v3"
+        strategy.is_healthy = AsyncMock(return_value=True)
         strategy.withdraw_from_earn = AsyncMock()
         strategy.deposit_to_earn = AsyncMock()
         registry.register(POOL_ID_HEX, strategy)
@@ -687,6 +723,7 @@ class TestEffectiveTotalAssets:
         registry = StrategyRegistry()
         strategy = MagicMock()
         strategy.name = "aave-v3"
+        strategy.is_healthy = AsyncMock(return_value=True)
         strategy.total_assets = AsyncMock(return_value=1100)
         strategy.idle_assets = AsyncMock(return_value=0)
         registry.register(POOL_ID_HEX, strategy)
@@ -701,6 +738,7 @@ class TestEffectiveTotalAssets:
         registry = StrategyRegistry()
         strategy = MagicMock()
         strategy.name = "aave-v3"
+        strategy.is_healthy = AsyncMock(return_value=True)
         strategy.total_assets = AsyncMock(return_value=1100)
         strategy.idle_assets = AsyncMock(return_value=200)
         registry.register(POOL_ID_HEX, strategy)
@@ -715,6 +753,7 @@ class TestEffectiveTotalAssets:
         registry = StrategyRegistry()
         strategy = MagicMock()
         strategy.name = "aave-v3"
+        strategy.is_healthy = AsyncMock(return_value=True)
         strategy.total_assets = AsyncMock(side_effect=RuntimeError("rpc down"))
         registry.register(POOL_ID_HEX, strategy)
 
@@ -728,6 +767,7 @@ class TestEffectiveTotalAssets:
         registry = StrategyRegistry()
         strategy = MagicMock()
         strategy.name = "aave-v3"
+        strategy.is_healthy = AsyncMock(return_value=True)
         strategy.total_assets = AsyncMock(return_value=0)
         strategy.idle_assets = AsyncMock(return_value=0)
         registry.register(POOL_ID_HEX, strategy)
@@ -749,6 +789,7 @@ class TestStrategyApyBpsSafe:
         registry = StrategyRegistry()
         strategy = MagicMock()
         strategy.name = "aave-v3"
+        strategy.is_healthy = AsyncMock(return_value=True)
         strategy.get_apy_bps = AsyncMock(return_value=487)
         registry.register(POOL_ID_HEX, strategy)
 
@@ -762,6 +803,7 @@ class TestStrategyApyBpsSafe:
         registry = StrategyRegistry()
         strategy = MagicMock()
         strategy.name = "aave-v3"
+        strategy.is_healthy = AsyncMock(return_value=True)
         strategy.get_apy_bps = AsyncMock(side_effect=RuntimeError("rpc down"))
         registry.register(POOL_ID_HEX, strategy)
 
@@ -792,6 +834,7 @@ class TestSyncTotalAssets:
         registry = StrategyRegistry()
         strategy = MagicMock()
         strategy.name = "aave-v3"
+        strategy.is_healthy = AsyncMock(return_value=True)
         strategy.total_assets = AsyncMock(return_value=1400)
         strategy.idle_assets = AsyncMock(return_value=100)
         registry.register(POOL_ID_HEX, strategy)
@@ -815,6 +858,7 @@ class TestSyncTotalAssets:
         registry = StrategyRegistry()
         strategy = MagicMock()
         strategy.name = "aave-v3"
+        strategy.is_healthy = AsyncMock(return_value=True)
         strategy.total_assets = AsyncMock(return_value=1700)
         strategy.idle_assets = AsyncMock(return_value=200)
         registry.register(POOL_ID_HEX, strategy)
@@ -841,6 +885,7 @@ class TestSyncTotalAssets:
         registry = StrategyRegistry()
         strategy = MagicMock()
         strategy.name = "aave-v3"
+        strategy.is_healthy = AsyncMock(return_value=True)
         strategy.total_assets = AsyncMock(return_value=0)
         strategy.idle_assets = AsyncMock(return_value=0)
         registry.register(POOL_ID_HEX, strategy)
@@ -866,6 +911,7 @@ class TestSyncTotalAssets:
         registry = StrategyRegistry()
         strategy = MagicMock()
         strategy.name = "aave-v3"
+        strategy.is_healthy = AsyncMock(return_value=True)
         strategy.total_assets = AsyncMock(return_value=800)
         strategy.idle_assets = AsyncMock(return_value=0)
         registry.register(POOL_ID_HEX, strategy)
@@ -888,6 +934,7 @@ class TestSyncTotalAssets:
         registry = StrategyRegistry()
         strategy = MagicMock()
         strategy.name = "aave-v3"
+        strategy.is_healthy = AsyncMock(return_value=True)
         strategy.total_assets = AsyncMock(return_value=995)
         strategy.idle_assets = AsyncMock(return_value=0)
         registry.register(POOL_ID_HEX, strategy)
@@ -911,6 +958,7 @@ class TestSyncTotalAssets:
         registry = StrategyRegistry()
         strategy = MagicMock()
         strategy.name = "aave-v3"
+        strategy.is_healthy = AsyncMock(return_value=True)
         strategy.total_assets = AsyncMock(side_effect=RuntimeError("rpc down"))
         registry.register(POOL_ID_HEX, strategy)
 
@@ -927,6 +975,7 @@ class TestSyncTotalAssets:
         registry = StrategyRegistry()
         strategy = MagicMock()
         strategy.name = "aave-v3"
+        strategy.is_healthy = AsyncMock(return_value=True)
         strategy.total_assets = AsyncMock(return_value=1700)
         registry.register(POOL_ID_HEX, strategy)
 
@@ -948,6 +997,7 @@ class TestSyncTotalAssets:
         registry = StrategyRegistry()
         strategy = MagicMock()
         strategy.name = "aave-v3"
+        strategy.is_healthy = AsyncMock(return_value=True)
         strategy.total_assets = AsyncMock(return_value=0)
         registry.register(POOL_ID_HEX, strategy)
 
@@ -966,6 +1016,7 @@ class TestLiveAUMInResponses:
         registry = StrategyRegistry()
         strategy = MagicMock()
         strategy.name = "aave-v3"
+        strategy.is_healthy = AsyncMock(return_value=True)
         strategy.total_assets = AsyncMock(return_value=1100)
         registry.register(POOL_ID_HEX, strategy)
 
@@ -986,6 +1037,7 @@ class TestLiveAUMInResponses:
         registry = StrategyRegistry()
         strategy = MagicMock()
         strategy.name = "aave-v3"
+        strategy.is_healthy = AsyncMock(return_value=True)
         strategy.total_assets = AsyncMock(return_value=1200)
         strategy.idle_assets = AsyncMock(return_value=0)
         registry.register(POOL_ID_HEX, strategy)

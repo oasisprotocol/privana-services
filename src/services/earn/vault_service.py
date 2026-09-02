@@ -296,6 +296,16 @@ class VaultService:
         if not pool["active"]:
             raise ValueError("Pool is not active")
 
+        # Probe before minting anything: a paused vault or stale oracle means
+        # the routing step is guaranteed to fail, and refusing here keeps the
+        # user's funds in their balance instead of minting shares that land
+        # undeployed. Withdraw stays ungated — exits must not depend on the
+        # external protocol looking healthy.
+        if not await self._registry.get(pool_id_hex).is_healthy():
+            raise ValueError(
+                "Pool strategy is unhealthy; deposits are temporarily refused"
+            )
+
         sig_bytes = bytes.fromhex(signature.removeprefix("0x"))
 
         async with self._lp_tx_lock:

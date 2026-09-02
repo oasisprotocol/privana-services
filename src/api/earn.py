@@ -30,6 +30,25 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1/earn", tags=["Earn"])
 
+_POOL_ID_HEX_LEN = 64
+
+
+def _pool_id_bytes(pool_id: str) -> bytes:
+    """Parse a path/query pool id into its 32 raw bytes, rejecting malformed
+    input with a clean 400 instead of leaking a parser error or letting a
+    wrong-length value reach the contract layer as a 500.
+    """
+    stripped = pool_id.removeprefix("0x")
+    try:
+        raw = bytes.fromhex(stripped)
+    except ValueError:
+        raw = b""
+    if len(stripped) != _POOL_ID_HEX_LEN or len(raw) != 32:
+        raise HTTPException(
+            status_code=400, detail="pool_id must be a 32-byte hex value"
+        )
+    return raw
+
 
 async def _private_read_identity(request: Request) -> tuple[str, Optional[str]]:
     """SIWE read token plus the caller's address where it is knowable.
@@ -100,9 +119,9 @@ async def list_pools() -> PoolListResponse:
 
 @router.get("/pools/{pool_id}", response_model=PoolDetailResponse)
 async def get_pool(pool_id: str) -> PoolDetailResponse:
+    pool_id_bytes = _pool_id_bytes(pool_id)
     try:
         service = get_vault_service()
-        pool_id_bytes = bytes.fromhex(pool_id.removeprefix("0x"))
         p = await asyncio.to_thread(service.get_pool, pool_id_bytes)
         if p["pool_address"] == "0x0000000000000000000000000000000000000000":
             raise ValueError("Pool not found")
@@ -147,6 +166,7 @@ async def get_pool_apy_history(
     upstream — the history is decoration on a pool that works either way, so it
     degrades to empty rather than failing the request.
     """
+    _pool_id_bytes(pool_id)
     service = get_vault_service()
     points = await service.strategy_apy_history_safe(pool_id, days)
     return ApyHistoryResponse(
@@ -161,6 +181,7 @@ async def get_deposit_quote(
     amount: str = Query(..., description="Amount in base units"),
     user_address: str = Query(..., description="User wallet address"),
 ) -> DepositQuoteResponse:
+    _pool_id_bytes(pool_id)
     try:
         service = get_vault_service()
         quote = await service.get_deposit_quote(pool_id, amount, user_address)
@@ -174,6 +195,7 @@ async def get_deposit_quote(
 
 @router.post("/deposit", response_model=DepositResponse)
 async def deposit(payload: DepositRequest) -> DepositResponse:
+    _pool_id_bytes(payload.pool_id)
     try:
         service = get_vault_service()
         result = await service.deposit(
@@ -192,6 +214,7 @@ async def deposit(payload: DepositRequest) -> DepositResponse:
 
 @router.post("/withdraw", response_model=WithdrawResponse)
 async def withdraw(payload: WithdrawRequest) -> WithdrawResponse:
+    _pool_id_bytes(payload.pool_id)
     try:
         service = get_vault_service()
         result = await service.withdraw(

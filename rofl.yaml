@@ -1,5 +1,5 @@
 name: privana-services
-version: 0.1.1
+version: 0.1.2
 tee: tdx
 kind: container
 resources:
@@ -58,8 +58,8 @@ deployments:
           min_tcb_evaluation_data_number: 18
           tdx: {}
       enclaves:
-        - id: /kFAr7L4FY3m6dxCXtC1A4q6gotSgxuVd2AqXKCM6/cAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
-        - id: iVDu/qjNrwngHNA70vCEXlXe1uhi2OtiTEdo0FyCaowAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
+        - id: ul0HKKz5C0Do5uHf/6wBIi8OX8E5PkN/YsK12n/ckJAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
+        - id: piEAsiFGaN74Amaacl9BFBQvh7nxTsx/n1MfTm75Z3cAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
       endorsements:
         - any: {}
       fees: endorsing_node
@@ -94,8 +94,8 @@ deployments:
           min_tcb_evaluation_data_number: 18
           tdx: {}
       enclaves:
-        - id: OBwkuyQDbEf5M4rOgliy9xlN3HdCHCupr6Q7TES2tt0AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
-        - id: 1kVtRgwKUQafLZJ3RgtH3cvcrmXspce8LgipLCXcKD0AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
+        - id: 6OLdxEOd6jlXbHeINU+UOCk0nlyRBBh0yqXrYn3w7DYAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
+        - id: 5g72m69eHfEMYHLZmrB7gBGARmS/B79s3OuZgyCKRaQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
       endorsements:
         - any: {}
       fees: endorsing_node
@@ -111,4 +111,4 @@ deployments:
         offer: playground_internal_m
         id: 000000000000062d
 tooling:
-  version: 0.19.1
+  version: 0.20.0

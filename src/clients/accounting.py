@@ -47,7 +47,7 @@ async def _request_with_retry(client: httpx.AsyncClient, method: str, url: str, 
             response = await client.request(method, url, **kwargs)
             response.raise_for_status()
             return response
-        except (httpx.ConnectError, httpx.ReadError, httpx.RemoteProtocolError) as exc:
+        except (httpx.ConnectError, httpx.ReadError, httpx.RemoteProtocolError, httpx.TimeoutException) as exc:
             if attempt == MAX_RETRIES - 1:
                 raise
             logger.warning(f"Accounting API request failed (attempt {attempt + 1}), retrying: {exc}")

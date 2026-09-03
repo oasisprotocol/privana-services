@@ -174,9 +174,28 @@ bun install
 bun run test
 ```
 
-Pool registration script (one-shot, calls `EarnManager.createPool` against the deployed manager — already executed on Sapphire testnet):
+Deployment and management are exposed as Hardhat tasks (run `bun run hardhat` for the full list). Common ones:
 
 ```bash
 cd solidity
-bun run hardhat run scripts/create-aave-usdc-pool.ts --network sapphire-localnet
+
+# Deploy both managers
+bun run hardhat deploy  --accounting-address <addr> --pool-admin-address <addr> --lp-address <addr> --network sapphire-testnet
+
+# Upgrade both managers (skips the upgrade when the on-chain VERSION already matches)
+# Add --output-safe <file> to any upgrade task to write a Safe Transaction Builder JSON instead of submitting the tx
+bun run hardhat upgrade:earn --earn-manager-address <addr> --network sapphire-testnet
+bun run hardhat upgrade:swap --swap-manager-address <addr> --network sapphire-testnet
+
+# Register a pool (calls EarnManager.createPool; poolId accepts a <strategy>-<asset>-<chain> name or a 32-byte hex id)
+bun run hardhat earn:pool:create --earn-manager-address <addr> --pool-id aave-usdc-base-sepolia --token-id <tokenId> --lp-address <addr> --network sapphire-testnet
+
+# Inspect a deployed proxy (implementation, owner, pool list, LP) or a single pool's state
+bun run hardhat show <proxyAddress> --network sapphire-testnet
+bun run hardhat earn:pool:show aave-usdc-base-sepolia --earn-manager-address <addr> --network sapphire-testnet
+
+# Admin setters
+bun run hardhat earn:setPoolAdmin  --earn-manager-address <addr> --pool-admin-address <addr> --network sapphire-testnet
+bun run hardhat earn:setAccounting --earn-manager-address <addr> --accounting-address <addr> --network sapphire-testnet
+bun run hardhat swap:setLpAddress  --swap-manager-address <addr> --lp-address <addr> --network sapphire-testnet
 ```

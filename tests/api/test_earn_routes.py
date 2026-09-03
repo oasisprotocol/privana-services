@@ -1,5 +1,7 @@
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 from src.clients.accounting import JwtIdentity
 
 USDC_TOKEN_ID = "0x330ba47d00c7ce3018deee017b319fd7cc6473a2ddc9e6eba6ebb4207be15279"
@@ -140,6 +142,22 @@ class TestGetPoolRoute:
 
             r = await api_client.get(f"/v1/earn/pools/{POOL_ID}")
             assert r.status_code == 404
+
+    @pytest.mark.parametrize("bad_id", ["0xzz", "0xdeadbeef", "0x", "0x" + "aa" * 31])
+    async def test_returns_400_for_malformed_pool_id(self, api_client, bad_id):
+        with patch("src.api.earn.get_vault_service") as mock_svc:
+            mock_svc.return_value = _mock_service()
+
+            r = await api_client.get(f"/v1/earn/pools/{bad_id}")
+            assert r.status_code == 400
+            assert r.json()["detail"] == "pool_id must be a 32-byte hex value"
+
+            r = await api_client.get(
+                "/v1/earn/quote",
+                params={"pool_id": bad_id, "amount": "1000", "user_address": "0x" + "11" * 20},
+            )
+            assert r.status_code == 400
+            assert r.json()["detail"] == "pool_id must be a 32-byte hex value"
 
 
 class TestApyHistoryRoute:

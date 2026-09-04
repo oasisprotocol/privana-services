@@ -54,20 +54,25 @@ class AccountingBridge:
                 await asyncio.sleep(self._poll_interval_sec)
         raise RuntimeError(f"bridge.{op}: network retries exhausted")
 
-    async def withdraw_to_chain(self, token_id: str, amount: int) -> int:
+    async def _get_pending_withdrawals(self):
+        # Re-acquire per attempt: the factory refreshes the bearer token when
+        # it nears expiry, so a poll loop outliving the JWT keeps working.
         client = await self._client_factory()
-        pre = await self._retry(
-            "get_pending_withdrawals",
-            lambda: client.get_pending_withdrawals(self._lp_address),
-        )
+        return await client.get_pending_withdrawals(self._lp_address)
+
+    async def _get_balance(self, token_id: str):
+        client = await self._client_factory()
+        return await client.get_balance(token_id)
+
+    async def withdraw_to_chain(self, token_id: str, amount: int) -> int:
+        pre = await self._retry("get_pending_withdrawals", self._get_pending_withdrawals)
         pre_indices = {w.index for w in pre.pending_withdrawals}
 
-        nonce = (
-            await self._retry(
-                "get_withdrawal_nonce",
-                lambda: client.get_withdrawal_nonce(self._lp_address),
-            )
-        ).nonce
+        async def _get_nonce():
+            client = await self._client_factory()
+            return await client.get_withdrawal_nonce(self._lp_address)
+
+        nonce = (await self._retry("get_withdrawal_nonce", _get_nonce)).nonce
         signature = sign_withdraw_message(
             SignWithdrawParams(
                 account=Account.from_key(self._lp_key),
@@ -76,6 +81,7 @@ class AccountingBridge:
                 message=WithdrawMessage(token_id=token_id, amount=amount, nonce=nonce),
             )
         )
+        client = await self._client_factory()
         submission = await client.request_withdrawal(
             WithdrawalRequest(token_id=token_id, amount=amount, nonce=nonce, signature=signature)
         )
@@ -87,8 +93,7 @@ class AccountingBridge:
         own_index: Optional[int] = None
         for _ in range(self._max_poll_attempts):
             pending = await self._retry(
-                "get_pending_withdrawals",
-                lambda: client.get_pending_withdrawals(self._lp_address),
+                "get_pending_withdrawals", self._get_pending_withdrawals
             )
             current = {w.index for w in pending.pending_withdrawals}
             if own_index is None:
@@ -97,9 +102,12 @@ class AccountingBridge:
                     own_index = min(new)
             if own_index is not None:
                 idx = own_index
-                info = await self._retry(
-                    "get_withdrawal_info", lambda: client.get_withdrawal_info(idx)
-                )
+
+                async def _get_info():
+                    fresh = await self._client_factory()
+                    return await fresh.get_withdrawal_info(idx)
+
+                info = await self._retry("get_withdrawal_info", _get_info)
                 if info.resolved:
                     logger.info(
                         "bridge.withdraw_to_chain: resolved index=%d tx=%s",
@@ -132,7 +140,7 @@ class AccountingBridge:
         target = pre_balance + amount
         for _ in range(self._max_poll_attempts):
             balance = int(
-                (await self._retry("get_balance", lambda: client.get_balance(token_id))).balance
+                (await self._retry("get_balance", lambda: self._get_balance(token_id))).balance
             )
             if balance >= target:
                 return
@@ -140,12 +148,14 @@ class AccountingBridge:
         raise RuntimeError(f"deposit credit not observed after {self._max_poll_attempts} polls")
 
     async def get_deposit_address(self) -> str:
-        client = await self._client_factory()
-        deposit = await self._retry("get_deposit_address", lambda: client.get_deposit_address())
+        async def _get_address():
+            client = await self._client_factory()
+            return await client.get_deposit_address()
+
+        deposit = await self._retry("get_deposit_address", _get_address)
         return deposit.deposit_address
 
     async def lp_internal_balance(self, token_id: str) -> int:
-        client = await self._client_factory()
         return int(
-            (await self._retry("get_balance", lambda: client.get_balance(token_id))).balance
+            (await self._retry("get_balance", lambda: self._get_balance(token_id))).balance
         )

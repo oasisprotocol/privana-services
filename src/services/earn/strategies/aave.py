@@ -196,7 +196,6 @@ class AaveStrategy(BaseStrategy):
         if amount <= 0:
             raise ValueError(f"withdraw_from_earn requires a positive amount, got {amount}")
 
-        client = await self._get_authed_privana()
         pre_balance = await self._read_pool_balance()
 
         redeem_tx = self._client.withdraw(self._asset_address, amount, to=self._pool_address)
@@ -205,6 +204,10 @@ class AaveStrategy(BaseStrategy):
             self._asset_address, amount, redeem_tx,
         )
 
+        # Acquired right before each authed call, not once for the flow: the
+        # getter refreshes the bearer token near expiry, and the on-chain legs
+        # in between can outlive a token that was fresh at the start.
+        client = await self._get_authed_privana()
         deposit = await client.get_deposit_address(
             DepositAddressRequest(chain_type="evm")
         )
@@ -220,6 +223,7 @@ class AaveStrategy(BaseStrategy):
         )
 
         try:
+            client = await self._get_authed_privana()
             check = await client.check_deposit(
                 DepositCheckRequest(
                     chain_id=self._client.w3.eth.chain_id,
@@ -380,11 +384,14 @@ class AaveStrategy(BaseStrategy):
         client (LP/pool key) here. Wrapped in the network-retry helper so a
         flaky read can't take down the post-redeem credit poll.
         """
-        client = await self._get_authed_privana()
-        balance = await self._retry_on_network_error(
-            "get_balance",
-            lambda: client.get_balance(self._token_id),
-        )
+        async def _get_balance():
+            # Re-acquire per attempt so a credit poll that outlives the JWT
+            # picks up the refreshed bearer token instead of retrying a 401
+            # forever with the dead one.
+            client = await self._get_authed_privana()
+            return await client.get_balance(self._token_id)
+
+        balance = await self._retry_on_network_error("get_balance", _get_balance)
         return int(balance.balance)
 
     async def _poll_until_balance_at_least(self, target_balance: int) -> None:

@@ -3,13 +3,16 @@ from __future__ import annotations
 import asyncio
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Awaitable, Callable, Optional, TypeVar
 
 from eth_account import Account
 from eth_account.messages import encode_defunct
 from privana import PrivanaClient
+from privana.client.errors import AccountingApiError
 
 from src.core.config import load_settings
+
+T = TypeVar("T")
 
 _client: Optional[PrivanaClient] = None
 _auth_token: Optional[str] = None
@@ -100,6 +103,26 @@ async def get_authenticated_privana_client() -> PrivanaClient:
     return client
 
 
+async def authed_read(call: Callable[[PrivanaClient], Awaitable[T]]) -> T:
+    """Run an authenticated, idempotent SDK read, recovering once if the token
+    is rejected before its deadline.
+
+    The deadline-based refresh handles expiry, but a token can also be voided
+    early (the accounting service restarting or revoking it). That surfaces as
+    a 401/403, so we drop the cached token and log in again for a single retry.
+    Only safe for reads: a mutating call must never be replayed blindly.
+    """
+    client = await get_authenticated_privana_client()
+    try:
+        return await call(client)
+    except AccountingApiError as exc:
+        if exc.status_code not in (401, 403):
+            raise
+        invalidate_privana_auth()
+        client = await get_authenticated_privana_client()
+        return await call(client)
+
+
 async def _authenticate_as_lp(client: PrivanaClient) -> tuple[str, int]:
     settings = load_settings()
     if not settings.liquidity_provider_secret_key:
@@ -131,6 +154,7 @@ async def _authenticate_as_lp(client: PrivanaClient) -> tuple[str, int]:
 
 
 __all__ = [
+    "authed_read",
     "get_privana_client",
     "get_authenticated_privana_client",
     "invalidate_privana_auth",

@@ -21,6 +21,7 @@ from privana.types.common import Network
 from src.clients.defillama import DefiLlamaClient
 from src.clients.midas import MidasClient
 from src.clients.privana import (
+    authed_read,
     get_authenticated_privana_client,
     get_privana_client,
 )
@@ -588,8 +589,12 @@ class MidasStrategy(BaseStrategy):
 
     async def _read_pool_balance(self) -> int:
         async def _get_balance():
-            client = await self._get_authed_privana()
-            return await client.get_balance(self._token_id)
+            # Re-acquire per attempt for JWT expiry; authed_read also recovers
+            # from an early revocation (401/403). Injected test client bypasses
+            # both.
+            if self._privana is not None:
+                return await self._privana.get_balance(self._token_id)
+            return await authed_read(lambda c: c.get_balance(self._token_id))
 
         balance = await self._retry_on_network_error("get_balance", _get_balance)
         return int(balance.balance)

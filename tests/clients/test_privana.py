@@ -237,6 +237,89 @@ async def test_concurrent_callers_share_one_login():
 
 
 @pytest.mark.asyncio
+async def test_authed_read_recovers_from_early_revocation():
+    from privana.client.errors import AccountingApiError
+
+    from src.clients.privana import authed_read
+
+    reset_privana_client()
+    settings = replace(
+        load_settings(),
+        privana_api_base_url="https://accounting.example",
+        liquidity_provider_secret_key=LP_PRIVATE_KEY,
+        liquidity_provider_address=LP_ADDRESS,
+        accounting_chain_id=23295,
+    )
+
+    with patch("src.clients.privana.load_settings", return_value=settings):
+        client = get_privana_client()
+        client.get_siwe_nonce = AsyncMock(
+            return_value=_SiweNonce(address=LP_ADDRESS, nonce="abc123"),
+        )
+        client.login_with_siwe = AsyncMock(
+            side_effect=[
+                _SiweLogin(siwe_token="siwe", jwt_access_token="jwt-one"),
+                _SiweLogin(siwe_token="siwe", jwt_access_token="jwt-two"),
+            ],
+        )
+
+        calls = {"n": 0}
+
+        async def read(c):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise AccountingApiError("unauthorized", 401, "token revoked")
+            return "ok"
+
+        result = await authed_read(read)
+
+    assert result == "ok"
+    assert calls["n"] == 2
+    # The first token was invalidated and a second login ran.
+    assert client.login_with_siwe.await_count == 2
+    reset_privana_client()
+
+
+@pytest.mark.asyncio
+async def test_authed_read_does_not_retry_other_errors():
+    from privana.client.errors import AccountingApiError
+
+    from src.clients.privana import authed_read
+
+    reset_privana_client()
+    settings = replace(
+        load_settings(),
+        privana_api_base_url="https://accounting.example",
+        liquidity_provider_secret_key=LP_PRIVATE_KEY,
+        liquidity_provider_address=LP_ADDRESS,
+        accounting_chain_id=23295,
+    )
+
+    with patch("src.clients.privana.load_settings", return_value=settings):
+        client = get_privana_client()
+        client.get_siwe_nonce = AsyncMock(
+            return_value=_SiweNonce(address=LP_ADDRESS, nonce="abc123"),
+        )
+        client.login_with_siwe = AsyncMock(
+            return_value=_SiweLogin(siwe_token="siwe", jwt_access_token="jwt-one"),
+        )
+
+        calls = {"n": 0}
+
+        async def read(c):
+            calls["n"] += 1
+            raise AccountingApiError("bad request", 400, "pool paused")
+
+        with pytest.raises(AccountingApiError):
+            await authed_read(read)
+
+    # A 400 is not an auth problem, so no re-login and no replay.
+    assert calls["n"] == 1
+    assert client.login_with_siwe.await_count == 1
+    reset_privana_client()
+
+
+@pytest.mark.asyncio
 async def test_authenticate_requires_lp_secret_key():
     reset_privana_client()
     settings = replace(

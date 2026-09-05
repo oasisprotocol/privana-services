@@ -38,25 +38,6 @@ URL_PATTERN = re.compile(r"https?://\S+")
 REVERT_PATTERN = re.compile(r"\breverted\b[:\s]*([^\n\r]*)", re.IGNORECASE)
 
 
-def describe_error(exc: BaseException) -> str:
-    """Render an exception together with any string detail attached to it.
-
-    The accounting SDK raises ``AccountingApiError(message, status_code,
-    detail)`` but only hands ``message`` to ``Exception``, so ``str(exc)`` is
-    a bare "API request failed: 400 Bad Request" while the server's actual
-    explanation sits unread on ``.detail``. Reading it back is the difference
-    between an operator seeing "400 Bad Request" and seeing which balance ran
-    out. Non-string details are ignored rather than stringified, so an
-    unrelated library that happens to hang an object off ``.detail`` cannot
-    widen an error message.
-    """
-    text = str(exc)
-    detail = getattr(exc, "detail", None)
-    if isinstance(detail, str) and detail and detail not in text:
-        return f"{text}: {detail}"
-    return text
-
-
 def sanitize_error(error: str) -> str:
     lower = error.lower()
     revert = REVERT_PATTERN.search(error)

@@ -1,46 +1,4 @@
-from src.core.validation import MAX_REVERT_REASON_LENGTH, describe_error, sanitize_error
-
-
-class _ApiError(Exception):
-    """Shape of the accounting SDK's AccountingApiError: the useful text is on
-    .detail, and Exception only ever sees the terse message."""
-
-    def __init__(self, message: str, status_code: int, detail: str | None = None):
-        super().__init__(message)
-        self.status_code = status_code
-        self.detail = detail
-
-
-class TestDescribeError:
-    def test_appends_the_detail_the_sdk_hides(self):
-        exc = _ApiError(
-            "API request failed: 400 Bad Request",
-            400,
-            "Insufficient native balance on Base Sepolia. EVM address 0xE5A9 has 0 wei.",
-        )
-
-        described = describe_error(exc)
-
-        assert "400 Bad Request" in described
-        assert "Insufficient native balance on Base Sepolia" in described
-
-    def test_plain_exception_is_unchanged(self):
-        assert describe_error(RuntimeError("boom")) == "boom"
-
-    def test_detail_is_not_repeated_when_already_in_the_message(self):
-        exc = _ApiError("failed: already said it", 400, "already said it")
-
-        assert describe_error(exc) == "failed: already said it"
-
-    def test_empty_detail_is_ignored(self):
-        assert describe_error(_ApiError("bare", 500, None)) == "bare"
-
-    def test_non_string_detail_is_ignored(self):
-        """Unrelated libraries hang objects off .detail; only text is safe to
-        fold into a message a caller may read."""
-        exc = _ApiError("bare", 500, {"internal": "structure", "trace": [1, 2, 3]})
-
-        assert describe_error(exc) == "bare"
+from src.core.validation import MAX_REVERT_REASON_LENGTH, sanitize_error
 
 
 class TestSanitizeError:
@@ -106,9 +64,7 @@ class TestSanitizeError:
 
 
 class TestComposed:
-    def test_helpers_compose_without_swallowing_the_detail(self):
-        exc = _ApiError("API request failed: 400 Bad Request", 400, "pool is paused")
-
-        assert sanitize_error(describe_error(exc)) == (
+    def test_api_error_detail_passes_through_sanitize(self):
+        assert sanitize_error("API request failed: 400 Bad Request: pool is paused") == (
             "API request failed: 400 Bad Request: pool is paused"
         )

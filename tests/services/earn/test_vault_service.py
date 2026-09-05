@@ -377,9 +377,9 @@ class TestStrategyRouting:
         assert row["error"] is not None
 
     async def test_undeployed_deposit_records_why_the_bridge_refused(self, test_db):
-        """Regression for the testnet outage: the accounting SDK puts its
-        explanation on .detail and only "API request failed: 400 Bad Request"
-        reached the row, so nobody could tell the relay was out of gas."""
+        """Regression for the testnet outage: the accounting SDK folds its
+        .detail into str() (privana-sdk fix), and the row must keep that
+        explanation rather than truncating it back to "400 Bad Request"."""
         from src.services.earn.registry import StrategyRegistry
 
         class ApiError(Exception):
@@ -387,6 +387,12 @@ class TestStrategyRouting:
                 super().__init__(message)
                 self.status_code = status_code
                 self.detail = detail
+
+            def __str__(self):
+                base = super().__str__()
+                if self.detail and self.detail not in base:
+                    return f"{base}: {self.detail}"
+                return base
 
         registry = StrategyRegistry()
         strategy = MagicMock()

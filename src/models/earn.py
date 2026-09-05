@@ -181,7 +181,7 @@ class BalanceResponse(BaseModel):
             '"0.008" means 0.8%, so multiply by 100 to display.'
         ),
     )
-    # Accrued yield on the shares still held (EA-Products #167). Null whenever
+    # Accrued yield on the shares still held. Null whenever
     # status is not "ok", so the UI shows a dash rather than a made-up zero.
     earned_active: Optional[str] = None
     earned_active_status: Literal[

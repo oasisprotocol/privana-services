@@ -64,21 +64,21 @@ def _pool_shares_accounted(pool_id: str) -> Optional[int]:
     withdrawal this service could not attribute. Comparing the pool's whole
     recorded movement against the chain's ``totalShares`` closes that gap.
     """
-    row = get_db().execute(
-        """SELECT COUNT(*) AS missing FROM earn_transactions
-           WHERE LOWER(pool_id) = ? AND status != ? AND shares_delta IS NULL""",
-        (pool_id.lower(), _STATUS_FAILED),
-    ).fetchone()
-    if row["missing"]:
-        return None
-
-    row = get_db().execute(
-        """SELECT COALESCE(SUM(CAST(shares_delta AS INTEGER)), 0) AS total
-           FROM earn_transactions
+    rows = get_db().execute(
+        """SELECT shares_delta FROM earn_transactions
            WHERE LOWER(pool_id) = ? AND status != ?""",
         (pool_id.lower(), _STATUS_FAILED),
-    ).fetchone()
-    return int(row["total"])
+    ).fetchall()
+    # Sum in Python, not SQL: shares are wei-scale, and SQLite's 64-bit SUM
+    # overflows on a WETH or large USDC pool, which would make the completeness
+    # check unusable for exactly the pools that need it. A single NULL means a
+    # cashflow went unrecorded, so the history is incomplete.
+    total = 0
+    for row in rows:
+        if row["shares_delta"] is None:
+            return None
+        total += int(row["shares_delta"])
+    return total
 
 
 def _read_cashflows(user_address: str, pool_id: str) -> list[dict]:

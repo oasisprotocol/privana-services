@@ -227,6 +227,18 @@ class TestPoolLevelCompleteness:
         _cashflow(amount="100", shares_delta="100")
         assert earned_active(USER, POOL, 100, 105).status == STATUS_OK
 
+    def test_wei_scale_pool_totals_do_not_overflow(self, test_db):
+        # A WETH pool moves shares in 1e18-scale units; summing these in SQL
+        # would overflow a 64-bit accumulator and make the pool forever look
+        # incomplete. Two 5e18 deposits reconcile against a 1e19 chain total.
+        big = 5 * 10**18
+        _cashflow(amount=str(big), shares_delta=str(big))
+        _cashflow(amount=str(big), shares_delta=str(big), user=OTHER)
+        result = earned_active(
+            USER, POOL, big, big, pool_total_shares=2 * big
+        )
+        assert result.status == STATUS_OK
+
 
 class TestRoundingBehaviour:
     def test_partial_withdrawal_dust_favours_understating_active(self, test_db):

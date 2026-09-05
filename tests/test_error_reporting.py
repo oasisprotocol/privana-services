@@ -26,6 +26,29 @@ class TestSanitizeError:
         assert "rpc.example" not in sanitized
         assert "[url]" in sanitized
 
+    def test_bare_host_port_is_stripped_from_the_reason(self):
+        raw = "execution reverted: dispatch failed via rpc.internal.oasis:8545"
+
+        sanitized = sanitize_error(raw)
+
+        assert "rpc.internal.oasis" not in sanitized
+        assert "[host]" in sanitized
+
+    def test_bare_ip_is_stripped_from_the_reason(self):
+        sanitized = sanitize_error("execution reverted: no route to 10.0.12.4:8545")
+
+        assert "10.0.12.4" not in sanitized
+        assert "[host]" in sanitized
+
+    def test_a_decimal_amount_is_not_mistaken_for_a_host(self):
+        raw = "execution reverted: DV: minReceiveAmount 1.05 exceeds actual 0.99"
+
+        sanitized = sanitize_error(raw)
+
+        assert "1.05" in sanitized
+        assert "0.99" in sanitized
+        assert "[host]" not in sanitized
+
     def test_long_reason_is_capped(self):
         raw = "execution reverted: " + "x" * 400
 

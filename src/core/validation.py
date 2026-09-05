@@ -32,6 +32,13 @@ MAX_ERROR_LENGTH = 500
 MAX_REVERT_REASON_LENGTH = 200
 
 URL_PATTERN = re.compile(r"https?://\S+")
+# A bare RPC endpoint can ride along on a revert line without a scheme, e.g.
+# "via rpc.internal:8545" or "192.168.1.5:8545". Scrub dotted hosts and IPv4
+# (optional :port) too. The domain arm requires a letters-only final label so
+# a version or amount like "1.05" or "0.2.3" is never mistaken for a host.
+HOST_PATTERN = re.compile(
+    r"\b(?:(?:\d{1,3}\.){3}\d{1,3}|(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,})(?::\d+)?\b"
+)
 # Only the remainder of the line the revert appears on: a provider can append
 # whole trace payloads after a newline and none of that belongs in an error a
 # caller reads. \b on both sides so "unreverted" is not a match.
@@ -46,7 +53,8 @@ def sanitize_error(error: str) -> str:
         # only thing that separates InsufficientShares from a bad signature
         # or a nonce conflict. Take one line, drop URLs so an RPC endpoint
         # never rides along, and cap the length.
-        reason = URL_PATTERN.sub("[url]", revert.group(1)).strip(" :;,-")
+        reason = HOST_PATTERN.sub("[host]", URL_PATTERN.sub("[url]", revert.group(1)))
+        reason = reason.strip(" :;,-")
         if reason:
             return f"Transaction reverted: {reason[:MAX_REVERT_REASON_LENGTH]}"
         return "Transaction reverted on-chain"

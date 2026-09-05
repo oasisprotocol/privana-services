@@ -4,8 +4,8 @@ services:
       context: .
       dockerfile: docker/Dockerfile
       args:
-        - ENV_FILE=.env.testnet
-    image: "ghcr.io/oasisprotocol/privana-services:testnet"
+        - ENV_FILE=.env.mainnet
+    image: "ghcr.io/oasisprotocol/privana-services@sha256:e6fddf3f3d93efc200c251e7c3fb4d0aecdef04ec440c399644281a726517d35"
     platform: linux/amd64
     environment:
       - LIQUIDITY_PROVIDER_SECRET_KEY
@@ -17,7 +17,7 @@ services:
     ports:
       - "8000:8000"
     annotations:
-      net.oasis.proxy.ports.8000.custom_domain: services.testnet.privana.finance
+      net.oasis.proxy.ports.8000.custom_domain: services.privana.finance
     restart: on-failure
 
 volumes:

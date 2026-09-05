@@ -24,6 +24,7 @@ class Settings:
 
     quote_ttl: int
     fee_bps: int
+    fee_policies_json: str
     max_swap_amount_usd: int
     lifi_token_map: str
 
@@ -48,3 +49,5 @@ class Settings:
 
     lifi_execution_enabled: bool = False
     lifi_max_swap_amount_usd: int = 0
+
+    pool_admin_secret_key: str = ""

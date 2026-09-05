@@ -81,6 +81,7 @@ def load_settings(refresh: bool = False) -> Settings:
             sapphire_rpc_url=os.getenv("SAPPHIRE_RPC_URL"),
             quote_ttl=_get_int("QUOTE_TTL"),
             fee_bps=_get_int("FEE_BPS"),
+            fee_policies_json=os.getenv("FEE_POLICIES_JSON", ""),
             max_swap_amount_usd=_get_int("MAX_SWAP_AMOUNT_USD"),
             lifi_token_map=os.getenv("LIFI_TOKEN_MAP"),
             base_rpc_url=_get_base_rpc_url(),
@@ -99,6 +100,7 @@ def load_settings(refresh: bool = False) -> Settings:
             coingecko_token_ids=os.getenv("COINGECKO_TOKEN_IDS", ""),
             lifi_execution_enabled=os.getenv("LIFI_EXECUTION_ENABLED", "false").lower() == "true",
             lifi_max_swap_amount_usd=int(os.getenv("LIFI_MAX_SWAP_AMOUNT_USD", "0")),
+            pool_admin_secret_key=os.getenv("POOL_ADMIN_SECRET_KEY", ""),
         )
     return _settings
 

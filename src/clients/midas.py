@@ -138,11 +138,14 @@ class MidasClient:
         min_receive_amount: int,
         referrer_id: bytes = ZERO_REFERRER_ID,
     ) -> str:
-        """Atomic mint via `IssuanceVault.depositInstant`. Pulls `amount` of
-        `token_in` from the LP EOA and mints mTBILL to the LP EOA.
+        """Atomic mint via `IssuanceVault.depositInstant`. Pulls the USDC
+        equivalent of `amount` from the LP EOA and mints mTBILL to the LP EOA.
 
-        The strategy is responsible for ensuring the vault has ERC20 allowance
-        before calling — see `approve()`.
+        `amount` and `min_receive_amount` are in Midas base-18 units — the
+        vault interprets every amount argument as 18-decimal regardless of
+        the token's own decimals. The strategy is responsible for scaling
+        token-native amounts and for ensuring the vault has ERC20 allowance
+        before calling — see `approve()`, which stays in token-native units.
         """
         token = Web3.to_checksum_address(token_in)
         if len(referrer_id) != 32:
@@ -163,6 +166,11 @@ class MidasClient:
         """Atomic redeem via `RedemptionVault.redeemInstant`. Burns
         `amount_mtoken_in` of mTBILL from the LP EOA and sends `token_out`
         back to the LP EOA. Reverts if the daily instant limit is exhausted.
+
+        Both amounts are in Midas base-18 units: `amount_mtoken_in` natively
+        (mTBILL has 18 decimals) and `min_receive_amount` scaled by the
+        caller from `token_out`'s own decimals. Requires an mTBILL allowance
+        for the redemption vault — see `approve()`.
         """
         token = Web3.to_checksum_address(token_out)
         return self._send_write_tx(

@@ -1,5 +1,9 @@
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
+from src.clients.accounting import JwtIdentity
+
 USDC_TOKEN_ID = "0x330ba47d00c7ce3018deee017b319fd7cc6473a2ddc9e6eba6ebb4207be15279"
 POOL_ID = "0x" + "ab" * 32
 POOL_ADDRESS = "0x152E6a7125665764a4F1F1df80E8f5D49Bf0239c"
@@ -138,6 +142,22 @@ class TestGetPoolRoute:
 
             r = await api_client.get(f"/v1/earn/pools/{POOL_ID}")
             assert r.status_code == 404
+
+    @pytest.mark.parametrize("bad_id", ["0xzz", "0xdeadbeef", "0x", "0x" + "aa" * 31])
+    async def test_returns_400_for_malformed_pool_id(self, api_client, bad_id):
+        with patch("src.api.earn.get_vault_service") as mock_svc:
+            mock_svc.return_value = _mock_service()
+
+            r = await api_client.get(f"/v1/earn/pools/{bad_id}")
+            assert r.status_code == 400
+            assert r.json()["detail"] == "pool_id must be a 32-byte hex value"
+
+            r = await api_client.get(
+                "/v1/earn/quote",
+                params={"pool_id": bad_id, "amount": "1000", "user_address": "0x" + "11" * 20},
+            )
+            assert r.status_code == 400
+            assert r.json()["detail"] == "pool_id must be a 32-byte hex value"
 
 
 class TestApyHistoryRoute:
@@ -366,7 +386,9 @@ class TestBalanceRoute:
             patch("src.api.earn.get_accounting_client") as mock_acct,
         ):
             acct = MagicMock()
-            acct.exchange_jwt_for_siwe_token = AsyncMock(return_value="0x" + "ee" * 32)
+            acct.get_jwt_identity = AsyncMock(
+                return_value=JwtIdentity(siwe_token="0x" + "ee" * 32, address=USER_ADDRESS)
+            )
             mock_acct.return_value = acct
             svc = MagicMock()
             svc.get_all_balances = AsyncMock(return_value=[])
@@ -378,8 +400,10 @@ class TestBalanceRoute:
             )
 
             assert r.status_code == 200
-            acct.exchange_jwt_for_siwe_token.assert_awaited_once_with("user-jwt")
-            svc.get_all_balances.assert_awaited_once_with("0x" + "ee" * 32)
+            acct.get_jwt_identity.assert_awaited_once_with("user-jwt")
+            svc.get_all_balances.assert_awaited_once_with(
+                "0x" + "ee" * 32, user_address=USER_ADDRESS
+            )
 
     async def test_returns_200_with_positions(self, api_client):
         with patch("src.api.earn.get_vault_service") as mock_svc:
@@ -415,6 +439,63 @@ class TestBalanceRoute:
             assert r.status_code == 200
             assert r.json()["positions"] == []
 
+    async def test_change_fields_pass_through(self, api_client):
+        with patch("src.api.earn.get_vault_service") as mock_svc:
+            svc = MagicMock()
+            svc.get_all_balances = AsyncMock(return_value=[{
+                "pool_id": POOL_ID,
+                "token_id": USDC_TOKEN_ID,
+                "shares": "500",
+                "underlying_amount": "525",
+                "exchange_rate": "1.05",
+                "change_24h": "25",
+                "change_24h_pct": "0.050000",
+            }])
+            mock_svc.return_value = svc
+
+            r = await api_client.get(
+                "/v1/earn/balance",
+                headers={"X-SIWE-Token": "0x" + "ee" * 32},
+            )
+            position = r.json()["positions"][0]
+            assert position["change_24h"] == "25"
+            assert position["change_24h_pct"] == "0.050000"
+
+    async def test_siwe_token_path_passes_no_identity(self, api_client):
+        with patch("src.api.earn.get_vault_service") as mock_svc:
+            svc = MagicMock()
+            svc.get_all_balances = AsyncMock(return_value=[])
+            mock_svc.return_value = svc
+
+            r = await api_client.get(
+                "/v1/earn/balance",
+                headers={"X-SIWE-Token": "0x" + "ee" * 32},
+            )
+            assert r.status_code == 200
+            svc.get_all_balances.assert_awaited_once_with(
+                "0x" + "ee" * 32, user_address=None
+            )
+
+    async def test_change_fields_default_null_in_response(self, api_client):
+        with patch("src.api.earn.get_vault_service") as mock_svc:
+            svc = MagicMock()
+            svc.get_all_balances = AsyncMock(return_value=[{
+                "pool_id": POOL_ID,
+                "token_id": USDC_TOKEN_ID,
+                "shares": "500",
+                "underlying_amount": "525",
+                "exchange_rate": "1.05",
+            }])
+            mock_svc.return_value = svc
+
+            r = await api_client.get(
+                "/v1/earn/balance",
+                headers={"X-SIWE-Token": "0x" + "ee" * 32},
+            )
+            position = r.json()["positions"][0]
+            assert position["change_24h"] is None
+            assert position["change_24h_pct"] is None
+
     async def test_rejects_missing_auth(self, api_client):
         r = await api_client.get("/v1/earn/balance")
         assert r.status_code == 401
@@ -438,7 +519,9 @@ class TestWithdrawNonceRoute:
             patch("src.api.earn.get_accounting_client") as mock_acct,
         ):
             acct = MagicMock()
-            acct.exchange_jwt_for_siwe_token = AsyncMock(return_value="0x" + "ee" * 32)
+            acct.get_jwt_identity = AsyncMock(
+                return_value=JwtIdentity(siwe_token="0x" + "ee" * 32, address=USER_ADDRESS)
+            )
             mock_acct.return_value = acct
             svc = MagicMock()
             svc.get_withdraw_nonce_via_token.return_value = 7
@@ -451,7 +534,7 @@ class TestWithdrawNonceRoute:
 
             assert r.status_code == 200
             assert r.json()["nonce"] == 7
-            acct.exchange_jwt_for_siwe_token.assert_awaited_once_with("user-jwt")
+            acct.get_jwt_identity.assert_awaited_once_with("user-jwt")
             svc.get_withdraw_nonce_via_token.assert_called_once_with("0x" + "ee" * 32)
 
     async def test_accepts_legacy_siwe_header(self, api_client):

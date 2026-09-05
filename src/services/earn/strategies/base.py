@@ -64,6 +64,15 @@ class BaseStrategy(ABC):
         """
 
     @abstractmethod
+    async def idle_assets(self) -> int:
+        """Pool funds credited to the pool but not deployed to the external
+        protocol: an undeployed deposit, or a reclaim awaiting redeploy.
+
+        Shares are already minted against these, so leaving them out of AUM
+        understates the share-math denominator and lets the next deposit mint
+        against a false low value."""
+
+    @abstractmethod
     async def is_healthy(self) -> bool:
         """Cheap liveness probe for the external protocol. False means the
         vault should refuse new deposits into this strategy until it recovers.

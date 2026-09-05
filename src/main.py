@@ -37,6 +37,12 @@ def _validate_settings() -> None:
         errors.append("PRIVANA_API_BASE_URL is not set")
     if not settings.base_rpc_url:
         errors.append("BASE_RPC_URL is not set")
+    try:
+        from src.core.fee_policy import get_fee_policies
+
+        get_fee_policies(refresh=True)
+    except ValueError as exc:
+        errors.append(str(exc))
     if errors and settings.environment.lower() != "development":
         raise RuntimeError(
             "Missing required configuration:\n  - " + "\n  - ".join(errors)

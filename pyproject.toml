@@ -1,6 +1,6 @@
 [project]
 name = "privana-services"
-version = "0.1.0"
+version = "0.0.0"
 description = "DeFi Services on top of Privana"
 readme = "README.md"
 requires-python = ">=3.11"

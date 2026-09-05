@@ -1,3 +1,4 @@
+import asyncio
 from dataclasses import dataclass, replace
 from unittest.mock import AsyncMock, patch
 
@@ -7,6 +8,7 @@ from privana import PrivanaClient
 from src.clients.privana import (
     get_authenticated_privana_client,
     get_privana_client,
+    invalidate_privana_auth,
     reset_privana_client,
 )
 from src.core.config import load_settings
@@ -131,6 +133,105 @@ async def test_authenticate_caches_token_across_calls():
         second = await get_authenticated_privana_client()
 
     assert first is second
+    assert client.login_with_siwe.await_count == 1
+    reset_privana_client()
+
+
+@pytest.mark.asyncio
+async def test_reauthenticates_when_token_nears_expiry():
+    reset_privana_client()
+    settings = replace(
+        load_settings(),
+        privana_api_base_url="https://accounting.example",
+        liquidity_provider_secret_key=LP_PRIVATE_KEY,
+        liquidity_provider_address=LP_ADDRESS,
+        accounting_chain_id=23295,
+    )
+    clock = {"now": 1_000_000.0}
+
+    with patch("src.clients.privana.load_settings", return_value=settings), \
+         patch("src.clients.privana.time") as mock_time:
+        mock_time.monotonic = lambda: clock["now"]
+        client = get_privana_client()
+        client.get_siwe_nonce = AsyncMock(
+            return_value=_SiweNonce(address=LP_ADDRESS, nonce="abc123"),
+        )
+        client.login_with_siwe = AsyncMock(
+            side_effect=[
+                _SiweLogin(siwe_token="siwe", jwt_access_token="jwt-one", jwt_expires_in=3600),
+                _SiweLogin(siwe_token="siwe", jwt_access_token="jwt-two", jwt_expires_in=3600),
+            ],
+        )
+
+        await get_authenticated_privana_client()
+        assert client._http.get_header("Authorization") == "Bearer jwt-one"
+
+        # Inside the lifetime minus the refresh margin: cached token is reused.
+        clock["now"] += 3600 - 300 - 1
+        await get_authenticated_privana_client()
+        assert client.login_with_siwe.await_count == 1
+
+        # Past the refresh deadline: the client logs in again on its own.
+        clock["now"] += 2
+        await get_authenticated_privana_client()
+        assert client.login_with_siwe.await_count == 2
+        assert client._http.get_header("Authorization") == "Bearer jwt-two"
+
+    reset_privana_client()
+
+
+@pytest.mark.asyncio
+async def test_invalidate_forces_relogin():
+    reset_privana_client()
+    settings = replace(
+        load_settings(),
+        privana_api_base_url="https://accounting.example",
+        liquidity_provider_secret_key=LP_PRIVATE_KEY,
+        liquidity_provider_address=LP_ADDRESS,
+        accounting_chain_id=23295,
+    )
+
+    with patch("src.clients.privana.load_settings", return_value=settings):
+        client = get_privana_client()
+        client.get_siwe_nonce = AsyncMock(
+            return_value=_SiweNonce(address=LP_ADDRESS, nonce="abc123"),
+        )
+        client.login_with_siwe = AsyncMock(
+            return_value=_SiweLogin(siwe_token="siwe", jwt_access_token="jwt-token"),
+        )
+
+        await get_authenticated_privana_client()
+        invalidate_privana_auth()
+        await get_authenticated_privana_client()
+
+    assert client.login_with_siwe.await_count == 2
+    reset_privana_client()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_callers_share_one_login():
+    reset_privana_client()
+    settings = replace(
+        load_settings(),
+        privana_api_base_url="https://accounting.example",
+        liquidity_provider_secret_key=LP_PRIVATE_KEY,
+        liquidity_provider_address=LP_ADDRESS,
+        accounting_chain_id=23295,
+    )
+
+    async def slow_login(*args):
+        await asyncio.sleep(0.01)
+        return _SiweLogin(siwe_token="siwe", jwt_access_token="jwt-token")
+
+    with patch("src.clients.privana.load_settings", return_value=settings):
+        client = get_privana_client()
+        client.get_siwe_nonce = AsyncMock(
+            return_value=_SiweNonce(address=LP_ADDRESS, nonce="abc123"),
+        )
+        client.login_with_siwe = AsyncMock(side_effect=slow_login)
+
+        await asyncio.gather(*[get_authenticated_privana_client() for _ in range(5)])
+
     assert client.login_with_siwe.await_count == 1
     reset_privana_client()
 

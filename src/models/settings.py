@@ -50,7 +50,4 @@ class Settings:
     lifi_execution_enabled: bool = False
     lifi_max_swap_amount_usd: int = 0
 
-    # Signer for EarnManager's admin-gated calls (syncTotalAssets, createPool,
-    # setPoolActive). Empty means the pool admin is the LP account, which is
-    # how current deployments are configured; set it when the roles diverge.
     pool_admin_secret_key: str = ""

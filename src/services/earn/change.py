@@ -39,10 +39,20 @@ class Change:
     pct: str
 
 
+# Mirrors EarnManager.convertToAssets, which offsets both sides to blunt
+# first-depositor inflation. A historical rate can only be reconstructed from
+# stored pool totals, so the offsets have to be applied here by hand; dropping
+# them values a position on a different curve than the contract does.
+VIRTUAL_SHARES = 1_000_000
+VIRTUAL_ASSETS = 1
+
+
 def _position_value(shares: int, total_assets: int, total_shares: int) -> Optional[int]:
+    # A pool with no shares cannot have valued anyone's position, so a sample
+    # claiming that alongside a live share balance is bad data, not a rate.
     if total_shares <= 0:
         return None
-    return shares * total_assets // total_shares
+    return shares * (total_assets + VIRTUAL_ASSETS) // (total_shares + VIRTUAL_SHARES)
 
 
 def _has_cashflow_since(user_address: str, pool_id: str, since: int) -> bool:

@@ -496,6 +496,56 @@ class TestBalanceRoute:
             assert position["change_24h"] is None
             assert position["change_24h_pct"] is None
 
+    async def test_earned_fields_pass_through(self, api_client):
+        with patch("src.api.earn.get_vault_service") as mock_svc:
+            svc = MagicMock()
+            svc.get_all_balances = AsyncMock(return_value=[{
+                "pool_id": POOL_ID,
+                "token_id": USDC_TOKEN_ID,
+                "shares": "100",
+                "underlying_amount": "105",
+                "exchange_rate": "1.05",
+                "earned_active": "5",
+                "earned_active_status": "ok",
+                "cost_basis": "100",
+                "deposit_count": 2,
+                "first_deposit_at": 1787000000,
+            }])
+            mock_svc.return_value = svc
+
+            r = await api_client.get(
+                "/v1/earn/balance",
+                headers={"X-SIWE-Token": "0x" + "ee" * 32},
+            )
+            position = r.json()["positions"][0]
+            assert position["earned_active"] == "5"
+            assert position["earned_active_status"] == "ok"
+            assert position["cost_basis"] == "100"
+            assert position["deposit_count"] == 2
+            assert position["first_deposit_at"] == 1787000000
+
+    async def test_earned_null_carries_its_status(self, api_client):
+        with patch("src.api.earn.get_vault_service") as mock_svc:
+            svc = MagicMock()
+            svc.get_all_balances = AsyncMock(return_value=[{
+                "pool_id": POOL_ID,
+                "token_id": USDC_TOKEN_ID,
+                "shares": "100",
+                "underlying_amount": "105",
+                "exchange_rate": "1.05",
+                "earned_active": None,
+                "earned_active_status": "ledger_incomplete",
+            }])
+            mock_svc.return_value = svc
+
+            r = await api_client.get(
+                "/v1/earn/balance",
+                headers={"X-SIWE-Token": "0x" + "ee" * 32},
+            )
+            position = r.json()["positions"][0]
+            assert position["earned_active"] is None
+            assert position["earned_active_status"] == "ledger_incomplete"
+
     async def test_rejects_missing_auth(self, api_client):
         r = await api_client.get("/v1/earn/balance")
         assert r.status_code == 401

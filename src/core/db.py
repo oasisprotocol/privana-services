@@ -109,6 +109,24 @@ MIGRATIONS = [
     # When the rate was actually read. timestamp is floored to the sampling
     # grid, so on its own it cannot tell a 24h-old anchor from a 30h-old one.
     "ALTER TABLE pool_rate_history ADD COLUMN observed_at INTEGER;",
+    # Per-cashflow share movement and the rate it settled at. Signed: positive
+    # on deposit, negative on withdraw. Captured from the pool's public
+    # totalShares inside the earn tx lock, because per-user share state is
+    # confidential on Sapphire and cannot be read back later. NULL means the
+    # capture did not complete, which makes the position's earned figure
+    # unreportable rather than wrong.
+    "ALTER TABLE earn_transactions ADD COLUMN shares_delta TEXT;",
+    "ALTER TABLE earn_transactions ADD COLUMN exchange_rate TEXT;",
+    # When the cashflow actually settled on chain. created_at is set before
+    # the chain call, so a queued or retried deposit would otherwise report
+    # its request time as the moment the position started earning.
+    "ALTER TABLE earn_transactions ADD COLUMN settled_at INTEGER;",
+    # Earned replays a position's whole history on every balance poll, keyed
+    # by pool plus either the depositor or a withdrawal's consent signer.
+    "CREATE INDEX IF NOT EXISTS idx_earn_tx_pool_user "
+    "ON earn_transactions(LOWER(pool_id), user_address);",
+    "CREATE INDEX IF NOT EXISTS idx_earn_tx_pool_signer "
+    "ON earn_transactions(LOWER(pool_id), consent_signer);",
 ]
 
 

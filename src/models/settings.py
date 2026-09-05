@@ -49,3 +49,5 @@ class Settings:
 
     lifi_execution_enabled: bool = False
     lifi_max_swap_amount_usd: int = 0
+
+    pool_admin_secret_key: str = ""

@@ -24,10 +24,12 @@ class SapphireClient:
     middleware stack handles encryption + signing transparently.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, secret_key: Optional[str] = None) -> None:
         settings = load_settings()
         self.rpc_url = settings.sapphire_rpc_url
-        self.account = Account.from_key(settings.liquidity_provider_secret_key)
+        self.account = Account.from_key(
+            secret_key or settings.liquidity_provider_secret_key
+        )
         self.w3 = Web3(Web3.HTTPProvider(self.rpc_url))
         self.w3.middleware_onion.add(SignAndSendRawMiddlewareBuilder.build(self.account))
         self.w3 = sapphire.wrap(self.w3, self.account)
@@ -99,6 +101,7 @@ class SapphireClient:
 
 
 _client_instance: Optional[SapphireClient] = None
+_pool_admin_client_instance: Optional[SapphireClient] = None
 
 
 def get_sapphire_client() -> SapphireClient:
@@ -106,3 +109,23 @@ def get_sapphire_client() -> SapphireClient:
     if _client_instance is None:
         _client_instance = SapphireClient()
     return _client_instance
+
+
+def get_pool_admin_sapphire_client() -> SapphireClient:
+    """Client signing as the EarnManager pool admin.
+
+    EarnManager's admin-gated functions (``syncTotalAssets``, ``createPool``,
+    ``setPoolActive``) require the ``poolAdmin`` signer, which is allowed to
+    differ from the LP account that signs swaps. When ``POOL_ADMIN_SECRET_KEY``
+    is unset the two roles share the LP account and this returns the same
+    client instance.
+    """
+    global _pool_admin_client_instance
+    if _pool_admin_client_instance is None:
+        settings = load_settings()
+        key = settings.pool_admin_secret_key
+        if not key or key == settings.liquidity_provider_secret_key:
+            _pool_admin_client_instance = get_sapphire_client()
+        else:
+            _pool_admin_client_instance = SapphireClient(secret_key=key)
+    return _pool_admin_client_instance

@@ -25,7 +25,7 @@ def _make_service(registry=None):
     )
 
     with patch("src.services.earn.vault_service.load_settings") as mock_settings, \
-         patch("src.services.earn.vault_service.get_sapphire_client") as mock_saph, \
+         patch("src.services.earn.vault_service.get_pool_admin_sapphire_client") as mock_saph, \
          patch("src.services.earn.vault_service.get_accounting_client") as mock_acct:
         mock_settings.return_value = settings
 
@@ -322,7 +322,10 @@ class TestStrategyRouting:
         registry = StrategyRegistry()
         strategy = MagicMock()
         strategy.name = "aave-v3"
+        strategy.is_healthy = AsyncMock(return_value=True)
         strategy.deposit_to_earn = AsyncMock()
+        strategy.total_assets = AsyncMock(return_value=1050)
+        strategy.idle_assets = AsyncMock(return_value=0)
         registry.register(POOL_ID_HEX, strategy)
 
         service, contract, _, _ = _make_service(registry=registry)
@@ -346,8 +349,10 @@ class TestStrategyRouting:
         registry = StrategyRegistry()
         strategy = MagicMock()
         strategy.name = "aave-v3"
+        strategy.is_healthy = AsyncMock(return_value=True)
         strategy.deposit_to_earn = AsyncMock(side_effect=RuntimeError("aave rpc down"))
-        strategy.total_assets = AsyncMock(return_value=0)
+        strategy.total_assets = AsyncMock(return_value=1050)
+        strategy.idle_assets = AsyncMock(return_value=0)
         registry.register(POOL_ID_HEX, strategy)
 
         service, contract, _, _ = _make_service(registry=registry)
@@ -376,12 +381,55 @@ class TestStrategyRouting:
         assert row["status"] == "undeployed"
         assert row["error"] is not None
 
+    async def test_deposit_is_undeployed_until_strategy_routing_succeeds(self, test_db):
+        from src.services.earn.registry import StrategyRegistry
+
+        registry = StrategyRegistry()
+        strategy = MagicMock()
+        strategy.name = "aave-v3"
+        strategy.is_healthy = AsyncMock(return_value=True)
+        strategy.total_assets = AsyncMock(return_value=1050)
+        strategy.idle_assets = AsyncMock(return_value=0)
+
+        status_during_routing = {}
+
+        async def capture_status(amount):
+            row = test_db.execute(
+                "SELECT status FROM earn_transactions WHERE operation = 'deposit'"
+            ).fetchone()
+            status_during_routing["value"] = row["status"]
+
+        strategy.deposit_to_earn = AsyncMock(side_effect=capture_status)
+        registry.register(POOL_ID_HEX, strategy)
+
+        service, contract, _, _ = _make_service(registry=registry)
+        contract.functions.pools.return_value.call.return_value = (
+            bytes.fromhex(USDC_TOKEN_ID[2:]),
+            POOL_ADDRESS,
+            1000, 1050, True,
+        )
+
+        result = await service.deposit(
+            POOL_ID_HEX, USER_ADDRESS, "1000", 5, "0x" + "aa" * 65
+        )
+
+        # A crash between the mint and the routing must leave the row visibly
+        # undeployed, never "completed" with idle funds behind it.
+        assert status_during_routing["value"] == "undeployed"
+        assert result["status"] == "completed"
+        row = test_db.execute(
+            "SELECT status FROM earn_transactions WHERE id = ?",
+            (result["deposit_id"],),
+        ).fetchone()
+        assert row["status"] == "completed"
+
     async def test_rate_snapshot_pairs_assets_with_the_shares_of_one_instant(self):
         from src.services.earn.registry import StrategyRegistry
 
         registry = StrategyRegistry()
         strategy = MagicMock()
         strategy.name = "aave-v3"
+        strategy.is_healthy = AsyncMock(return_value=True)
         strategy.total_assets = AsyncMock(return_value=1800)
         strategy.idle_assets = AsyncMock(return_value=200)
         registry.register(POOL_ID_HEX, strategy)
@@ -407,6 +455,7 @@ class TestStrategyRouting:
         registry = StrategyRegistry()
         strategy = MagicMock()
         strategy.name = "aave-v3"
+        strategy.is_healthy = AsyncMock(return_value=True)
         strategy.total_assets = AsyncMock(return_value=2000)
         strategy.idle_assets = AsyncMock(return_value=0)
         registry.register(POOL_ID_HEX, strategy)
@@ -425,6 +474,7 @@ class TestStrategyRouting:
         registry = StrategyRegistry()
         strategy = MagicMock()
         strategy.name = "aave-v3"
+        strategy.is_healthy = AsyncMock(return_value=True)
         strategy.total_assets = AsyncMock(side_effect=RuntimeError("rpc down"))
         strategy.idle_assets = AsyncMock(return_value=0)
         registry.register(POOL_ID_HEX, strategy)
@@ -453,13 +503,180 @@ class TestStrategyRouting:
 
         assert result["status"] == "completed"
 
+    async def _spy_sync_lock_state(self, service):
+        """Replace sync_total_assets with a spy that records whether the LP
+        lock was held at each call, so a test can prove the sync is serialized
+        with strategy movement rather than racing it.
+        Returns a confirmed value so the deposit fail-closed guard passes."""
+        held = []
+
+        async def spy(pool_id_hex):
+            held.append(service._pools_tx_lock.locked())
+            return 1050
+
+        service.sync_total_assets = spy
+        return held
+
+    async def test_deposit_syncs_under_the_lock(self, test_db):
+        from src.services.earn.registry import StrategyRegistry
+
+        registry = StrategyRegistry()
+        strategy = MagicMock()
+        strategy.name = "aave-v3"
+        strategy.is_healthy = AsyncMock(return_value=True)
+        strategy.deposit_to_earn = AsyncMock()
+        registry.register(POOL_ID_HEX, strategy)
+
+        service, contract, _, _ = _make_service(registry=registry)
+        contract.functions.pools.return_value.call.return_value = (
+            bytes.fromhex(USDC_TOKEN_ID[2:]),
+            POOL_ADDRESS,
+            1000, 1050, True,
+        )
+        held = await self._spy_sync_lock_state(service)
+
+        await service.deposit(POOL_ID_HEX, USER_ADDRESS, "1000", 5, "0x" + "aa" * 65)
+
+        assert held == [True]
+
+    async def test_failed_withdraw_resyncs_under_the_lock(self, test_db):
+        from src.services.earn.registry import StrategyRegistry
+
+        registry = StrategyRegistry()
+        strategy = MagicMock()
+        strategy.name = "aave-v3"
+        strategy.is_healthy = AsyncMock(return_value=True)
+        strategy.withdraw_from_earn = AsyncMock()
+        strategy.deposit_to_earn = AsyncMock()
+        registry.register(POOL_ID_HEX, strategy)
+
+        service, contract, sapphire, _ = _make_service(registry=registry)
+        contract.functions.pools.return_value.call.return_value = (
+            bytes.fromhex(USDC_TOKEN_ID[2:]),
+            POOL_ADDRESS,
+            1000, 1050, True,
+        )
+        sapphire.execute_contract_call.side_effect = RuntimeError("InsufficientShares")
+        held = await self._spy_sync_lock_state(service)
+
+        with patch("src.services.earn.vault_service.sign_transfer", return_value="0x" + "bb" * 65):
+            result = await service.withdraw(POOL_ID_HEX, USER_ADDRESS, "500", 0, USER_WITHDRAW_SIG)
+
+        assert result["status"] == "failed"
+        # Once before the reclaim, once after the rollback; both under the lock.
+        assert held == [True, True]
+        strategy.deposit_to_earn.assert_awaited_once_with(500)
+
+    async def test_deposit_refuses_when_strategy_unhealthy(self, test_db):
+        from src.services.earn.registry import StrategyRegistry
+
+        registry = StrategyRegistry()
+        strategy = MagicMock()
+        strategy.name = "aave-v3"
+        strategy.is_healthy = AsyncMock(return_value=False)
+        strategy.deposit_to_earn = AsyncMock()
+        registry.register(POOL_ID_HEX, strategy)
+
+        service, contract, sapphire, _ = _make_service(registry=registry)
+        contract.functions.pools.return_value.call.return_value = (
+            bytes.fromhex(USDC_TOKEN_ID[2:]),
+            POOL_ADDRESS,
+            1000, 1050, True,
+        )
+
+        with pytest.raises(ValueError, match="unhealthy"):
+            await service.deposit(POOL_ID_HEX, USER_ADDRESS, "1000", 5, "0x" + "aa" * 65)
+
+        sapphire.execute_contract_call.assert_not_called()
+        strategy.deposit_to_earn.assert_not_awaited()
+        assert test_db.execute("SELECT COUNT(*) c FROM earn_transactions").fetchone()["c"] == 0
+
+    async def test_deposit_refuses_to_mint_when_aum_unconfirmed(self, test_db):
+        """Fail closed: if the pool valuation cannot be confirmed, minting
+        against a stale or manipulated denominator is refused."""
+        from src.services.earn.registry import StrategyRegistry
+
+        registry = StrategyRegistry()
+        strategy = MagicMock()
+        strategy.name = "aave-v3"
+        strategy.is_healthy = AsyncMock(return_value=True)
+        strategy.deposit_to_earn = AsyncMock()
+        strategy.total_assets = AsyncMock(side_effect=RuntimeError("base rpc down"))
+        strategy.idle_assets = AsyncMock(return_value=0)
+        registry.register(POOL_ID_HEX, strategy)
+
+        service, contract, _, _ = _make_service(registry=registry)
+        contract.functions.pools.return_value.call.return_value = (
+            bytes.fromhex(USDC_TOKEN_ID[2:]),
+            POOL_ADDRESS,
+            1000, 1050, True,
+        )
+
+        with pytest.raises(ValueError, match="could not be confirmed"):
+            await service.deposit(POOL_ID_HEX, USER_ADDRESS, "1000", 5, "0x" + "aa" * 65)
+
+        strategy.deposit_to_earn.assert_not_awaited()
+        assert test_db.execute("SELECT COUNT(*) c FROM earn_transactions").fetchone()["c"] == 0
+
+    async def test_failed_withdraw_resync_never_understates_the_denominator(self, test_db):
+        """The exploit's finisher: a failed withdraw whose rollback also fails
+        leaves the reclaimed funds idle. Backing is conserved (Aave + idle ==
+        the original total), so the idle-inclusive resync must not push a
+        denominator below it. An external-only resync would write the reduced
+        Aave balance and inflate the next deposit."""
+        from src.services.earn.registry import StrategyRegistry
+
+        registry = StrategyRegistry()
+        strategy = MagicMock()
+        strategy.name = "aave-v3"
+        strategy.is_healthy = AsyncMock(return_value=True)
+        strategy.withdraw_from_earn = AsyncMock()
+        # Rollback re-supply fails, so the reclaimed funds stay idle.
+        strategy.deposit_to_earn = AsyncMock(side_effect=RuntimeError("rollback failed"))
+        # Before the reclaim all 1000 is in Aave; after the failed rollback most
+        # of it (800) is idle and only 200 remains in Aave.
+        strategy.total_assets = AsyncMock(side_effect=[1000, 200])
+        strategy.idle_assets = AsyncMock(side_effect=[0, 800])
+        registry.register(POOL_ID_HEX, strategy)
+
+        service, contract, sapphire, _ = _make_service(registry=registry)
+        contract.functions.pools.return_value.call.return_value = (
+            bytes.fromhex(USDC_TOKEN_ID[2:]),
+            POOL_ADDRESS,
+            1000, 1000, True,
+        )
+
+        def exec_call(**kwargs):
+            if kwargs["function_name"] == "withdraw":
+                raise RuntimeError("InsufficientShares")
+            return "0x" + "ab" * 32
+
+        sapphire.execute_contract_call.side_effect = exec_call
+
+        with patch("src.services.earn.vault_service.sign_transfer", return_value="0x" + "bb" * 65):
+            result = await service.withdraw(POOL_ID_HEX, USER_ADDRESS, "800", 0, USER_WITHDRAW_SIG)
+
+        assert result["status"] == "failed"
+        # The resync ran after the rollback and read the idle funds too.
+        assert strategy.idle_assets.await_count == 2
+        # No sync ever pushed a denominator below the true 1000 backing.
+        writes = [
+            c.kwargs["args"][1]
+            for c in sapphire.execute_contract_call.call_args_list
+            if c.kwargs.get("function_name") == "syncTotalAssets"
+        ]
+        assert all(w >= 1000 for w in writes)
+
     async def test_withdraw_reclaims_from_strategy(self, test_db):
         from src.services.earn.registry import StrategyRegistry
 
         registry = StrategyRegistry()
         strategy = MagicMock()
         strategy.name = "aave-v3"
+        strategy.is_healthy = AsyncMock(return_value=True)
         strategy.withdraw_from_earn = AsyncMock()
+        strategy.total_assets = AsyncMock(return_value=1050)
+        strategy.idle_assets = AsyncMock(return_value=0)
         registry.register(POOL_ID_HEX, strategy)
 
         service, contract, _, _ = _make_service(registry=registry)
@@ -483,7 +700,11 @@ class TestStrategyRouting:
         registry = StrategyRegistry()
         strategy = MagicMock()
         strategy.name = "aave-v3"
+        strategy.is_healthy = AsyncMock(return_value=True)
         strategy.withdraw_from_earn = AsyncMock(side_effect=RuntimeError("aave rpc down"))
+        strategy.deposit_to_earn = AsyncMock()
+        strategy.total_assets = AsyncMock(return_value=1050)
+        strategy.idle_assets = AsyncMock(return_value=0)
         registry.register(POOL_ID_HEX, strategy)
 
         service, contract, sapphire, _ = _make_service(registry=registry)
@@ -496,10 +717,11 @@ class TestStrategyRouting:
         contract.functions.convertToAssets.return_value.call.return_value = 525
 
         with patch("src.services.earn.vault_service.sign_transfer", return_value="0x" + "bb" * 65):
-            with pytest.raises(RuntimeError, match="aave rpc down"):
+            with pytest.raises(ValueError, match="Withdraw failed"):
                 await service.withdraw(POOL_ID_HEX, USER_ADDRESS, "500", 0, USER_WITHDRAW_SIG)
 
         strategy.withdraw_from_earn.assert_awaited_once()
+        strategy.deposit_to_earn.assert_awaited_once_with(500)
         sapphire.execute_contract_call.assert_not_called()
 
     async def test_withdraw_onchain_revert_resupplies_reclaimed_funds(self, test_db):
@@ -508,6 +730,7 @@ class TestStrategyRouting:
         registry = StrategyRegistry()
         strategy = MagicMock()
         strategy.name = "aave-v3"
+        strategy.is_healthy = AsyncMock(return_value=True)
         strategy.withdraw_from_earn = AsyncMock()
         strategy.deposit_to_earn = AsyncMock()
         registry.register(POOL_ID_HEX, strategy)
@@ -542,12 +765,29 @@ class TestEffectiveTotalAssets:
         registry = StrategyRegistry()
         strategy = MagicMock()
         strategy.name = "aave-v3"
+        strategy.is_healthy = AsyncMock(return_value=True)
         strategy.total_assets = AsyncMock(return_value=1100)
+        strategy.idle_assets = AsyncMock(return_value=0)
         registry.register(POOL_ID_HEX, strategy)
 
         service, _, _, _ = _make_service(registry=registry)
 
         assert await service.effective_total_assets(POOL_ID_HEX, 1000) == 1100
+
+    async def test_idle_funds_count_toward_live_aum(self):
+        from src.services.earn.registry import StrategyRegistry
+
+        registry = StrategyRegistry()
+        strategy = MagicMock()
+        strategy.name = "aave-v3"
+        strategy.is_healthy = AsyncMock(return_value=True)
+        strategy.total_assets = AsyncMock(return_value=1100)
+        strategy.idle_assets = AsyncMock(return_value=200)
+        registry.register(POOL_ID_HEX, strategy)
+
+        service, _, _, _ = _make_service(registry=registry)
+
+        assert await service.effective_total_assets(POOL_ID_HEX, 1000) == 1300
 
     async def test_strategy_failure_falls_back_to_on_chain(self):
         from src.services.earn.registry import StrategyRegistry
@@ -555,6 +795,7 @@ class TestEffectiveTotalAssets:
         registry = StrategyRegistry()
         strategy = MagicMock()
         strategy.name = "aave-v3"
+        strategy.is_healthy = AsyncMock(return_value=True)
         strategy.total_assets = AsyncMock(side_effect=RuntimeError("rpc down"))
         registry.register(POOL_ID_HEX, strategy)
 
@@ -568,7 +809,9 @@ class TestEffectiveTotalAssets:
         registry = StrategyRegistry()
         strategy = MagicMock()
         strategy.name = "aave-v3"
+        strategy.is_healthy = AsyncMock(return_value=True)
         strategy.total_assets = AsyncMock(return_value=0)
+        strategy.idle_assets = AsyncMock(return_value=0)
         registry.register(POOL_ID_HEX, strategy)
 
         service, _, _, _ = _make_service(registry=registry)
@@ -588,6 +831,7 @@ class TestStrategyApyBpsSafe:
         registry = StrategyRegistry()
         strategy = MagicMock()
         strategy.name = "aave-v3"
+        strategy.is_healthy = AsyncMock(return_value=True)
         strategy.get_apy_bps = AsyncMock(return_value=487)
         registry.register(POOL_ID_HEX, strategy)
 
@@ -601,6 +845,7 @@ class TestStrategyApyBpsSafe:
         registry = StrategyRegistry()
         strategy = MagicMock()
         strategy.name = "aave-v3"
+        strategy.is_healthy = AsyncMock(return_value=True)
         strategy.get_apy_bps = AsyncMock(side_effect=RuntimeError("rpc down"))
         registry.register(POOL_ID_HEX, strategy)
 
@@ -611,58 +856,143 @@ class TestStrategyApyBpsSafe:
 
 
 class TestSyncTotalAssets:
-    async def test_manual_strategy_is_noop(self):
-        service, _, sapphire, _ = _make_service()
+    async def test_manual_strategy_returns_on_chain_authoritative(self):
+        service, contract, sapphire, _ = _make_service()
+        contract.functions.pools.return_value.call.return_value = (
+            bytes.fromhex(USDC_TOKEN_ID[2:]),
+            POOL_ADDRESS,
+            1000, 1500, True,
+        )
+
+        result = await service.sync_total_assets(POOL_ID_HEX)
+
+        # No external capital, so the on-chain total is already authoritative.
+        assert result == 1500
+        sapphire.execute_contract_call.assert_not_called()
+
+    async def test_skips_when_backing_matches_on_chain(self):
+        from src.services.earn.registry import StrategyRegistry
+
+        registry = StrategyRegistry()
+        strategy = MagicMock()
+        strategy.name = "aave-v3"
+        strategy.is_healthy = AsyncMock(return_value=True)
+        strategy.total_assets = AsyncMock(return_value=1400)
+        strategy.idle_assets = AsyncMock(return_value=100)
+        registry.register(POOL_ID_HEX, strategy)
+
+        service, contract, sapphire, _ = _make_service(registry=registry)
+        contract.functions.pools.return_value.call.return_value = (
+            bytes.fromhex(USDC_TOKEN_ID[2:]),
+            POOL_ADDRESS,
+            1000, 1500, True,
+        )
+
+        result = await service.sync_total_assets(POOL_ID_HEX)
+
+        # strategy 1400 + idle 100 == on-chain 1500, nothing to write.
+        assert result == 1500
+        sapphire.execute_contract_call.assert_not_called()
+
+    async def test_writes_strategy_plus_idle_when_drifted(self):
+        from src.services.earn.registry import StrategyRegistry
+
+        registry = StrategyRegistry()
+        strategy = MagicMock()
+        strategy.name = "aave-v3"
+        strategy.is_healthy = AsyncMock(return_value=True)
+        strategy.total_assets = AsyncMock(return_value=1700)
+        strategy.idle_assets = AsyncMock(return_value=200)
+        registry.register(POOL_ID_HEX, strategy)
+
+        service, contract, sapphire, _ = _make_service(registry=registry)
+        contract.functions.pools.return_value.call.return_value = (
+            bytes.fromhex(USDC_TOKEN_ID[2:]),
+            POOL_ADDRESS,
+            1000, 1500, True,
+        )
+
+        result = await service.sync_total_assets(POOL_ID_HEX)
+
+        # Idle funds back existing shares, so they must be in the denominator.
+        assert result == 1900
+        sapphire.execute_contract_call.assert_called_once()
+        call_kwargs = sapphire.execute_contract_call.call_args.kwargs
+        assert call_kwargs["function_name"] == "syncTotalAssets"
+        assert call_kwargs["args"][1] == 1900
+
+    async def test_refuses_to_zero_a_nonzero_denominator(self):
+        from src.services.earn.registry import StrategyRegistry
+
+        registry = StrategyRegistry()
+        strategy = MagicMock()
+        strategy.name = "aave-v3"
+        strategy.is_healthy = AsyncMock(return_value=True)
+        strategy.total_assets = AsyncMock(return_value=0)
+        strategy.idle_assets = AsyncMock(return_value=0)
+        registry.register(POOL_ID_HEX, strategy)
+
+        service, contract, sapphire, _ = _make_service(registry=registry)
+        contract.functions.pools.return_value.call.return_value = (
+            bytes.fromhex(USDC_TOKEN_ID[2:]),
+            POOL_ADDRESS,
+            1000, 1500, True,
+        )
 
         result = await service.sync_total_assets(POOL_ID_HEX)
 
         assert result is None
         sapphire.execute_contract_call.assert_not_called()
 
-    async def test_skips_when_external_matches_on_chain(self):
+    async def test_refuses_a_large_unexplained_drop(self):
+        """A partially credited reclaim reads as a big dip in backing. Writing
+        it would hand the next deposit a false low denominator, so the sync
+        must refuse rather than pass the transient through on-chain."""
         from src.services.earn.registry import StrategyRegistry
 
         registry = StrategyRegistry()
         strategy = MagicMock()
         strategy.name = "aave-v3"
-        strategy.total_assets = AsyncMock(return_value=1500)
+        strategy.is_healthy = AsyncMock(return_value=True)
+        strategy.total_assets = AsyncMock(return_value=800)
+        strategy.idle_assets = AsyncMock(return_value=0)
         registry.register(POOL_ID_HEX, strategy)
 
         service, contract, sapphire, _ = _make_service(registry=registry)
         contract.functions.pools.return_value.call.return_value = (
             bytes.fromhex(USDC_TOKEN_ID[2:]),
             POOL_ADDRESS,
-            1000, 1500, True,
+            1000, 1000, True,
         )
 
         result = await service.sync_total_assets(POOL_ID_HEX)
 
-        assert result == 1500
+        assert result is None
         sapphire.execute_contract_call.assert_not_called()
 
-    async def test_calls_contract_when_drifted(self):
+    async def test_small_drop_within_tolerance_still_syncs(self):
         from src.services.earn.registry import StrategyRegistry
 
         registry = StrategyRegistry()
         strategy = MagicMock()
         strategy.name = "aave-v3"
-        strategy.total_assets = AsyncMock(return_value=1700)
+        strategy.is_healthy = AsyncMock(return_value=True)
+        strategy.total_assets = AsyncMock(return_value=995)
+        strategy.idle_assets = AsyncMock(return_value=0)
         registry.register(POOL_ID_HEX, strategy)
 
         service, contract, sapphire, _ = _make_service(registry=registry)
         contract.functions.pools.return_value.call.return_value = (
             bytes.fromhex(USDC_TOKEN_ID[2:]),
             POOL_ADDRESS,
-            1000, 1500, True,
+            1000, 1000, True,
         )
 
         result = await service.sync_total_assets(POOL_ID_HEX)
 
-        assert result == 1700
-        sapphire.execute_contract_call.assert_called_once()
+        assert result == 995
         call_kwargs = sapphire.execute_contract_call.call_args.kwargs
-        assert call_kwargs["function_name"] == "syncTotalAssets"
-        assert call_kwargs["args"][1] == 1700
+        assert call_kwargs["args"][1] == 995
 
     async def test_strategy_read_failure_returns_none(self):
         from src.services.earn.registry import StrategyRegistry
@@ -670,6 +1000,7 @@ class TestSyncTotalAssets:
         registry = StrategyRegistry()
         strategy = MagicMock()
         strategy.name = "aave-v3"
+        strategy.is_healthy = AsyncMock(return_value=True)
         strategy.total_assets = AsyncMock(side_effect=RuntimeError("rpc down"))
         registry.register(POOL_ID_HEX, strategy)
 
@@ -686,6 +1017,7 @@ class TestSyncTotalAssets:
         registry = StrategyRegistry()
         strategy = MagicMock()
         strategy.name = "aave-v3"
+        strategy.is_healthy = AsyncMock(return_value=True)
         strategy.total_assets = AsyncMock(return_value=1700)
         registry.register(POOL_ID_HEX, strategy)
 
@@ -707,6 +1039,7 @@ class TestSyncTotalAssets:
         registry = StrategyRegistry()
         strategy = MagicMock()
         strategy.name = "aave-v3"
+        strategy.is_healthy = AsyncMock(return_value=True)
         strategy.total_assets = AsyncMock(return_value=0)
         registry.register(POOL_ID_HEX, strategy)
 
@@ -725,6 +1058,7 @@ class TestLiveAUMInResponses:
         registry = StrategyRegistry()
         strategy = MagicMock()
         strategy.name = "aave-v3"
+        strategy.is_healthy = AsyncMock(return_value=True)
         strategy.total_assets = AsyncMock(return_value=1100)
         registry.register(POOL_ID_HEX, strategy)
 
@@ -745,6 +1079,7 @@ class TestLiveAUMInResponses:
         registry = StrategyRegistry()
         strategy = MagicMock()
         strategy.name = "aave-v3"
+        strategy.is_healthy = AsyncMock(return_value=True)
         strategy.total_assets = AsyncMock(return_value=1200)
         strategy.idle_assets = AsyncMock(return_value=0)
         registry.register(POOL_ID_HEX, strategy)
@@ -843,8 +1178,10 @@ class TestShareDeltaCapture:
 
     async def test_deposit_records_positive_delta_and_rate(self, test_db):
         service, contract, _, _ = _make_service()
-        # pools() is read before the tx (1000 shares) and after (1100).
+        # pools() reads: pre-check, sync, shares_before (all pre-tx, 1000),
+        # then shares_after and post-tx (1100).
         contract.functions.pools.return_value.call.side_effect = [
+            (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1000, 1050, True),
             (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1000, 1050, True),
             (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1000, 1050, True),
             (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1100, 1155, True),
@@ -873,6 +1210,7 @@ class TestShareDeltaCapture:
         service, contract, _, _ = _make_service()
         contract.functions.pools.return_value.call.side_effect = [
             (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1000, 1050, True),
+            (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1000, 1050, True),
             RuntimeError("rpc down"),
             (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1100, 1155, True),
             (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1100, 1155, True),
@@ -889,6 +1227,7 @@ class TestShareDeltaCapture:
     async def test_withdraw_records_negative_delta(self, test_db):
         service, contract, _, _ = _make_service()
         contract.functions.pools.return_value.call.side_effect = [
+            (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1000, 1050, True),
             (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1000, 1050, True),
             (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1000, 1050, True),
             (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 600, 630, True),
@@ -980,6 +1319,7 @@ class TestGetAllBalancesEarned:
         contract.functions.pools.return_value.call.side_effect = [
             (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1000, 1050, True),
             (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1000, 1050, True),
+            (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1000, 1050, True),
             # Assets jumped between settlement and this read.
             (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1100, 9_999_999, True),
             (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1100, 9_999_999, True),
@@ -1014,6 +1354,7 @@ class TestGetAllBalancesEarned:
         # what stops a wrong delta from being reported as a real figure.
         service, contract, _, _ = _make_service()
         contract.functions.pools.return_value.call.side_effect = [
+            (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1000, 1050, True),
             (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1000, 1050, True),
             (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1000, 1050, True),
             # Our +100 plus somebody else's +200 landed before we looked.

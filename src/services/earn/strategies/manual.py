@@ -29,5 +29,10 @@ class ManualStrategy(BaseStrategy):
     async def total_assets(self) -> int:
         return 0
 
+    async def idle_assets(self) -> int:
+        # A manual pool parks nothing off to one side; its funds are the
+        # on-chain balance the vault already counts.
+        return 0
+
     async def is_healthy(self) -> bool:
         return True

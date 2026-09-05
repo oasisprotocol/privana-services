@@ -20,6 +20,7 @@ from privana.types.common import Network
 from src.clients.aave import AaveClient
 from src.clients.defillama import DefiLlamaClient
 from src.clients.privana import (
+    authed_read,
     get_authenticated_privana_client,
     get_privana_client,
 )
@@ -196,7 +197,6 @@ class AaveStrategy(BaseStrategy):
         if amount <= 0:
             raise ValueError(f"withdraw_from_earn requires a positive amount, got {amount}")
 
-        client = await self._get_authed_privana()
         pre_balance = await self._read_pool_balance()
 
         redeem_tx = self._client.withdraw(self._asset_address, amount, to=self._pool_address)
@@ -205,6 +205,10 @@ class AaveStrategy(BaseStrategy):
             self._asset_address, amount, redeem_tx,
         )
 
+        # Acquired right before each authed call, not once for the flow: the
+        # getter refreshes the bearer token near expiry, and the on-chain legs
+        # in between can outlive a token that was fresh at the start.
+        client = await self._get_authed_privana()
         deposit = await client.get_deposit_address(
             DepositAddressRequest(chain_type="evm")
         )
@@ -220,6 +224,7 @@ class AaveStrategy(BaseStrategy):
         )
 
         try:
+            client = await self._get_authed_privana()
             check = await client.check_deposit(
                 DepositCheckRequest(
                     chain_id=self._client.w3.eth.chain_id,
@@ -380,11 +385,16 @@ class AaveStrategy(BaseStrategy):
         client (LP/pool key) here. Wrapped in the network-retry helper so a
         flaky read can't take down the post-redeem credit poll.
         """
-        client = await self._get_authed_privana()
-        balance = await self._retry_on_network_error(
-            "get_balance",
-            lambda: client.get_balance(self._token_id),
-        )
+        async def _get_balance():
+            # Re-acquire per attempt so a credit poll that outlives the JWT
+            # picks up the refreshed bearer token. authed_read adds recovery
+            # from an early token revocation (401/403); the injected test
+            # client bypasses both.
+            if self._privana is not None:
+                return await self._privana.get_balance(self._token_id)
+            return await authed_read(lambda c: c.get_balance(self._token_id))
+
+        balance = await self._retry_on_network_error("get_balance", _get_balance)
         return int(balance.balance)
 
     async def _poll_until_balance_at_least(self, target_balance: int) -> None:

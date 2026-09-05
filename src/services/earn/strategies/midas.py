@@ -21,6 +21,7 @@ from privana.types.common import Network
 from src.clients.defillama import DefiLlamaClient
 from src.clients.midas import MidasClient
 from src.clients.privana import (
+    authed_read,
     get_authenticated_privana_client,
     get_privana_client,
 )
@@ -314,7 +315,6 @@ class MidasStrategy(BaseStrategy):
         if amount <= 0:
             raise ValueError(f"withdraw_from_earn requires a positive amount, got {amount}")
 
-        client = await self._get_authed_privana()
         pre_balance = await self._read_pool_balance()
 
         price, decimals = await asyncio.to_thread(self._read_oracle_price)
@@ -376,6 +376,10 @@ class MidasStrategy(BaseStrategy):
             mtbill_to_redeem, min_receive_usdc, realized_usdc, redeem_tx,
         )
 
+        # Acquired right before each authed call, not once for the flow: the
+        # getter refreshes the bearer token near expiry, and the redeem legs
+        # above can outlive a token that was fresh at the start.
+        client = await self._get_authed_privana()
         deposit = await client.get_deposit_address(DepositAddressRequest(chain_type="evm"))
 
         transfer_tx = await asyncio.to_thread(
@@ -390,6 +394,7 @@ class MidasStrategy(BaseStrategy):
         )
 
         try:
+            client = await self._get_authed_privana()
             check = await client.check_deposit(
                 DepositCheckRequest(
                     chain_id=self._client.w3.eth.chain_id,
@@ -583,11 +588,15 @@ class MidasStrategy(BaseStrategy):
             await asyncio.sleep(self._poll_interval_sec)
 
     async def _read_pool_balance(self) -> int:
-        client = await self._get_authed_privana()
-        balance = await self._retry_on_network_error(
-            "get_balance",
-            lambda: client.get_balance(self._token_id),
-        )
+        async def _get_balance():
+            # Re-acquire per attempt for JWT expiry; authed_read also recovers
+            # from an early revocation (401/403). Injected test client bypasses
+            # both.
+            if self._privana is not None:
+                return await self._privana.get_balance(self._token_id)
+            return await authed_read(lambda c: c.get_balance(self._token_id))
+
+        balance = await self._retry_on_network_error("get_balance", _get_balance)
         return int(balance.balance)
 
     async def _poll_until_balance_at_least(self, target_balance: int) -> None:

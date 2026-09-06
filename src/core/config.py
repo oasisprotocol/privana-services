@@ -100,6 +100,7 @@ def load_settings(refresh: bool = False) -> Settings:
             coingecko_token_ids=os.getenv("COINGECKO_TOKEN_IDS", ""),
             lifi_execution_enabled=os.getenv("LIFI_EXECUTION_ENABLED", "false").lower() == "true",
             lifi_max_swap_amount_usd=int(os.getenv("LIFI_MAX_SWAP_AMOUNT_USD", "0")),
+            pool_admin_secret_key=os.getenv("POOL_ADMIN_SECRET_KEY", ""),
         )
     return _settings
 

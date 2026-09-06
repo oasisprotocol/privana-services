@@ -199,14 +199,16 @@ contract EarnManager is
     /// -----------------------------------------------------------------------
 
     /// @notice Mint pool shares for `toUser` against an accounting transfer
-    /// from `toUser` to the pool's internal address. Atomic: if accounting
-    /// rejects the transfer the share mint is reverted with it.
+    /// into the pool's internal address. Atomic: if accounting rejects the
+    /// transfer the share mint is reverted with it.
     /// @param poolId Earn pool ID.
-    /// @param toUser Account whose accounting balance is debited and to whom
-    /// shares are minted.
+    /// @param toUser Account to whom shares are minted. The accounting balance
+    /// debited is the signer accounting recovers from `signature`, not this
+    /// parameter; the two are the same account in the normal flow.
     /// @param amount Underlying asset amount being deposited.
-    /// @param nonce Accounting transfer nonce for `toUser`.
-    /// @param signature `toUser`'s EIP-712 ``Transfer(toUser, pool, ...)``
+    /// @param nonce Accounting transfer nonce for the depositor recovered
+    /// from `signature`.
+    /// @param signature Depositor's EIP-712 ``Transfer(depositor, pool, ...)``
     /// signed in the accounting domain. Verified on the accounting side.
     function deposit(
         bytes32 poolId,

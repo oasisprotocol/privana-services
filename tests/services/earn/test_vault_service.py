@@ -25,7 +25,7 @@ def _make_service(registry=None):
     )
 
     with patch("src.services.earn.vault_service.load_settings") as mock_settings, \
-         patch("src.services.earn.vault_service.get_sapphire_client") as mock_saph, \
+         patch("src.services.earn.vault_service.get_pool_admin_sapphire_client") as mock_saph, \
          patch("src.services.earn.vault_service.get_accounting_client") as mock_acct:
         mock_settings.return_value = settings
 
@@ -381,6 +381,48 @@ class TestStrategyRouting:
         assert row["status"] == "undeployed"
         assert row["error"] is not None
 
+    async def test_deposit_is_undeployed_until_strategy_routing_succeeds(self, test_db):
+        from src.services.earn.registry import StrategyRegistry
+
+        registry = StrategyRegistry()
+        strategy = MagicMock()
+        strategy.name = "aave-v3"
+        strategy.is_healthy = AsyncMock(return_value=True)
+        strategy.total_assets = AsyncMock(return_value=1050)
+        strategy.idle_assets = AsyncMock(return_value=0)
+
+        status_during_routing = {}
+
+        async def capture_status(amount):
+            row = test_db.execute(
+                "SELECT status FROM earn_transactions WHERE operation = 'deposit'"
+            ).fetchone()
+            status_during_routing["value"] = row["status"]
+
+        strategy.deposit_to_earn = AsyncMock(side_effect=capture_status)
+        registry.register(POOL_ID_HEX, strategy)
+
+        service, contract, _, _ = _make_service(registry=registry)
+        contract.functions.pools.return_value.call.return_value = (
+            bytes.fromhex(USDC_TOKEN_ID[2:]),
+            POOL_ADDRESS,
+            1000, 1050, True,
+        )
+
+        result = await service.deposit(
+            POOL_ID_HEX, USER_ADDRESS, "1000", 5, "0x" + "aa" * 65
+        )
+
+        # A crash between the mint and the routing must leave the row visibly
+        # undeployed, never "completed" with idle funds behind it.
+        assert status_during_routing["value"] == "undeployed"
+        assert result["status"] == "completed"
+        row = test_db.execute(
+            "SELECT status FROM earn_transactions WHERE id = ?",
+            (result["deposit_id"],),
+        ).fetchone()
+        assert row["status"] == "completed"
+
     async def test_rate_snapshot_pairs_assets_with_the_shares_of_one_instant(self):
         from src.services.earn.registry import StrategyRegistry
 
@@ -469,7 +511,7 @@ class TestStrategyRouting:
         held = []
 
         async def spy(pool_id_hex):
-            held.append(service._lp_tx_lock.locked())
+            held.append(service._pools_tx_lock.locked())
             return 1050
 
         service.sync_total_assets = spy

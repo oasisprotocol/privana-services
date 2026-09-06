@@ -9,6 +9,7 @@ services:
     platform: linux/amd64
     environment:
       - LIQUIDITY_PROVIDER_SECRET_KEY
+      - POOL_ADMIN_SECRET_KEY
       - LIFI_API_KEY
     volumes:
       - /run/rofl-appd.sock:/run/rofl-appd.sock

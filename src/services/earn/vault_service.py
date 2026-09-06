@@ -8,7 +8,7 @@ from typing import Optional
 from web3 import Web3
 
 from src.clients.accounting import get_accounting_client
-from src.clients.sapphire import get_sapphire_client
+from src.clients.sapphire import get_pool_admin_sapphire_client
 from src.core.abi import load_abi
 from src.core.config import load_settings
 from src.core.db import db_write, get_db
@@ -32,10 +32,12 @@ EARN_OP_WITHDRAW = "withdraw"
 EARN_STATUS_PENDING = "pending"
 EARN_STATUS_COMPLETED = "completed"
 EARN_STATUS_FAILED = "failed"
-# Shares were minted on-chain but the funds never reached the yield strategy.
-# Distinct from "failed" because the user's deposit is real and irreversible,
-# and distinct from "completed" because the balance earns nothing until an
-# operator redeploys it.
+# Shares were minted on-chain but the funds have not reached the yield
+# strategy. Distinct from "failed" because the user's deposit is real and
+# irreversible, and distinct from "completed" because the balance earns
+# nothing until deployed. Every deposit passes through this state between
+# the mint and the strategy routing, so a crash in that window leaves a row
+# an operator can find instead of a "completed" row hiding idle funds.
 EARN_STATUS_UNDEPLOYED = "undeployed"
 
 SYNC_MAX_DROP_BPS = 100
@@ -50,9 +52,9 @@ def _exchange_rate(total_assets: int, total_shares: int) -> str:
 class VaultService:
     def __init__(self, registry: Optional[StrategyRegistry] = None) -> None:
         self.settings = load_settings()
-        self.sapphire = get_sapphire_client()
+        self.sapphire = get_pool_admin_sapphire_client()
         self.accounting = get_accounting_client()
-        self._lp_tx_lock = asyncio.Lock()
+        self._pools_tx_lock = asyncio.Lock()
         self._registry = registry if registry is not None else get_strategy_registry()
         self.contract_address = Web3.to_checksum_address(
             self.settings.earn_manager_contract_address
@@ -308,7 +310,7 @@ class VaultService:
 
         sig_bytes = bytes.fromhex(signature.removeprefix("0x"))
 
-        async with self._lp_tx_lock:
+        async with self._pools_tx_lock:
             # Sync under the lock: it reads the strategy's live AUM and writes
             # it as the contract's share-math denominator, so it must not run
             # while another op has assets in flight. Outside the lock a deposit
@@ -365,7 +367,9 @@ class VaultService:
                     "error": error,
                 }
 
-            self._update_transaction(tx_id, status=EARN_STATUS_COMPLETED, tx_hash=tx_hash)
+            self._update_transaction(
+                tx_id, status=EARN_STATUS_UNDEPLOYED, tx_hash=tx_hash
+            )
 
             deploy_error = None
             try:
@@ -377,9 +381,9 @@ class VaultService:
                     tx_id,
                 )
                 deploy_error = sanitize_error(str(exc))
-                self._update_transaction(
-                    tx_id, status=EARN_STATUS_UNDEPLOYED, error=deploy_error
-                )
+                self._update_transaction(tx_id, error=deploy_error)
+            else:
+                self._update_transaction(tx_id, status=EARN_STATUS_COMPLETED)
 
         deploy_status = EARN_STATUS_UNDEPLOYED if deploy_error else EARN_STATUS_COMPLETED
 
@@ -447,7 +451,7 @@ class VaultService:
             raise ValueError("Pool not found")
         # No active check — users must always be able to exit paused pools.
 
-        async with self._lp_tx_lock:
+        async with self._pools_tx_lock:
             # Sync inside the lock, before moving any strategy assets, so a
             # concurrent deposit can never sync the transient balance this
             # reclaim is about to create.

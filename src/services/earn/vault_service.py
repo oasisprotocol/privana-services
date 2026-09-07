@@ -20,6 +20,11 @@ from src.core.validation import (
     validate_signature,
 )
 from src.services.earn.change import change_24h
+from src.services.earn.earned import (
+    STATUS_LEDGER_INCOMPLETE,
+    Earned,
+    earned_active,
+)
 from src.services.earn.registry import StrategyRegistry, get_strategy_registry
 from src.services.earn.strategies.base import ApyPoint
 
@@ -338,6 +343,8 @@ class VaultService:
                 signature=signature,
             )
 
+            shares_before = await self._total_shares_safe(pool_id)
+
             try:
                 tx_hash = await asyncio.to_thread(
                     self.sapphire.execute_contract_call,
@@ -370,6 +377,7 @@ class VaultService:
             self._update_transaction(
                 tx_id, status=EARN_STATUS_UNDEPLOYED, tx_hash=tx_hash
             )
+            await self._record_share_delta(tx_id, pool_id, shares_before, amount)
 
             deploy_error = None
             try:
@@ -514,6 +522,8 @@ class VaultService:
                 consent_signer=consent_signer,
             )
 
+            shares_before = await self._total_shares_safe(pool_id)
+
             try:
                 tx_hash = await asyncio.to_thread(
                     self.sapphire.execute_contract_call,
@@ -550,6 +560,11 @@ class VaultService:
                     "status": "failed",
                     "error": error,
                 }
+
+            # Inside the lock: totalShares only moves through this service's
+            # own deposits and withdrawals, so the delta across the tx is this
+            # user's share movement exactly.
+            await self._record_share_delta(tx_id, pool_id, shares_before, amount)
 
         self._update_transaction(tx_id, status=EARN_STATUS_COMPLETED, tx_hash=tx_hash)
 
@@ -772,6 +787,56 @@ class VaultService:
         )
         return tx_id
 
+    async def _total_shares_safe(self, pool_id: bytes) -> Optional[int]:
+        """Pool totalShares, or None if the read fails.
+
+        Only ever called inside the earn tx lock, where it pairs with a second
+        read to derive one cashflow's share movement. A failure here costs the
+        earned figure for that position, never the operation itself.
+        """
+        try:
+            pool = await asyncio.to_thread(self.get_pool, pool_id)
+            return int(pool["total_shares"])
+        except Exception:
+            logger.exception("totalShares read failed; share delta will be unrecorded")
+            return None
+
+    async def _record_share_delta(
+        self, tx_id: str, pool_id: bytes, shares_before: Optional[int], amount: str
+    ) -> None:
+        """Persist this cashflow's signed share movement and settlement rate.
+
+        Per-user share state is confidential on Sapphire, so the only way to
+        learn how many shares a cashflow moved is to bracket it: the pool's
+        public totalShares before and after, read under the tx lock that
+        serializes every mint and burn this service performs. Leaving the
+        columns NULL is the honest outcome when either read fails — the
+        completeness check downstream then refuses to report a figure rather
+        than reporting a wrong one.
+        """
+        if shares_before is None:
+            return
+        try:
+            pool_after = await asyncio.to_thread(self.get_pool, pool_id)
+        except Exception:
+            logger.exception("Post-tx totalShares read failed for %s", tx_id)
+            return
+
+        delta = int(pool_after["total_shares"]) - shares_before
+        # The settlement rate is what this cashflow actually paid per share,
+        # not whatever the pool reads back afterwards: syncTotalAssets runs
+        # outside this lock and can move the pool's ratio between the tx and
+        # the read.
+        rate = (
+            str(Decimal(int(amount)) / Decimal(abs(delta))) if delta else None
+        )
+        self._update_transaction(
+            tx_id,
+            shares_delta=str(delta),
+            exchange_rate=rate,
+            settled_at=int(time.time()),
+        )
+
     def _update_transaction(self, tx_id: str, **fields) -> None:
         db = get_db()
         fields["updated_at"] = int(time.time())
@@ -825,6 +890,18 @@ class VaultService:
             except Exception:
                 logger.exception("24h change failed for pool %s", pool["pool_id"])
                 change = None
+            try:
+                earned = await asyncio.to_thread(
+                    earned_active,
+                    user_address,
+                    pool["pool_id"],
+                    shares,
+                    underlying,
+                    int(pool["total_shares"]),
+                )
+            except Exception:
+                logger.exception("earned failed for pool %s", pool["pool_id"])
+                earned = Earned(active=None, status=STATUS_LEDGER_INCOMPLETE)
             return {
                 "pool_id": pool["pool_id"],
                 "token_id": pool["token_id"],
@@ -833,6 +910,11 @@ class VaultService:
                 "exchange_rate": _exchange_rate(effective_assets, pool["total_shares"]),
                 "change_24h": change.amount if change else None,
                 "change_24h_pct": change.pct if change else None,
+                "earned_active": earned.active,
+                "earned_active_status": earned.status,
+                "cost_basis": earned.cost_basis,
+                "deposit_count": earned.deposit_count,
+                "first_deposit_at": earned.first_deposit_at,
             }
 
         results = await asyncio.gather(*[fetch_balance(p) for p in pools])

@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Optional
+from typing import Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class PoolStatus(str, Enum):
@@ -181,6 +181,27 @@ class BalanceResponse(BaseModel):
             '"0.008" means 0.8%, so multiply by 100 to display.'
         ),
     )
+    # Accrued yield on the shares still held. Null whenever
+    # status is not "ok", so the UI shows a dash rather than a made-up zero.
+    earned_active: Optional[str] = None
+    earned_active_status: Literal[
+        "ok", "ledger_incomplete", "pending_settlement", "unsupported"
+    ] = "unsupported"
+    cost_basis: Optional[str] = None
+    deposit_count: int = 0
+    first_deposit_at: Optional[int] = None
+
+    @model_validator(mode="after")
+    def _earned_value_matches_status(self) -> "BalanceResponse":
+        # A figure alongside a non-ok status, or a missing one alongside "ok",
+        # would tell the UI to render something the backend cannot stand
+        # behind. Fail loudly here rather than shipping either.
+        if (self.earned_active is None) != (self.earned_active_status != "ok"):
+            raise ValueError(
+                "earned_active must be set if and only if "
+                "earned_active_status is 'ok'"
+            )
+        return self
 
 
 class BalanceListResponse(BaseModel):

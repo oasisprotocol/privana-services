@@ -1121,11 +1121,16 @@ class TestGetAllBalancesChange:
         from src.services.pool_rate_history import PoolRatePoint, store_point
 
         service, contract, _, _ = _make_service()
-        self._seed_pool_contract(contract)
-        # rate 1.0 a day ago vs 1.05 now
+        # Pool totals scaled so the contract's virtual offsets give exact
+        # rates: 1.0 at the anchor, 1.05 now.
+        self._seed_pool_contract(contract, total_assets=1_049_999_999,
+                                 total_shares=999_000_000)
         store_point(
             POOL_ID_HEX,
-            PoolRatePoint(int(time_module.time()) - 86400 - 21600, "1000", "1000"),
+            PoolRatePoint(
+                int(time_module.time()) - 86400 - 21600,
+                "999999999", "999000000",
+            ),
         )
 
         balances = await service.get_all_balances(
@@ -1165,3 +1170,204 @@ class TestGetAllBalancesChange:
         assert balances[0]["shares"] == "500"
         assert balances[0]["change_24h"] is None
         assert balances[0]["change_24h_pct"] is None
+
+
+class TestShareDeltaCapture:
+    """Bracketing totalShares across a cashflow is the only way to learn a
+    user's share movement: per-user state is confidential on the contract."""
+
+    async def test_deposit_records_positive_delta_and_rate(self, test_db):
+        service, contract, _, _ = _make_service()
+        # pools() reads: pre-check, sync, shares_before (all pre-tx, 1000),
+        # then shares_after and post-tx (1100).
+        contract.functions.pools.return_value.call.side_effect = [
+            (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1000, 1050, True),
+            (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1000, 1050, True),
+            (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1000, 1050, True),
+            (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1100, 1155, True),
+            (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1100, 1155, True),
+        ]
+        await service.deposit(POOL_ID_HEX, USER_ADDRESS, "105", 5, "0x" + "aa" * 65)
+
+        row = test_db.execute("SELECT * FROM earn_transactions").fetchone()
+        assert row["shares_delta"] == "100"
+        assert row["exchange_rate"] == "1.05"
+
+    async def test_failed_deposit_records_no_delta(self, test_db):
+        service, contract, saph, _ = _make_service()
+        contract.functions.pools.return_value.call.return_value = (
+            bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1000, 1050, True,
+        )
+        saph.execute_contract_call.side_effect = RuntimeError("reverted")
+
+        await service.deposit(POOL_ID_HEX, USER_ADDRESS, "105", 5, "0x" + "aa" * 65)
+
+        row = test_db.execute("SELECT * FROM earn_transactions").fetchone()
+        assert row["status"] == "failed"
+        assert row["shares_delta"] is None
+
+    async def test_delta_is_null_when_pre_read_fails(self, test_db):
+        service, contract, _, _ = _make_service()
+        contract.functions.pools.return_value.call.side_effect = [
+            (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1000, 1050, True),
+            (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1000, 1050, True),
+            RuntimeError("rpc down"),
+            (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1100, 1155, True),
+            (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1100, 1155, True),
+        ]
+        result = await service.deposit(
+            POOL_ID_HEX, USER_ADDRESS, "105", 5, "0x" + "aa" * 65
+        )
+
+        # The deposit itself still settles; only the earned figure is lost.
+        assert result["status"] == "completed"
+        row = test_db.execute("SELECT * FROM earn_transactions").fetchone()
+        assert row["shares_delta"] is None
+
+    async def test_withdraw_records_negative_delta(self, test_db):
+        service, contract, _, _ = _make_service()
+        contract.functions.pools.return_value.call.side_effect = [
+            (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1000, 1050, True),
+            (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1000, 1050, True),
+            (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1000, 1050, True),
+            (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 600, 630, True),
+            (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 600, 630, True),
+            (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 600, 630, True),
+        ]
+
+        with patch(
+            "src.services.earn.vault_service.sign_transfer",
+            return_value="0x" + "bb" * 65,
+        ):
+            await service.withdraw(POOL_ID_HEX, USER_ADDRESS, "420", 0, USER_WITHDRAW_SIG)
+
+        row = test_db.execute("SELECT * FROM earn_transactions").fetchone()
+        assert row["shares_delta"] == "-400"
+        assert row["exchange_rate"] == "1.05"
+
+
+class TestGetAllBalancesEarned:
+    def _seed(self, contract):
+        contract.functions.getPoolCount.return_value.call.return_value = 1
+        contract.functions.poolIds.return_value.call.return_value = bytes.fromhex(
+            POOL_ID_HEX[2:]
+        )
+        # Pool totalShares must equal everything the ledger accounts for, or
+        # the completeness check correctly refuses to report a figure.
+        contract.functions.pools.return_value.call.return_value = (
+            bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 100, 1050, True,
+        )
+        contract.functions.getUserShares.return_value.call.return_value = 100
+        # convertToAssets is authoritative for position value (virtual offsets).
+        contract.functions.convertToAssets.return_value.call.return_value = 105
+
+    def _deposit_row(self, user):
+        from src.core.db import db_write, get_db
+        db_write(
+            get_db(),
+            """INSERT INTO earn_transactions
+               (id, operation, pool_id, user_address, token_id, amount,
+                signer_address, nonce, signature, status, created_at, updated_at,
+                shares_delta)
+               VALUES ('tx-1', 'deposit', ?, ?, '0xtok', '100', '0xsig', 0,
+                       '0xsig', 'completed', 100, 100, '100')""",
+            (POOL_ID_HEX, user.lower()),
+        )
+
+    @pytest.mark.asyncio
+    async def test_earned_populated_from_ledger(self, test_db):
+        service, contract, _, _ = _make_service()
+        self._seed(contract)
+        user = "0x" + "d" * 40
+        self._deposit_row(user)
+
+        balances = await service.get_all_balances(SIWE_TOKEN, user_address=user)
+        assert balances[0]["earned_active"] == "5"
+        assert balances[0]["earned_active_status"] == "ok"
+        assert balances[0]["cost_basis"] == "100"
+        assert balances[0]["deposit_count"] == 1
+        assert balances[0]["first_deposit_at"] == 100
+
+    @pytest.mark.asyncio
+    async def test_earned_unsupported_without_identity(self, test_db):
+        service, contract, _, _ = _make_service()
+        self._seed(contract)
+        self._deposit_row("0x" + "d" * 40)
+
+        balances = await service.get_all_balances(SIWE_TOKEN)
+        assert balances[0]["earned_active"] is None
+        assert balances[0]["earned_active_status"] == "unsupported"
+
+    @pytest.mark.asyncio
+    async def test_earned_incomplete_without_ledger_rows(self, test_db):
+        service, contract, _, _ = _make_service()
+        self._seed(contract)
+
+        balances = await service.get_all_balances(
+            SIWE_TOKEN, user_address="0x" + "d" * 40
+        )
+        assert balances[0]["earned_active"] is None
+        assert balances[0]["earned_active_status"] == "ledger_incomplete"
+
+    async def test_settlement_rate_comes_from_the_cashflow_not_a_later_read(
+        self, test_db
+    ):
+        # syncTotalAssets runs outside the earn lock, so a post-tx pool read
+        # can show a ratio the cashflow never settled at. The stored rate is
+        # derived from the amount and shares that actually moved.
+        service, contract, _, _ = _make_service()
+        contract.functions.pools.return_value.call.side_effect = [
+            (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1000, 1050, True),
+            (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1000, 1050, True),
+            (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1000, 1050, True),
+            # Assets jumped between settlement and this read.
+            (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1100, 9_999_999, True),
+            (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1100, 9_999_999, True),
+        ]
+        await service.deposit(POOL_ID_HEX, USER_ADDRESS, "105", 5, "0x" + "aa" * 65)
+
+        row = test_db.execute("SELECT * FROM earn_transactions").fetchone()
+        assert row["shares_delta"] == "100"
+        assert row["exchange_rate"] == "1.05"  # 105 paid for 100 shares
+        assert row["settled_at"] is not None
+
+    async def test_delta_is_null_when_post_read_fails(self, test_db):
+        service, contract, _, _ = _make_service()
+        contract.functions.pools.return_value.call.side_effect = [
+            (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1000, 1050, True),
+            (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1000, 1050, True),
+            RuntimeError("rpc down"),
+            (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1100, 1155, True),
+        ]
+        result = await service.deposit(
+            POOL_ID_HEX, USER_ADDRESS, "105", 5, "0x" + "aa" * 65
+        )
+
+        assert result["status"] == "completed"
+        row = test_db.execute("SELECT * FROM earn_transactions").fetchone()
+        assert row["shares_delta"] is None
+
+    async def test_concurrent_mint_before_post_read_is_misattributed(self, test_db):
+        # Documents a known limitation: EarnManager.deposit is externally
+        # callable, so a mint landing between settlement and the post-read is
+        # absorbed into this row's delta. The pool-level completeness check is
+        # what stops a wrong delta from being reported as a real figure.
+        service, contract, _, _ = _make_service()
+        contract.functions.pools.return_value.call.side_effect = [
+            (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1000, 1050, True),
+            (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1000, 1050, True),
+            (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1000, 1050, True),
+            # Our +100 plus somebody else's +200 landed before we looked.
+            (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1300, 1365, True),
+            (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1300, 1365, True),
+        ]
+        await service.deposit(POOL_ID_HEX, USER_ADDRESS, "105", 5, "0x" + "aa" * 65)
+
+        row = test_db.execute("SELECT * FROM earn_transactions").fetchone()
+        assert row["shares_delta"] == "300"
+
+        from src.services.earn.earned import earned_active
+        # The user really holds 100 shares, so the inflated delta cannot pass.
+        assert earned_active(
+            USER_ADDRESS, POOL_ID_HEX, 100, 105, pool_total_shares=1300
+        ).status == "ledger_incomplete"

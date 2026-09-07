@@ -51,3 +51,10 @@ class Settings:
     lifi_max_swap_amount_usd: int = 0
 
     pool_admin_secret_key: str = ""
+
+    # Account that holds every earn pool's underlying balance. Must be its own
+    # account: whatever address a pool is created with has its whole accounting
+    # balance counted as that pool's backing, so sharing it with the swap
+    # liquidity provider prices deposits against swap float.
+    earn_pool_secret_key: str = ""
+    earn_pool_address: str = ""

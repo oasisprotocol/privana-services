@@ -11,6 +11,7 @@ from src.core.config import load_settings
 
 _client: Optional[PrivanaClient] = None
 _authed_client: Optional[PrivanaClient] = None
+_earn_pool_client: Optional[PrivanaClient] = None
 
 
 def get_privana_client() -> PrivanaClient:
@@ -23,9 +24,10 @@ def get_privana_client() -> PrivanaClient:
 
 
 def reset_privana_client() -> None:
-    global _client, _authed_client
+    global _client, _authed_client, _earn_pool_client
     _client = None
     _authed_client = None
+    _earn_pool_client = None
 
 
 async def get_authenticated_privana_client() -> PrivanaClient:
@@ -47,36 +49,71 @@ async def get_authenticated_privana_client() -> PrivanaClient:
     return _authed_client
 
 
+async def get_earn_pool_privana_client() -> PrivanaClient:
+    """Client that acts as the earn pool account.
+
+    Separate instance from the LP client on purpose: ``get_balance`` answers
+    for whoever the bearer token belongs to, so reading a pool's balance
+    through the LP's client would report the LP's funds, swap float included,
+    as the pool's backing. Each client holds its own token (privana-sdk).
+    """
+    global _earn_pool_client
+    if _earn_pool_client is None:
+        settings = load_settings()
+        _earn_pool_client = PrivanaClient(
+            base_url=settings.privana_api_base_url,
+            token_provider=_siwe_login_as_earn_pool,
+        )
+    return _earn_pool_client
+
+
 async def _siwe_login_as_lp() -> tuple[str, int]:
-    """Sign in as the LP over SIWE, returning the token and its lifetime.
+    settings = load_settings()
+    return await _siwe_login(
+        settings.liquidity_provider_secret_key,
+        settings.liquidity_provider_address,
+        "LIQUIDITY_PROVIDER_SECRET_KEY",
+    )
+
+
+async def _siwe_login_as_earn_pool() -> tuple[str, int]:
+    settings = load_settings()
+    return await _siwe_login(
+        settings.earn_pool_secret_key,
+        settings.earn_pool_address,
+        "EARN_POOL_SECRET_KEY",
+    )
+
+
+async def _siwe_login(
+    secret_key: str, address: str, setting_name: str
+) -> tuple[str, int]:
+    """Sign in as ``address`` over SIWE, returning the token and its lifetime.
 
     Runs on the unauthenticated client: the nonce and login endpoints need no
     bearer token, and borrowing the authenticated one would re-enter the very
     login this is serving.
     """
     settings = load_settings()
-    if not settings.liquidity_provider_secret_key:
-        raise RuntimeError(
-            "privana SIWE auth requires LIQUIDITY_PROVIDER_SECRET_KEY to be set"
-        )
+    if not secret_key:
+        raise RuntimeError(f"privana SIWE auth requires {setting_name} to be set")
 
     client = get_privana_client()
-    lp_address = settings.liquidity_provider_address
-    nonce = (await client.get_siwe_nonce(lp_address)).nonce
+    nonce = (await client.get_siwe_nonce(address)).nonce
 
     now = datetime.now(timezone.utc)
     base_url = settings.privana_api_base_url
     domain = base_url.replace("https://", "").replace("http://", "").rstrip("/")
     message = (
         f"{domain} wants you to sign in with your Ethereum account:\n"
-        f"{lp_address}\n\nSign in to Privana on chain {settings.accounting_chain_id}\n\n"
+        f"{address}\n\nSign in to Privana on chain {settings.accounting_chain_id}\n\n"
         f"URI: {base_url}\n"
         f"Version: 1\nChain ID: {settings.accounting_chain_id}\nNonce: {nonce}\n"
         f"Issued At: {now.strftime('%Y-%m-%dT%H:%M:%SZ')}\n"
         f"Expiration Time: {(now + timedelta(hours=24)).strftime('%Y-%m-%dT%H:%M:%SZ')}"
     )
 
-    account = Account.from_key(settings.liquidity_provider_secret_key)
+    account = Account.from_key(secret_key)
     signed = account.sign_message(encode_defunct(text=message))
     signature = f"0x{signed.signature.hex()}"
 
@@ -87,5 +124,6 @@ async def _siwe_login_as_lp() -> tuple[str, int]:
 __all__ = [
     "get_privana_client",
     "get_authenticated_privana_client",
+    "get_earn_pool_privana_client",
     "reset_privana_client",
 ]

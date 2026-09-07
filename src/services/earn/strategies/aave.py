@@ -20,7 +20,6 @@ from privana.types.common import Network
 from src.clients.aave import AaveClient
 from src.clients.defillama import DefiLlamaClient
 from src.clients.privana import (
-    authed_read,
     get_authenticated_privana_client,
     get_privana_client,
 )
@@ -386,13 +385,8 @@ class AaveStrategy(BaseStrategy):
         flaky read can't take down the post-redeem credit poll.
         """
         async def _get_balance():
-            # Re-acquire per attempt so a credit poll that outlives the JWT
-            # picks up the refreshed bearer token. authed_read adds recovery
-            # from an early token revocation (401/403); the injected test
-            # client bypasses both.
-            if self._privana is not None:
-                return await self._privana.get_balance(self._token_id)
-            return await authed_read(lambda c: c.get_balance(self._token_id))
+            client = await self._get_authed_privana()
+            return await client.get_balance(self._token_id)
 
         balance = await self._retry_on_network_error("get_balance", _get_balance)
         return int(balance.balance)

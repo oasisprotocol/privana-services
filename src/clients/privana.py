@@ -1,33 +1,20 @@
 from __future__ import annotations
 
-import asyncio
-import time
 from datetime import datetime, timedelta, timezone
-from typing import Awaitable, Callable, Optional, TypeVar
+from typing import Optional
 
 from eth_account import Account
 from eth_account.messages import encode_defunct
 from privana import PrivanaClient
-from privana.client.errors import AccountingApiError
 
 from src.core.config import load_settings
 
-T = TypeVar("T")
-
 _client: Optional[PrivanaClient] = None
-_auth_token: Optional[str] = None
-_auth_refresh_deadline: float = 0.0
-_auth_generation: int = 0
-_auth_lock: Optional[asyncio.Lock] = None
-
-# Re-login this long before the JWT's stated lifetime runs out. The server's
-# clock, not ours, decides when the token actually dies, so the margin absorbs
-# skew between the two. Capped to a fifth of the lifetime so short-lived
-# tokens don't degenerate into a login per request.
-_REFRESH_MARGIN_SEC = 300
+_authed_client: Optional[PrivanaClient] = None
 
 
 def get_privana_client() -> PrivanaClient:
+    """Unauthenticated client, for endpoints that carry their own signature."""
     global _client
     if _client is None:
         settings = load_settings()
@@ -36,100 +23,44 @@ def get_privana_client() -> PrivanaClient:
 
 
 def reset_privana_client() -> None:
-    global _client, _auth_token, _auth_refresh_deadline, _auth_lock, _auth_generation
+    global _client, _authed_client
     _client = None
-    _auth_token = None
-    _auth_refresh_deadline = 0.0
-    _auth_generation += 1
-    _auth_lock = None
-
-
-def invalidate_privana_auth() -> None:
-    """Drop the cached token so the next authenticated call logs in again.
-
-    For callers that see the API reject a token before its stated expiry
-    (revocation, server restart): invalidate, then retry the read once.
-    The generation bump also voids any login already in flight, so its
-    result cannot silently override the invalidation.
-    """
-    global _auth_token, _auth_refresh_deadline, _auth_generation
-    _auth_token = None
-    _auth_refresh_deadline = 0.0
-    _auth_generation += 1
-
-
-def _token_is_fresh() -> bool:
-    # monotonic, not wall clock: a backwards clock step must never stretch a
-    # token's perceived lifetime past what the server granted.
-    return _auth_token is not None and time.monotonic() < _auth_refresh_deadline
-
-
-def _store_auth(token: str, expires_in: int) -> None:
-    global _auth_token, _auth_refresh_deadline
-    lifetime = max(expires_in, 1)
-    margin = min(_REFRESH_MARGIN_SEC, lifetime // 5)
-    _auth_token = token
-    _auth_refresh_deadline = time.monotonic() + max(lifetime - margin, 1)
+    _authed_client = None
 
 
 async def get_authenticated_privana_client() -> PrivanaClient:
-    """Return the singleton PrivanaClient with a bearer token still inside
-    its stated lifetime, re-running the SIWE login when the cached one is
-    missing or about to expire.
+    """Client that acts as the LP/pool address on endpoints which infer the
+    user from the bearer token, e.g. ``get_balance(token_id)``.
 
-    The login response's ``jwt_expires_in`` sets the deadline. Caching the
-    token without it meant a long-running service kept sending a token the
-    API had expired, and every authenticated read failed until a restart.
-    The lock serializes concurrent refreshes so a burst of callers produces
-    one login, not one each.
+    The SDK owns the token: it logs in on first use, logs in again before the
+    token expires, and replays a request once if the server rejects a token
+    early. Callers just make their call. The token lives on this instance, so
+    a client built for another identity keeps its own.
     """
-    global _auth_lock
-    client = get_privana_client()
-    if _token_is_fresh():
-        return client
-    if _auth_lock is None:
-        _auth_lock = asyncio.Lock()
-    async with _auth_lock:
-        # Loop until a login completes with no concurrent invalidation: an
-        # invalidation that lands mid-login bumps the generation, and handing
-        # back the client without a fresh store would leave its bearer header
-        # on the very token the invalidator condemned.
-        while not _token_is_fresh():
-            generation = _auth_generation
-            token, expires_in = await _authenticate_as_lp(client)
-            if generation == _auth_generation:
-                _store_auth(token, expires_in)
-                client.set_bearer_token(token)
-    return client
+    global _authed_client
+    if _authed_client is None:
+        settings = load_settings()
+        _authed_client = PrivanaClient(
+            base_url=settings.privana_api_base_url,
+            token_provider=_siwe_login_as_lp,
+        )
+    return _authed_client
 
 
-async def authed_read(call: Callable[[PrivanaClient], Awaitable[T]]) -> T:
-    """Run an authenticated, idempotent SDK read, recovering once if the token
-    is rejected before its deadline.
+async def _siwe_login_as_lp() -> tuple[str, int]:
+    """Sign in as the LP over SIWE, returning the token and its lifetime.
 
-    The deadline-based refresh handles expiry, but a token can also be voided
-    early (the accounting service restarting or revoking it). That surfaces as
-    a 401/403, so we drop the cached token and log in again for a single retry.
-    Only safe for reads: a mutating call must never be replayed blindly.
+    Runs on the unauthenticated client: the nonce and login endpoints need no
+    bearer token, and borrowing the authenticated one would re-enter the very
+    login this is serving.
     """
-    client = await get_authenticated_privana_client()
-    try:
-        return await call(client)
-    except AccountingApiError as exc:
-        if exc.status_code not in (401, 403):
-            raise
-        invalidate_privana_auth()
-        client = await get_authenticated_privana_client()
-        return await call(client)
-
-
-async def _authenticate_as_lp(client: PrivanaClient) -> tuple[str, int]:
     settings = load_settings()
     if not settings.liquidity_provider_secret_key:
         raise RuntimeError(
             "privana SIWE auth requires LIQUIDITY_PROVIDER_SECRET_KEY to be set"
         )
 
+    client = get_privana_client()
     lp_address = settings.liquidity_provider_address
     nonce = (await client.get_siwe_nonce(lp_address)).nonce
 
@@ -154,9 +85,7 @@ async def _authenticate_as_lp(client: PrivanaClient) -> tuple[str, int]:
 
 
 __all__ = [
-    "authed_read",
     "get_privana_client",
     "get_authenticated_privana_client",
-    "invalidate_privana_auth",
     "reset_privana_client",
 ]

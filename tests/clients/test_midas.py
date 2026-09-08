@@ -23,6 +23,7 @@ def _make_client(with_signer: bool = False):
         midas_mtbill_token_address=TEST_MTBILL,
         midas_oracle_address=TEST_ORACLE,
         liquidity_provider_secret_key=TEST_LP_SK if with_signer else "",
+        earn_pool_secret_key=TEST_LP_SK if with_signer else "",
     )
 
     with patch("src.clients.midas.load_settings") as mock_settings, \

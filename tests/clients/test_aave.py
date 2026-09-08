@@ -19,6 +19,7 @@ def _make_client(with_signer: bool = False):
         base_rpc_url="http://localhost:8545",
         aave_pool_address=POOL_ADDRESS,
         liquidity_provider_secret_key=TEST_LP_SK if with_signer else "",
+        earn_pool_secret_key=TEST_LP_SK if with_signer else "",
     )
 
     with patch("src.clients.aave.load_settings") as mock_settings, \
@@ -252,3 +253,33 @@ def test_get_allowance_reads_from_asset_contract():
 
     assert client.get_allowance(TEST_USDC) == 42
     asset_contract.functions.allowance.assert_called_once_with(TEST_LP_ADDRESS, POOL_ADDRESS)
+
+
+def test_signs_as_the_earn_account_not_the_swap_lp():
+    """The strategy reads the aToken position at the pool address, so the
+    account supplying on Base has to be that same earn account. Signing as the
+    swap LP would park the position where the pool never looks and report zero
+    AUM.
+    """
+    earn_sk = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d"
+    earn_address = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
+    settings = replace(
+        load_settings(),
+        base_rpc_url="http://localhost:8545",
+        aave_pool_address=POOL_ADDRESS,
+        liquidity_provider_secret_key=TEST_LP_SK,
+        earn_pool_secret_key=earn_sk,
+    )
+
+    with patch("src.clients.aave.load_settings") as mock_settings, \
+         patch("src.clients.aave.Web3") as mock_web3_cls:
+        mock_settings.return_value = settings
+        mock_web3_cls.return_value = MagicMock()
+        mock_web3_cls.HTTPProvider = MagicMock()
+        mock_web3_cls.to_checksum_address = lambda a: a
+
+        from src.clients.aave import AaveClient
+        client = AaveClient()
+
+    assert client.account_address == earn_address
+    assert client.account_address != TEST_LP_ADDRESS

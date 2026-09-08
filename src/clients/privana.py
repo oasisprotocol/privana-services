@@ -10,7 +10,7 @@ from privana import PrivanaClient
 from src.core.config import load_settings
 
 _client: Optional[PrivanaClient] = None
-_authed_client: Optional[PrivanaClient] = None
+_swap_lp_client: Optional[PrivanaClient] = None
 _earn_pool_client: Optional[PrivanaClient] = None
 
 
@@ -24,29 +24,32 @@ def get_privana_client() -> PrivanaClient:
 
 
 def reset_privana_client() -> None:
-    global _client, _authed_client, _earn_pool_client
+    global _client, _swap_lp_client, _earn_pool_client
     _client = None
-    _authed_client = None
+    _swap_lp_client = None
     _earn_pool_client = None
 
 
-async def get_authenticated_privana_client() -> PrivanaClient:
-    """Client that acts as the LP/pool address on endpoints which infer the
-    user from the bearer token, e.g. ``get_balance(token_id)``.
+async def get_swap_lp_privana_client() -> PrivanaClient:
+    """Client that acts as the swap liquidity provider on endpoints which infer
+    the user from the bearer token, e.g. ``get_balance(token_id)``.
+
+    Swap only. Earn pools hold their funds in a different account and read them
+    through ``get_earn_pool_privana_client``.
 
     The SDK owns the token: it logs in on first use, logs in again before the
     token expires, and replays a request once if the server rejects a token
     early. Callers just make their call. The token lives on this instance, so
     a client built for another identity keeps its own.
     """
-    global _authed_client
-    if _authed_client is None:
+    global _swap_lp_client
+    if _swap_lp_client is None:
         settings = load_settings()
-        _authed_client = PrivanaClient(
+        _swap_lp_client = PrivanaClient(
             base_url=settings.privana_api_base_url,
             token_provider=_siwe_login_as_lp,
         )
-    return _authed_client
+    return _swap_lp_client
 
 
 async def get_earn_pool_privana_client() -> PrivanaClient:
@@ -123,7 +126,7 @@ async def _siwe_login(
 
 __all__ = [
     "get_privana_client",
-    "get_authenticated_privana_client",
+    "get_swap_lp_privana_client",
     "get_earn_pool_privana_client",
     "reset_privana_client",
 ]

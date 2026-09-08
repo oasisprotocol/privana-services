@@ -6,8 +6,8 @@ from privana import PrivanaClient
 
 from src.clients.privana import (
     _siwe_login_as_lp,
-    get_authenticated_privana_client,
     get_privana_client,
+    get_swap_lp_privana_client,
     reset_privana_client,
 )
 from src.core.config import load_settings
@@ -92,8 +92,8 @@ async def test_authenticated_client_is_a_separate_singleton():
     reset_privana_client()
 
     with patch("src.clients.privana.load_settings", return_value=_settings()):
-        authed = await get_authenticated_privana_client()
-        again = await get_authenticated_privana_client()
+        authed = await get_swap_lp_privana_client()
+        again = await get_swap_lp_privana_client()
         plain = get_privana_client()
 
     assert authed is again
@@ -145,7 +145,7 @@ async def test_login_uses_the_unauthenticated_client():
         plain.login_with_siwe = AsyncMock(
             return_value=_SiweLogin(siwe_token="siwe", jwt_access_token="jwt-token"),
         )
-        authed = await get_authenticated_privana_client()
+        authed = await get_swap_lp_privana_client()
         authed.get_siwe_nonce = AsyncMock(side_effect=AssertionError("used authed client"))
 
         await _siwe_login_as_lp()

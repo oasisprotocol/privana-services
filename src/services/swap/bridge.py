@@ -8,7 +8,7 @@ from privana.signatures import SignWithdrawParams, sign_withdraw_message
 from privana.signatures.eip712_types import WithdrawMessage
 from privana.types import DepositCheckRequest, WithdrawalRequest
 
-from src.clients.privana import get_authenticated_privana_client
+from src.clients.privana import get_swap_lp_privana_client
 from src.core.config import load_settings
 
 logger = logging.getLogger(__name__)
@@ -41,7 +41,7 @@ class AccountingBridge:
         )
         self._poll_interval_sec = poll_interval_sec
         self._max_poll_attempts = MAX_POLL_ATTEMPTS
-        self._client_factory = client_factory or get_authenticated_privana_client
+        self._client_factory = client_factory or get_swap_lp_privana_client
 
     async def _retry(self, op: str, factory: Callable[[], Awaitable[T]]) -> T:
         for attempt in range(MAX_NETWORK_RETRIES):

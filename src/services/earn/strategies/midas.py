@@ -21,7 +21,7 @@ from privana.types.common import Network
 from src.clients.defillama import DefiLlamaClient
 from src.clients.midas import MidasClient
 from src.clients.privana import (
-    get_authenticated_privana_client,
+    get_earn_pool_privana_client,
     get_privana_client,
 )
 from src.core.config import load_settings
@@ -131,8 +131,8 @@ class MidasStrategy(BaseStrategy):
         self._defillama = defillama_client
 
         settings = load_settings()
-        self._pool_address = pool_address or settings.liquidity_provider_address
-        self._lp_secret_key = settings.liquidity_provider_secret_key
+        self._pool_address = pool_address or settings.earn_pool_address
+        self._lp_secret_key = settings.earn_pool_secret_key
         self._accounting_contract = settings.accounting_contract_address
         self._network = _network_for_chain(settings.accounting_chain_id)
         self._slippage_bps = (
@@ -173,7 +173,7 @@ class MidasStrategy(BaseStrategy):
     async def _get_authed_privana(self) -> PrivanaClient:
         if self._privana is not None:
             return self._privana
-        return await get_authenticated_privana_client()
+        return await get_earn_pool_privana_client()
 
     async def get_apy_bps(self) -> int:
         # Prefer the live DefiLlama rate (the series' latest point); fall back

@@ -63,6 +63,12 @@ def load_settings(refresh: bool = False) -> Settings:
     if _settings is None or refresh:
         lp_secret_key = os.getenv("LIQUIDITY_PROVIDER_SECRET_KEY")
         lp_address = Account.from_key(lp_secret_key).address if lp_secret_key else ""
+        # Falls back to the LP account so existing deployments keep working;
+        # pools created against the LP address predate the split.
+        earn_pool_secret_key = os.getenv("EARN_POOL_SECRET_KEY") or lp_secret_key or ""
+        earn_pool_address = (
+            Account.from_key(earn_pool_secret_key).address if earn_pool_secret_key else ""
+        )
         _settings = Settings(
             api_host=os.getenv("API_HOST"),
             api_port=_get_int("API_PORT"),
@@ -101,6 +107,8 @@ def load_settings(refresh: bool = False) -> Settings:
             lifi_execution_enabled=os.getenv("LIFI_EXECUTION_ENABLED", "false").lower() == "true",
             lifi_max_swap_amount_usd=int(os.getenv("LIFI_MAX_SWAP_AMOUNT_USD", "0")),
             pool_admin_secret_key=os.getenv("POOL_ADMIN_SECRET_KEY", ""),
+            earn_pool_secret_key=earn_pool_secret_key,
+            earn_pool_address=earn_pool_address,
         )
     return _settings
 

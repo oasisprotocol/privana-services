@@ -91,6 +91,8 @@ def _strategy_settings(
         load_settings(),
         liquidity_provider_secret_key=LP_PRIVATE_KEY,
         liquidity_provider_address=POOL_ADDRESS,
+        earn_pool_secret_key=LP_PRIVATE_KEY,
+        earn_pool_address=POOL_ADDRESS,
         accounting_contract_address=ACCOUNTING_CONTRACT,
         accounting_chain_id=23295,
         midas_default_slippage_bps=slippage_bps,
@@ -181,7 +183,7 @@ def test_token_id_is_retained(strategy) -> None:
     assert strategy.token_id == TOKEN_ID
 
 
-def test_pool_address_defaults_to_lp_address(strategy) -> None:
+def test_pool_address_defaults_to_the_earn_account(strategy) -> None:
     assert strategy.pool_address == POOL_ADDRESS
 
 
@@ -192,6 +194,8 @@ def test_unsupported_chain_id_rejected(midas_client, privana) -> None:
         load_settings(),
         liquidity_provider_secret_key=LP_PRIVATE_KEY,
         liquidity_provider_address=POOL_ADDRESS,
+        earn_pool_secret_key=LP_PRIVATE_KEY,
+        earn_pool_address=POOL_ADDRESS,
         accounting_contract_address=ACCOUNTING_CONTRACT,
         accounting_chain_id=1,
     )

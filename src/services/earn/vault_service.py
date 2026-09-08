@@ -481,8 +481,10 @@ class VaultService:
 
             pool_nonce = await self.accounting.get_transfer_nonce(pool["pool_address"])
 
+            # Signed by the pool's own account: accounting checks the signature
+            # against pool_address, which is the earn account, not the swap LP.
             pool_signature = sign_transfer(
-                private_key=self.settings.liquidity_provider_secret_key,
+                private_key=self.settings.earn_pool_secret_key,
                 chain_id=self.settings.accounting_chain_id,
                 verifying_contract=self.settings.accounting_contract_address,
                 to_address=user_address,

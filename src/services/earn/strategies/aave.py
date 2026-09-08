@@ -20,7 +20,7 @@ from privana.types.common import Network
 from src.clients.aave import AaveClient
 from src.clients.defillama import DefiLlamaClient
 from src.clients.privana import (
-    get_authenticated_privana_client,
+    get_earn_pool_privana_client,
     get_privana_client,
 )
 from src.core.config import load_settings
@@ -92,8 +92,8 @@ class AaveStrategy(BaseStrategy):
         self._defillama = defillama_client
 
         settings = load_settings()
-        self._pool_address = pool_address or settings.liquidity_provider_address
-        self._lp_secret_key = settings.liquidity_provider_secret_key
+        self._pool_address = pool_address or settings.earn_pool_address
+        self._lp_secret_key = settings.earn_pool_secret_key
         self._accounting_contract = settings.accounting_contract_address
         self._network = _network_for_chain(settings.accounting_chain_id)
 
@@ -128,7 +128,7 @@ class AaveStrategy(BaseStrategy):
         """
         if self._privana is not None:
             return self._privana
-        return await get_authenticated_privana_client()
+        return await get_earn_pool_privana_client()
 
     async def get_apy_bps(self) -> int:
         return self._client.get_supply_apy_bps(self._asset_address)
@@ -196,7 +196,6 @@ class AaveStrategy(BaseStrategy):
         if amount <= 0:
             raise ValueError(f"withdraw_from_earn requires a positive amount, got {amount}")
 
-        client = await self._get_authed_privana()
         pre_balance = await self._read_pool_balance()
 
         redeem_tx = self._client.withdraw(self._asset_address, amount, to=self._pool_address)
@@ -205,6 +204,10 @@ class AaveStrategy(BaseStrategy):
             self._asset_address, amount, redeem_tx,
         )
 
+        # Acquired right before each authed call, not once for the flow: the
+        # getter refreshes the bearer token near expiry, and the on-chain legs
+        # in between can outlive a token that was fresh at the start.
+        client = await self._get_authed_privana()
         deposit = await client.get_deposit_address(
             DepositAddressRequest(chain_type="evm")
         )
@@ -220,6 +223,7 @@ class AaveStrategy(BaseStrategy):
         )
 
         try:
+            client = await self._get_authed_privana()
             check = await client.check_deposit(
                 DepositCheckRequest(
                     chain_id=self._client.w3.eth.chain_id,
@@ -380,11 +384,11 @@ class AaveStrategy(BaseStrategy):
         client (LP/pool key) here. Wrapped in the network-retry helper so a
         flaky read can't take down the post-redeem credit poll.
         """
-        client = await self._get_authed_privana()
-        balance = await self._retry_on_network_error(
-            "get_balance",
-            lambda: client.get_balance(self._token_id),
-        )
+        async def _get_balance():
+            client = await self._get_authed_privana()
+            return await client.get_balance(self._token_id)
+
+        balance = await self._retry_on_network_error("get_balance", _get_balance)
         return int(balance.balance)
 
     async def _poll_until_balance_at_least(self, target_balance: int) -> None:

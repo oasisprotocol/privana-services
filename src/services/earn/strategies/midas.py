@@ -21,7 +21,7 @@ from privana.types.common import Network
 from src.clients.defillama import DefiLlamaClient
 from src.clients.midas import MidasClient
 from src.clients.privana import (
-    get_authenticated_privana_client,
+    get_earn_pool_privana_client,
     get_privana_client,
 )
 from src.core.config import load_settings
@@ -131,8 +131,8 @@ class MidasStrategy(BaseStrategy):
         self._defillama = defillama_client
 
         settings = load_settings()
-        self._pool_address = pool_address or settings.liquidity_provider_address
-        self._lp_secret_key = settings.liquidity_provider_secret_key
+        self._pool_address = pool_address or settings.earn_pool_address
+        self._lp_secret_key = settings.earn_pool_secret_key
         self._accounting_contract = settings.accounting_contract_address
         self._network = _network_for_chain(settings.accounting_chain_id)
         self._slippage_bps = (
@@ -173,7 +173,7 @@ class MidasStrategy(BaseStrategy):
     async def _get_authed_privana(self) -> PrivanaClient:
         if self._privana is not None:
             return self._privana
-        return await get_authenticated_privana_client()
+        return await get_earn_pool_privana_client()
 
     async def get_apy_bps(self) -> int:
         # Prefer the live DefiLlama rate (the series' latest point); fall back
@@ -314,7 +314,6 @@ class MidasStrategy(BaseStrategy):
         if amount <= 0:
             raise ValueError(f"withdraw_from_earn requires a positive amount, got {amount}")
 
-        client = await self._get_authed_privana()
         pre_balance = await self._read_pool_balance()
 
         price, decimals = await asyncio.to_thread(self._read_oracle_price)
@@ -376,6 +375,10 @@ class MidasStrategy(BaseStrategy):
             mtbill_to_redeem, min_receive_usdc, realized_usdc, redeem_tx,
         )
 
+        # Acquired right before each authed call, not once for the flow: the
+        # getter refreshes the bearer token near expiry, and the redeem legs
+        # above can outlive a token that was fresh at the start.
+        client = await self._get_authed_privana()
         deposit = await client.get_deposit_address(DepositAddressRequest(chain_type="evm"))
 
         transfer_tx = await asyncio.to_thread(
@@ -390,6 +393,7 @@ class MidasStrategy(BaseStrategy):
         )
 
         try:
+            client = await self._get_authed_privana()
             check = await client.check_deposit(
                 DepositCheckRequest(
                     chain_id=self._client.w3.eth.chain_id,
@@ -583,11 +587,11 @@ class MidasStrategy(BaseStrategy):
             await asyncio.sleep(self._poll_interval_sec)
 
     async def _read_pool_balance(self) -> int:
-        client = await self._get_authed_privana()
-        balance = await self._retry_on_network_error(
-            "get_balance",
-            lambda: client.get_balance(self._token_id),
-        )
+        async def _get_balance():
+            client = await self._get_authed_privana()
+            return await client.get_balance(self._token_id)
+
+        balance = await self._retry_on_network_error("get_balance", _get_balance)
         return int(balance.balance)
 
     async def _poll_until_balance_at_least(self, target_balance: int) -> None:

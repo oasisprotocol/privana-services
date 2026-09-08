@@ -96,6 +96,8 @@ def _strategy_settings() -> Settings:
         load_settings(),
         liquidity_provider_secret_key=LP_PRIVATE_KEY,
         liquidity_provider_address=POOL_ADDRESS,
+        earn_pool_secret_key=LP_PRIVATE_KEY,
+        earn_pool_address=POOL_ADDRESS,
         accounting_contract_address=ACCOUNTING_CONTRACT,
         accounting_chain_id=23295,
     )
@@ -168,8 +170,32 @@ def test_token_id_is_retained(strategy) -> None:
     assert strategy.token_id == TOKEN_ID
 
 
-def test_pool_address_defaults_to_lp_address(strategy) -> None:
+def test_pool_address_defaults_to_the_earn_account(strategy) -> None:
     assert strategy.pool_address == POOL_ADDRESS
+
+
+def test_pool_address_never_falls_back_to_the_swap_lp(aave_client, privana) -> None:
+    """A pool addressed to the swap LP counts swap float as pool backing, which
+    prices deposits against money the pool does not own.
+    """
+    from src.services.earn.strategies.aave import AaveStrategy
+
+    settings = replace(
+        _strategy_settings(),
+        liquidity_provider_address="0x1111111111111111111111111111111111111111",
+        liquidity_provider_secret_key=LP_PRIVATE_KEY,
+    )
+
+    with patch("src.services.earn.strategies.aave.load_settings", return_value=settings):
+        s = AaveStrategy(
+            client=aave_client,
+            asset_address=ASSET_ADDRESS,
+            token_id=TOKEN_ID,
+            privana_client=privana,
+        )
+
+    assert s.pool_address == POOL_ADDRESS
+    assert s.pool_address != settings.liquidity_provider_address
 
 
 def test_unsupported_chain_id_rejected(aave_client, privana) -> None:
@@ -179,6 +205,8 @@ def test_unsupported_chain_id_rejected(aave_client, privana) -> None:
         load_settings(),
         liquidity_provider_secret_key=LP_PRIVATE_KEY,
         liquidity_provider_address=POOL_ADDRESS,
+        earn_pool_secret_key=LP_PRIVATE_KEY,
+        earn_pool_address=POOL_ADDRESS,
         accounting_contract_address=ACCOUNTING_CONTRACT,
         accounting_chain_id=1,
     )

@@ -9,7 +9,7 @@ from privana.types import TransferFundsRequest
 from src.clients.accounting import get_accounting_client
 from src.clients.base_evm import base_tx_lock, get_base_evm_client
 from src.clients.lifi import get_lifi_client
-from src.clients.privana import get_authenticated_privana_client
+from src.clients.privana import get_swap_lp_privana_client
 from src.core.config import load_settings
 from src.core.db import db_write, get_db
 from src.core.eip712 import sign_transfer
@@ -48,7 +48,7 @@ class LifiSwapPipeline:
         self.lifi = lifi or get_lifi_client()
         self.bridge = bridge or AccountingBridge()
         self.evm = evm or get_base_evm_client()
-        self._privana_factory = privana_factory or get_authenticated_privana_client
+        self._privana_factory = privana_factory or get_swap_lp_privana_client
         self._poll_interval_sec = poll_interval_sec
         self._credit_max_retries = CREDIT_MAX_RETRIES
         self._deposit_max_retries = DEPOSIT_MAX_RETRIES

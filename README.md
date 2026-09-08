@@ -23,7 +23,6 @@ cp .env.localnet .env
 
 | Variable                         | Description                                                                                               |
 |----------------------------------|-----------------------------------------------------------------------------------------------------------|
-| `LIQUIDITY_PROVIDER_SECRET_KEY`  | LP wallet secret key (signs accounting transfers and Aave bridges; LP/pool address is derived from this). |
 | `ACCOUNTING_CONTRACT_ADDRESS`    | Accounting proxy on Sapphire                                                                              |
 | `ACCOUNTING_CHAIN_ID`            | Chain id for EIP-712 domain (Sapphire testnet = `23295`)                                                  |
 | `PRIVANA_API_BASE_URL`           | Privana REST API (e.g. `https://api.testnet.privana.finance`)                                             |
@@ -31,6 +30,8 @@ cp .env.localnet .env
 | `EARN_MANAGER_CONTRACT_ADDRESS`  | `EarnManager` proxy contract on Sapphire                                                                  |
 | `SAPPHIRE_RPC_URL`               | Sapphire RPC endpoint                                                                                     |
 | `BASE_RPC_URL`                   | RPC for the Base chain this deployment runs on — Sepolia on testnet, mainnet on mainnet (Aave, LiFi)      |
+| `LIQUIDITY_PROVIDER_SECRET_KEY`  | LP wallet secret key used for Swap pools.                                                                 |
+| `EARN_POOL_SECRET_KEY`           | Secret key for moving assets to/from Earn providers. Must be differ from `LIQUIDITY_PROVIDER_SECRET_KEY`  |
 | `AAVE_POOL_ADDRESS`              | Aave V3 `Pool` on the chain `BASE_RPC_URL` points at                                                      |
 | `AAVE_POOL_ASSETS`               | JSON map of `pool_id -> {token_id, asset_address}` registering Aave strategies at startup                 |
 | `BASE_MAINNET_RPC_URL`           | Base mainnet RPC endpoint (for Midas reads/writes)                                                        |

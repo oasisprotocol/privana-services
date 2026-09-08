@@ -60,7 +60,10 @@ class MidasClient:
         )
 
         self._account: Optional[Account] = None
-        sk = settings.liquidity_provider_secret_key
+        # The earn account, not the swap LP: the strategies read this
+        # protocol position at the pool address, so the account that
+        # holds it on Base has to be the same one.
+        sk = settings.earn_pool_secret_key
         if sk:
             self._account = Account.from_key(sk)
 

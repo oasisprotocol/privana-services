@@ -1,6 +1,7 @@
+import json
 import logging
 import os
-from typing import Optional
+from typing import Dict, Optional
 
 from dotenv import load_dotenv
 from eth_account import Account
@@ -29,33 +30,28 @@ def _get_int(name: str) -> int:
         raise ValueError(f"Environment variable {name} must be an integer") from exc
 
 
-def _get_base_rpc_url() -> Optional[str]:
-    """Resolve the RPC for the Base chain this deployment operates on.
+def _build_sapphire_rpc_headers() -> Dict[str, str]:
+    """Parse extra Sapphire RPC headers from the SAPPHIRE_RPC_HEADERS env var.
 
-    The setting used to be called ``BASE_SEPOLIA_RPC_URL`` back when that chain
-    was the only Base we ran against. It is really "our Base chain" — Sepolia on
-    testnet, mainnet on mainnet — and reading a mainnet Aave pool through a
-    variable named "sepolia" is how a deploy ends up querying the wrong chain
-    and seeing every reserve as unlisted. ``BASE_RPC_URL`` is the name now.
-
-    The old name is still honored so existing deployments don't break on the
-    rename, with a warning so it doesn't stay that way forever. Distinct from
-    ``BASE_MAINNET_RPC_URL``, which is always Base mainnet because Midas only
-    exists there; on a mainnet deploy the two legitimately point at the same
-    endpoint.
+    Expects a JSON object mapping header name to value, e.g.
+    SAPPHIRE_RPC_HEADERS='{"Authorization": "Bearer <token>"}'. These are sent
+    only to SAPPHIRE_RPC_URL, never to BASE_RPC_URL or any other chain RPC.
     """
-    url = os.getenv("BASE_RPC_URL")
-    if url:
-        return url
+    raw = os.getenv("SAPPHIRE_RPC_HEADERS")
+    if not raw:
+        return {}
 
-    legacy = os.getenv("BASE_SEPOLIA_RPC_URL")
-    if legacy:
-        logger.warning(
-            "BASE_SEPOLIA_RPC_URL is deprecated; rename it to BASE_RPC_URL. "
-            "It names the Base chain this deployment operates on, which is not "
-            "Sepolia outside testnet."
-        )
-    return legacy
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid SAPPHIRE_RPC_HEADERS JSON: {exc}") from exc
+
+    if not isinstance(parsed, dict) or not all(
+        isinstance(k, str) and isinstance(v, str) for k, v in parsed.items()
+    ):
+        raise ValueError("SAPPHIRE_RPC_HEADERS must be a JSON object mapping header name to value")
+
+    return parsed
 
 
 def load_settings(refresh: bool = False) -> Settings:
@@ -85,13 +81,13 @@ def load_settings(refresh: bool = False) -> Settings:
             swap_manager_contract_address=os.getenv("SWAP_MANAGER_CONTRACT_ADDRESS"),
             earn_manager_contract_address=os.getenv("EARN_MANAGER_CONTRACT_ADDRESS"),
             sapphire_rpc_url=os.getenv("SAPPHIRE_RPC_URL"),
+            sapphire_rpc_headers=_build_sapphire_rpc_headers(),
             quote_ttl=_get_int("QUOTE_TTL"),
             fee_bps=_get_int("FEE_BPS"),
             fee_policies_json=os.getenv("FEE_POLICIES_JSON", ""),
             max_swap_amount_usd=_get_int("MAX_SWAP_AMOUNT_USD"),
             lifi_token_map=os.getenv("LIFI_TOKEN_MAP"),
-            base_rpc_url=_get_base_rpc_url(),
-            base_mainnet_rpc_url=os.getenv("BASE_MAINNET_RPC_URL"),
+            base_rpc_url=os.getenv("BASE_RPC_URL"),
             aave_pool_address=os.getenv("AAVE_POOL_ADDRESS"),
             aave_pool_assets=os.getenv("AAVE_POOL_ASSETS"),
             midas_issuance_vault_address=os.getenv("MIDAS_ISSUANCE_VAULT_ADDRESS"),

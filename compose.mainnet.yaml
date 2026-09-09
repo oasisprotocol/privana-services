@@ -11,6 +11,8 @@ services:
       - LIQUIDITY_PROVIDER_SECRET_KEY
       - POOL_ADMIN_SECRET_KEY
       - EARN_POOL_SECRET_KEY
+      - SAPPHIRE_RPC_HEADERS
+      - BASE_RPC_URL
       - LIFI_API_KEY
     volumes:
       - /run/rofl-appd.sock:/run/rofl-appd.sock

@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from typing import Dict
 
 
 @dataclass
@@ -21,6 +22,7 @@ class Settings:
     swap_manager_contract_address: str
     earn_manager_contract_address: str
     sapphire_rpc_url: str
+    sapphire_rpc_headers: Dict[str, str]
 
     quote_ttl: int
     fee_bps: int
@@ -29,7 +31,6 @@ class Settings:
     lifi_token_map: str
 
     base_rpc_url: str
-    base_mainnet_rpc_url: str
     aave_pool_address: str
     aave_pool_assets: str
     midas_issuance_vault_address: str

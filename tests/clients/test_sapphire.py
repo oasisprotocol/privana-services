@@ -1,6 +1,7 @@
 from unittest.mock import MagicMock, patch
 
 import pytest
+from web3 import Web3
 
 import src.clients.sapphire as sapphire_module
 
@@ -22,6 +23,27 @@ def reset_singletons():
     yield
     sapphire_module._client_instance = None
     sapphire_module._pool_admin_client_instance = None
+
+
+class TestSapphireHttpProvider:
+    def test_no_headers_keeps_web3_defaults(self):
+        provider = sapphire_module.sapphire_http_provider("http://localhost:1", {})
+        headers = provider.get_request_kwargs()["headers"]
+        assert headers["Content-Type"] == "application/json"
+
+    def test_extra_headers_are_merged_over_defaults(self):
+        provider = sapphire_module.sapphire_http_provider(
+            "http://localhost:1", {"Authorization": "Bearer secret-token"}
+        )
+        headers = provider.get_request_kwargs()["headers"]
+        assert headers["Authorization"] == "Bearer secret-token"
+        # Custom request_kwargs replace web3's defaults, so the helper must
+        # merge Content-Type back in or JSON-RPC endpoints reject the request.
+        assert headers["Content-Type"] == "application/json"
+
+    def test_returns_a_plain_http_provider(self):
+        provider = sapphire_module.sapphire_http_provider("http://localhost:1", {})
+        assert isinstance(provider, Web3.HTTPProvider)
 
 
 class TestGetPoolAdminSapphireClient:

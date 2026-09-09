@@ -10,6 +10,7 @@ from eth_account import Account
 from eth_account.messages import encode_defunct
 from web3 import Web3
 
+from src.clients.sapphire import sapphire_http_provider
 from src.core.abi import load_abi
 from src.core.config import load_settings
 from src.models.common import (
@@ -251,7 +252,7 @@ class AccountingClient:
         """
         if self._accounting_contract is None:
             settings = load_settings()
-            w3 = Web3(Web3.HTTPProvider(settings.sapphire_rpc_url))
+            w3 = Web3(sapphire_http_provider(settings.sapphire_rpc_url, settings.sapphire_rpc_headers))
             self._accounting_contract = w3.eth.contract(
                 address=Web3.to_checksum_address(settings.accounting_contract_address),
                 abi=load_abi("Accounting"),

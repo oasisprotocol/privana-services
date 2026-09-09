@@ -29,12 +29,12 @@ cp .env.localnet .env
 | `SWAP_MANAGER_CONTRACT_ADDRESS`  | `SwapManager` contract on Sapphire                                                                        |
 | `EARN_MANAGER_CONTRACT_ADDRESS`  | `EarnManager` proxy contract on Sapphire                                                                  |
 | `SAPPHIRE_RPC_URL`               | Sapphire RPC endpoint                                                                                     |
-| `BASE_RPC_URL`                   | RPC for the Base chain this deployment runs on — Sepolia on testnet, mainnet on mainnet (Aave, LiFi)      |
+| `SAPPHIRE_RPC_HEADERS`           | Optional JSON object of extra headers sent to `SAPPHIRE_RPC_URL` (e.g. '{"Authorization": "Bearer xyz"}') |
+| `BASE_RPC_URL`                   | RPC for the Base chain this deployment runs on. Used by Earn                                              |
 | `LIQUIDITY_PROVIDER_SECRET_KEY`  | LP wallet secret key used for Swap pools.                                                                 |
 | `EARN_POOL_SECRET_KEY`           | Secret key for moving assets to/from Earn providers. Must be differ from `LIQUIDITY_PROVIDER_SECRET_KEY`  |
 | `AAVE_POOL_ADDRESS`              | Aave V3 `Pool` on the chain `BASE_RPC_URL` points at                                                      |
 | `AAVE_POOL_ASSETS`               | JSON map of `pool_id -> {token_id, asset_address}` registering Aave strategies at startup                 |
-| `BASE_MAINNET_RPC_URL`           | Base mainnet RPC endpoint (for Midas reads/writes)                                                        |
 | `MIDAS_ISSUANCE_VAULT_ADDRESS`   | Midas Issuance Vault proxy on Base mainnet (defaults to the canonical deployment)                         |
 | `MIDAS_REDEMPTION_VAULT_ADDRESS` | Midas Instant Redemption Vault proxy on Base mainnet                                                      |
 | `MIDAS_MTBILL_TOKEN_ADDRESS`     | mTBILL ERC20 on Base mainnet                                                                              |

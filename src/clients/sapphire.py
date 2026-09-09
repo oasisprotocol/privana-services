@@ -1,5 +1,5 @@
 import logging
-from typing import Optional
+from typing import Dict, Optional
 
 from eth_account import Account
 from sapphirepy import sapphire
@@ -11,6 +11,20 @@ from src.core.config import load_settings
 logger = logging.getLogger(__name__)
 
 DEFAULT_GAS_LIMIT = 500_000
+
+
+def sapphire_http_provider(rpc_url: str, headers: Dict[str, str]) -> Web3.HTTPProvider:
+    """Build the HTTPProvider every Sapphire reader/writer should use.
+
+    Web3.HTTPProvider only injects its default headers (Content-Type,
+    User-Agent) when the caller passes none at all, so gateway auth headers
+    from SAPPHIRE_RPC_HEADERS must be merged back on top of those defaults
+    rather than passed as the sole ``headers`` dict.
+    """
+    request_kwargs = None
+    if headers:
+        request_kwargs = {"headers": {**Web3.HTTPProvider.get_request_headers(), **headers}}
+    return Web3.HTTPProvider(rpc_url, request_kwargs=request_kwargs)
 
 
 class SapphireClient:
@@ -30,7 +44,7 @@ class SapphireClient:
         self.account = Account.from_key(
             secret_key or settings.liquidity_provider_secret_key
         )
-        self.w3 = Web3(Web3.HTTPProvider(self.rpc_url))
+        self.w3 = Web3(sapphire_http_provider(self.rpc_url, settings.sapphire_rpc_headers))
         self.w3.middleware_onion.add(SignAndSendRawMiddlewareBuilder.build(self.account))
         self.w3 = sapphire.wrap(self.w3, self.account)
         self.w3.eth.default_account = self.account.address

@@ -17,7 +17,7 @@ TEST_LP_ADDRESS = "0xd8991364507FAfC256EafF950d28618735753476"
 def _make_client(with_signer: bool = False):
     settings = replace(
         load_settings(),
-        base_mainnet_rpc_url="http://localhost:8545",
+        base_rpc_url="http://localhost:8545",
         midas_issuance_vault_address=TEST_ISSUANCE_VAULT,
         midas_redemption_vault_address=TEST_REDEMPTION_VAULT,
         midas_mtbill_token_address=TEST_MTBILL,

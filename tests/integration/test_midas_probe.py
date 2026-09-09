@@ -1,5 +1,4 @@
 import json
-import os
 import time
 from pathlib import Path
 
@@ -9,7 +8,7 @@ from web3 import Web3
 
 pytestmark = pytest.mark.integration
 
-BASE_MAINNET_RPC_URL = os.getenv("BASE_MAINNET_RPC_URL", "https://mainnet.base.org")
+BASE_MAINNET_RPC_URL = "https://mainnet.base.org"
 
 ISSUANCE_VAULT = Web3.to_checksum_address("0x8978e327FE7C72Fa4eaF4649C23147E279ae1470")
 REDEMPTION_VAULT = Web3.to_checksum_address("0x2a8c22E3b10036f3AEF5875d04f8441d4188b656")
@@ -31,7 +30,7 @@ def _call(fn):
 
     Public Base RPCs throttle bursts of eth_calls, which is exactly the
     pattern this probe produces. Real ops would configure a private RPC
-    via BASE_MAINNET_RPC_URL, but we want CI to be green against the
+    via BASE_RPC_URL, but we want CI to be green against the
     public endpoint too.
     """
     last_exc: Exception | None = None

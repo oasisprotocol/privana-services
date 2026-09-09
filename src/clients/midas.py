@@ -22,9 +22,11 @@ class MidasClient:
     """Midas mTBILL client. Reads vault config + oracle, writes
     depositInstant / redeemInstant / approve / ERC20 transfer.
 
-    Reads are free (no signer). Writes use the LP EOA on Base mainnet via
-    standard web3 signing — same shape as AaveClient. The strategy holds the
-    business logic; this class is a thin protocol wrapper.
+    Reads are free (no signer). Writes use the LP EOA via standard web3
+    signing — same shape as AaveClient. The strategy holds the business
+    logic; this class is a thin protocol wrapper. Midas only exists on Base
+    mainnet, so this client only gets constructed on deploys where
+    BASE_RPC_URL points there (testnet leaves MIDAS_POOL_ASSETS empty).
 
     Four contracts are bound at construction so the strategy never reaches
     for raw addresses: issuance vault, redemption vault, mTBILL token,
@@ -33,7 +35,7 @@ class MidasClient:
 
     def __init__(self) -> None:
         settings = load_settings()
-        self.w3 = Web3(Web3.HTTPProvider(settings.base_mainnet_rpc_url))
+        self.w3 = Web3(Web3.HTTPProvider(settings.base_rpc_url))
 
         self.issuance_vault_address = Web3.to_checksum_address(
             settings.midas_issuance_vault_address

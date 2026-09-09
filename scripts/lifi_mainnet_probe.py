@@ -21,7 +21,7 @@ the LiFi router, using the wallet in PROBE_SECRET_KEY. Requires:
 
   PROBE_SECRET_KEY      funded Base mainnet wallet (USDC + ETH for gas)
   LIFI_API_KEY          LiFi API key (from .env)
-  BASE_MAINNET_RPC_URL  Base mainnet RPC (from .env)
+  BASE_RPC_URL          Base mainnet RPC (from .env)
 
 Optional:
   PROBE_AMOUNT_USDC     amount in base units (default 1000000 = $1)
@@ -37,7 +37,7 @@ async def main() -> int:
         return 1
 
     amount = int(os.getenv("PROBE_AMOUNT_USDC", "1000000"))
-    rpc_url = os.environ["BASE_MAINNET_RPC_URL"]
+    rpc_url = os.environ["BASE_RPC_URL"]
 
     from src.clients.base_evm import BaseEvmClient
     from src.clients.lifi import get_lifi_client

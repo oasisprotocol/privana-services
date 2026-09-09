@@ -1,6 +1,7 @@
+import json
 import logging
 import os
-from typing import Optional
+from typing import Dict, Optional
 
 from dotenv import load_dotenv
 from eth_account import Account
@@ -27,6 +28,30 @@ def _get_int(name: str) -> int:
         return int(value, 0)
     except ValueError as exc:
         raise ValueError(f"Environment variable {name} must be an integer") from exc
+
+
+def _build_sapphire_rpc_headers() -> Dict[str, str]:
+    """Parse extra Sapphire RPC headers from the SAPPHIRE_RPC_HEADERS env var.
+
+    Expects a JSON object mapping header name to value, e.g.
+    SAPPHIRE_RPC_HEADERS='{"Authorization": "Bearer <token>"}'. These are sent
+    only to SAPPHIRE_RPC_URL, never to BASE_RPC_URL or any other chain RPC.
+    """
+    raw = os.getenv("SAPPHIRE_RPC_HEADERS")
+    if not raw:
+        return {}
+
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid SAPPHIRE_RPC_HEADERS JSON: {exc}") from exc
+
+    if not isinstance(parsed, dict) or not all(
+        isinstance(k, str) and isinstance(v, str) for k, v in parsed.items()
+    ):
+        raise ValueError("SAPPHIRE_RPC_HEADERS must be a JSON object mapping header name to value")
+
+    return parsed
 
 
 def load_settings(refresh: bool = False) -> Settings:
@@ -56,6 +81,7 @@ def load_settings(refresh: bool = False) -> Settings:
             swap_manager_contract_address=os.getenv("SWAP_MANAGER_CONTRACT_ADDRESS"),
             earn_manager_contract_address=os.getenv("EARN_MANAGER_CONTRACT_ADDRESS"),
             sapphire_rpc_url=os.getenv("SAPPHIRE_RPC_URL"),
+            sapphire_rpc_headers=_build_sapphire_rpc_headers(),
             quote_ttl=_get_int("QUOTE_TTL"),
             fee_bps=_get_int("FEE_BPS"),
             fee_policies_json=os.getenv("FEE_POLICIES_JSON", ""),

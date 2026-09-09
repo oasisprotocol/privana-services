@@ -73,6 +73,8 @@ deployments:
         value: pGJwa1ggoHLG+4n7aIS8vQtydtTW3smK04iHTtiqJC6HKIFX531kbmFtZVgkCWE1S/7Tm4pMHx5ScZKgedI53Tf0FTFyrvIc09FPv1z10F2ZZW5vbmNlT5WIluo2QVqDsgTcNeKCGmV2YWx1ZVhSoXqUs28CfNvrFVprzNAeNZI34xxTaBlAMHD4ZxHX0sNBVkWn2Cpzsj3vxkoKGl+h72jNijSOMR6MO+TFDtUunIli7X8T800OOzRhbyGmEuTM4w==
       - name: BASE_RPC_URL
         value: pGJwa1ggCOUPgWrf2fL6lf5C93jlgpDrqcvBLShRIDGRyWUXviFkbmFtZVgckyCjl35DvRaUTCG3b6QuntJWjLaDq69pNkY07mVub25jZU8/J5NWrn5oz9Lf8F80yQ9ldmFsdWVYS4eRWWQMZeLj/jy6n1GOikiUi2oaihFEkvPAt5VcjKK8NBN/6laf06Hh9MsiVjcrKGyBhpgppKU+6lJi5pyDC5U4R0dywFu2dKI0QA==
+      - name: SAPPHIRE_RPC_HEADERS
+        value: pGJwa1ggXE/tZOYebphTtds1dMt1DDHHepJUMZAyJD+4hXaAdytkbmFtZVgkuSUSsX9IK79669jYB5yN+CXO28l++upK5rGNixERLkW6Ou6wZW5vbmNlT02elUuyB2LGs8rrENUUwmV2YWx1ZVheGqEyTfuBLk2VEhKpRsfa0Jh6gptfOzGROij1T312VmZWEEN7fyVqpcYweMvvICKaw5EXj5LD0NwlBU+PUxX9wypsltdlbGNwgR3IVD4Wh/TG3DHfwguAx9NhXEwjcA==
     machines:
       default:
         provider: oasis1qzc8pldvm8vm3duvdrj63wgvkw34y9ucfcxzetqr
@@ -113,6 +115,8 @@ deployments:
         value: pGJwa1ggAcdzI3S/mHdkc04NImIHLoR+IMZhUZgXtR6rvuEIx1FkbmFtZVgkw33qbeqV8ueTctv7pE7nf3X0rRxhMSnBbCgwB80m6JM7sEsDZW5vbmNlTxkpXHdWSVXo0WEETKfPXGV2YWx1ZVhS8AOholOaNgxPAptUPLBqYnbWiA4F4HTOrWpKswI0HQQr5/XEZXX+TSgFUILma5XaczdEtm0OpBAYq70CDNnX+hN813KFUGiUsxaRJ3PApV0hTw==
       - name: BASE_RPC_URL
         value: pGJwa1ggAU6q9N+tIRp4mVDQ4imPCuys/CwCFBilRUpvNwO7vEBkbmFtZVgc74cYKciKjQW8/gOW3lZ5D7QcAVCF0IMbByJZT2Vub25jZU9AK4mfSkaoNuUnZ0HKVBlldmFsdWVYS0jXSj6lha6NsAyRz5CZKJmn2Mk27Eg4/cDK44oLyUdKbM11DLMj1bweWswhNXlHI+LGqOLsbi5q7CgPjYpV1a6196aOQrwIB5o1VQ==
+      - name: SAPPHIRE_RPC_HEADERS
+        value: pGJwa1gg9kgMQkQGRE6enS9fw1ZXKiyI+t7WHpxKJiuBgQV0ozVkbmFtZVgk8Bt73abYEbKt5aMF6NgSU6nIHVosHrNYPZIwg34mJ+G3eHx8ZW5vbmNlT8R0LYnEI+deu9ws5221zGV2YWx1ZVhec5SQvae9DwzujqWjNh6Usq3zYwEU1qmk3D/oUNivK1dyhJ2RuLkWAkxKlTL/gxKROTKzZ5gRNCSwhXs4relZYqwx7RWgnaRVcXWYaT3JzSiB3G2HYcRSbtYigYnHGQ==
     machines:
       default:
         provider: oasis1qp2ens0hsp7gh23wajxa4hpetkdek3swyyulyrmz

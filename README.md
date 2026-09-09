@@ -29,6 +29,7 @@ cp .env.localnet .env
 | `SWAP_MANAGER_CONTRACT_ADDRESS`  | `SwapManager` contract on Sapphire                                                                        |
 | `EARN_MANAGER_CONTRACT_ADDRESS`  | `EarnManager` proxy contract on Sapphire                                                                  |
 | `SAPPHIRE_RPC_URL`               | Sapphire RPC endpoint                                                                                     |
+| `SAPPHIRE_RPC_HEADERS`           | Optional JSON object of extra headers sent to `SAPPHIRE_RPC_URL` (e.g. '{"Authorization": "Bearer xyz"}') |
 | `BASE_RPC_URL`                   | RPC for the Base chain this deployment runs on. Used by Earn                                              |
 | `LIQUIDITY_PROVIDER_SECRET_KEY`  | LP wallet secret key used for Swap pools.                                                                 |
 | `EARN_POOL_SECRET_KEY`           | Secret key for moving assets to/from Earn providers. Must be differ from `LIQUIDITY_PROVIDER_SECRET_KEY`  |

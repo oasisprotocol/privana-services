@@ -1,5 +1,5 @@
 name: privana-services
-version: 0.1.6
+version: 0.1.7
 tee: tdx
 kind: container
 resources:
@@ -71,6 +71,8 @@ deployments:
         value: pGJwa1gg5FzX/+hc/r/JaOiLEgeTfCfQZs6fV68854SfhlzJZFlkbmFtZVgc4JFhLow3YXhKxuDs9GH2FOvVc8ANXF2ogC216mVub25jZU/R+1NM8D7QsZleCLy8WjdldmFsdWVYWciv7Ci/zOsriI14YOoHRhXD1qYKMllHDc89Ag7dQ67FoeSArCF964ezk2h7pP56fp/SQTzbPoDTFOITIPUB51WjlAz18ISShvp12iniWPoxOX4AhJRGfcyE
       - name: EARN_POOL_SECRET_KEY
         value: pGJwa1ggoHLG+4n7aIS8vQtydtTW3smK04iHTtiqJC6HKIFX531kbmFtZVgkCWE1S/7Tm4pMHx5ScZKgedI53Tf0FTFyrvIc09FPv1z10F2ZZW5vbmNlT5WIluo2QVqDsgTcNeKCGmV2YWx1ZVhSoXqUs28CfNvrFVprzNAeNZI34xxTaBlAMHD4ZxHX0sNBVkWn2Cpzsj3vxkoKGl+h72jNijSOMR6MO+TFDtUunIli7X8T800OOzRhbyGmEuTM4w==
+      - name: BASE_RPC_URL
+        value: pGJwa1ggCOUPgWrf2fL6lf5C93jlgpDrqcvBLShRIDGRyWUXviFkbmFtZVgckyCjl35DvRaUTCG3b6QuntJWjLaDq69pNkY07mVub25jZU8/J5NWrn5oz9Lf8F80yQ9ldmFsdWVYS4eRWWQMZeLj/jy6n1GOikiUi2oaihFEkvPAt5VcjKK8NBN/6laf06Hh9MsiVjcrKGyBhpgppKU+6lJi5pyDC5U4R0dywFu2dKI0QA==
     machines:
       default:
         provider: oasis1qzc8pldvm8vm3duvdrj63wgvkw34y9ucfcxzetqr
@@ -109,6 +111,8 @@ deployments:
         value: pGJwa1ggUTvXlptQs4+lrdBe9H3U4kCfyI5aQaA42oTc1b0jEUFkbmFtZVgcIjCfx+ONliAI8dwscW1Ih9MYsNApgB/zpN9nkGVub25jZU/gFHgamZcDbDT6ZMzfZPJldmFsdWVYWmz7VXlZ04KHkx54i7oAKedauQvsZGGRxkG1LeVIO2MO0C1QgGXb/TMwPoAjF9lAi/vyCb6+Z1iLF+VdVJPOnVwA43zrPecnWxlQDoj+PSt3Id2R82EI+T4KTA==
       - name: EARN_POOL_SECRET_KEY
         value: pGJwa1ggAcdzI3S/mHdkc04NImIHLoR+IMZhUZgXtR6rvuEIx1FkbmFtZVgkw33qbeqV8ueTctv7pE7nf3X0rRxhMSnBbCgwB80m6JM7sEsDZW5vbmNlTxkpXHdWSVXo0WEETKfPXGV2YWx1ZVhS8AOholOaNgxPAptUPLBqYnbWiA4F4HTOrWpKswI0HQQr5/XEZXX+TSgFUILma5XaczdEtm0OpBAYq70CDNnX+hN813KFUGiUsxaRJ3PApV0hTw==
+      - name: BASE_RPC_URL
+        value: pGJwa1ggAU6q9N+tIRp4mVDQ4imPCuys/CwCFBilRUpvNwO7vEBkbmFtZVgc74cYKciKjQW8/gOW3lZ5D7QcAVCF0IMbByJZT2Vub25jZU9AK4mfSkaoNuUnZ0HKVBlldmFsdWVYS0jXSj6lha6NsAyRz5CZKJmn2Mk27Eg4/cDK44oLyUdKbM11DLMj1bweWswhNXlHI+LGqOLsbi5q7CgPjYpV1a6196aOQrwIB5o1VQ==
     machines:
       default:
         provider: oasis1qp2ens0hsp7gh23wajxa4hpetkdek3swyyulyrmz

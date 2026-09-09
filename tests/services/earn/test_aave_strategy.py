@@ -458,6 +458,87 @@ async def test_retry_on_network_error_recovers_from_transient_drop(strategy) -> 
 
 
 @pytest.mark.asyncio
+async def test_retry_on_network_error_retries_accounting_5xx(strategy) -> None:
+    from privana.client.errors import AccountingApiError
+
+    factory = MagicMock(
+        side_effect=[
+            AccountingApiError("API request failed", status_code=500, detail="Failed to retrieve balance"),
+            AccountingApiError("API request failed", status_code=502),
+            "ok",
+        ]
+    )
+
+    async def call() -> str:
+        return factory()
+
+    result = await strategy._retry_on_network_error("probe", call)
+
+    assert result == "ok"
+    assert factory.call_count == 3
+
+
+@pytest.mark.asyncio
+async def test_retry_on_network_error_raises_accounting_4xx(strategy) -> None:
+    from privana.client.errors import AccountingApiError
+
+    async def call() -> str:
+        raise AccountingApiError("API request failed", status_code=404, detail="No such token")
+
+    with pytest.raises(AccountingApiError):
+        await strategy._retry_on_network_error("probe", call)
+
+
+@pytest.mark.asyncio
+async def test_withdraw_from_earn_renudges_check_deposit_until_accepted(
+    strategy, aave_client, privana
+) -> None:
+    from privana.client.errors import AccountingApiError
+
+    aave_client.withdraw.return_value = "0xredeem"
+    aave_client.transfer_erc20.return_value = "0xtransfer"
+    privana.check_deposit.side_effect = [
+        AccountingApiError(
+            "API request failed",
+            status_code=400,
+            detail="Insufficient finality: -1/15 confirmations on chain 8453",
+        ),
+        _DepositCheckResponse(status="error", detail="Insufficient finality"),
+        _DepositCheckResponse(status="pending", deposit_id="dep-1"),
+    ]
+    privana.get_balance.side_effect = [
+        _Balance(user_address=POOL_ADDRESS, token_id=TOKEN_ID, balance=0),
+        _Balance(user_address=POOL_ADDRESS, token_id=TOKEN_ID, balance=0),
+        _Balance(user_address=POOL_ADDRESS, token_id=TOKEN_ID, balance=0),
+        _Balance(user_address=POOL_ADDRESS, token_id=TOKEN_ID, balance=1_000_000),
+    ]
+
+    await strategy.withdraw_from_earn(1_000_000)
+
+    assert privana.check_deposit.await_count == 3
+    for await_call in privana.check_deposit.await_args_list:
+        assert await_call.args[0].tx_hash == "0xtransfer"
+
+
+@pytest.mark.asyncio
+async def test_withdraw_from_earn_stops_nudging_once_accepted(
+    strategy, aave_client, privana
+) -> None:
+    aave_client.withdraw.return_value = "0xredeem"
+    aave_client.transfer_erc20.return_value = "0xtransfer"
+    privana.get_balance.side_effect = [
+        _Balance(user_address=POOL_ADDRESS, token_id=TOKEN_ID, balance=0),
+        _Balance(user_address=POOL_ADDRESS, token_id=TOKEN_ID, balance=0),
+        _Balance(user_address=POOL_ADDRESS, token_id=TOKEN_ID, balance=0),
+        _Balance(user_address=POOL_ADDRESS, token_id=TOKEN_ID, balance=1_000_000),
+    ]
+
+    await strategy.withdraw_from_earn(1_000_000)
+
+    privana.check_deposit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_bridge_fails_fast_when_request_rejected(strategy, aave_client, privana) -> None:
     privana.request_withdrawal.return_value = _TxSubmission(
         submission_id="sub-x",

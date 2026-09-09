@@ -14,7 +14,7 @@ from privana import (
     WithdrawMessage,
     sign_withdraw_message,
 )
-from privana.client.errors import NetworkError
+from privana.client.errors import AccountingApiError, NetworkError
 from privana.types.common import Network
 
 from src.clients.aave import AaveClient
@@ -185,13 +185,11 @@ class AaveStrategy(BaseStrategy):
              API derives the user from the auth context (no per-call
              user_address parameter).
           3. ERC20.transfer USDC from `pool_address` to that deposit address.
-          4. `check_deposit(...)`: tell accounting "this tx_hash on chain_id
-             X transferred amount Y" so the relay credits the pool. The
-             response carries a status (`credited` | `pending` | `error`);
-             pending is fine because step 5 polls until the credit lands.
-          5. Poll `get_balance(pool_address, token_id)` until it has
-             increased by `amount` vs the pre-call snapshot. State-based,
-             no timer; the call only returns when the credit is observed.
+          4. Poll `get_balance(pool_address, token_id)` until it has
+             increased by `amount` vs the pre-call snapshot, re-sending the
+             `check_deposit(...)` nudge until accounting accepts it (the
+             first attempts fail Base finality). State-based, no timer; the
+             call only returns when the credit is observed.
         """
         if amount <= 0:
             raise ValueError(f"withdraw_from_earn requires a positive amount, got {amount}")
@@ -222,30 +220,8 @@ class AaveStrategy(BaseStrategy):
             deposit.deposit_address, amount, transfer_tx,
         )
 
-        try:
-            client = await self._get_authed_privana()
-            check = await client.check_deposit(
-                DepositCheckRequest(
-                    chain_id=self._client.w3.eth.chain_id,
-                    tx_hash=transfer_tx,
-                    amount=amount,
-                )
-            )
-            if check.status == "error":
-                logger.warning(
-                    "AaveStrategy.withdraw_from_earn: check_deposit reported error: %s; "
-                    "relying on relay auto-pickup",
-                    check.detail,
-                )
-        except Exception as exc:
-            logger.warning(
-                "AaveStrategy.withdraw_from_earn: check_deposit nudge failed (%s); "
-                "relying on relay auto-pickup",
-                exc,
-            )
-
         target_balance = pre_balance + amount
-        await self._poll_until_balance_at_least(target_balance)
+        await self._poll_until_credited(target_balance, transfer_tx, amount)
         logger.info(
             "AaveStrategy.withdraw_from_earn: pool balance credited pool=%s token=%s amount=%d",
             self._pool_address, self._token_id, amount,
@@ -279,6 +255,18 @@ class AaveStrategy(BaseStrategy):
             except NetworkError as exc:
                 logger.warning(
                     "AaveStrategy.%s: transient network error, retrying after %.1fs (%s)",
+                    op, self._poll_interval_sec, exc,
+                )
+                await asyncio.sleep(self._poll_interval_sec)
+            except AccountingApiError as exc:
+                # A 5xx is the accounting API failing, not the read being
+                # wrong; aborting here has stranded funds mid-bridge after
+                # the on-chain legs already ran. 4xx stays fatal: the server
+                # understood the read and refused it.
+                if exc.status_code < 500:
+                    raise
+                logger.warning(
+                    "AaveStrategy.%s: accounting 5xx, retrying after %.1fs (%s)",
                     op, self._poll_interval_sec, exc,
                 )
                 await asyncio.sleep(self._poll_interval_sec)
@@ -391,12 +379,51 @@ class AaveStrategy(BaseStrategy):
         balance = await self._retry_on_network_error("get_balance", _get_balance)
         return int(balance.balance)
 
-    async def _poll_until_balance_at_least(self, target_balance: int) -> None:
-        """Block (state-based, no timer) until the pool's accounting balance
-        is at least `target_balance`. The relay credits asynchronously after
-        the on-chain ERC20 transfer; this is how we know the credit landed.
+    async def _nudge_check_deposit(self, tx_hash: str, amount: int) -> bool:
+        """One check_deposit attempt for the forwarded transfer, True once
+        accounting accepts the report (credited or pending).
+
+        The relay has no watcher on pool deposit addresses, so this nudge is
+        what makes the credit happen. A single attempt right after the
+        transfer always fails Base's 15-confirmation finality check, so the
+        caller retries it until accounting accepts.
         """
+        try:
+            client = await self._get_authed_privana()
+            check = await client.check_deposit(
+                DepositCheckRequest(
+                    chain_id=self._client.w3.eth.chain_id,
+                    tx_hash=tx_hash,
+                    amount=amount,
+                )
+            )
+        except Exception as exc:
+            logger.warning(
+                "AaveStrategy.withdraw_from_earn: check_deposit not accepted yet "
+                "(%s); will retry",
+                exc,
+            )
+            return False
+        if check.status == "error":
+            logger.warning(
+                "AaveStrategy.withdraw_from_earn: check_deposit reported error: %s; "
+                "will retry",
+                check.detail,
+            )
+            return False
+        return True
+
+    async def _poll_until_credited(
+        self, target_balance: int, tx_hash: str, amount: int
+    ) -> None:
+        """Block (state-based, no timer) until the pool's accounting balance
+        is at least `target_balance`, re-nudging check_deposit until
+        accounting accepts the transfer report.
+        """
+        nudged = False
         while True:
+            if not nudged:
+                nudged = await self._nudge_check_deposit(tx_hash, amount)
             current = await self._read_pool_balance()
             if current >= target_balance:
                 return

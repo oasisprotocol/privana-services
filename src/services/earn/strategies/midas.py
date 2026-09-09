@@ -15,7 +15,7 @@ from privana import (
     WithdrawMessage,
     sign_withdraw_message,
 )
-from privana.client.errors import NetworkError
+from privana.client.errors import AccountingApiError, NetworkError
 from privana.types.common import Network
 
 from src.clients.defillama import DefiLlamaClient
@@ -306,10 +306,10 @@ class MidasStrategy(BaseStrategy):
              MidasInstantUnavailableError; the API layer surfaces this as
              a 409.
           4. ERC20.transfer USDC to the pool's per-account deposit address.
-          5. Best-effort check_deposit nudge; relay auto-pickup is the
-             ultimate source of truth.
-          6. Poll get_balance until the credit is observed. State-based,
-             no wall-clock timeout — matches the AaveStrategy contract.
+          5. Poll get_balance until the credit is observed, re-sending the
+             check_deposit nudge until accounting accepts it (the first
+             attempts fail Base finality). State-based, no wall-clock
+             timeout — matches the AaveStrategy contract.
         """
         if amount <= 0:
             raise ValueError(f"withdraw_from_earn requires a positive amount, got {amount}")
@@ -392,30 +392,8 @@ class MidasStrategy(BaseStrategy):
             deposit.deposit_address, realized_usdc, transfer_tx,
         )
 
-        try:
-            client = await self._get_authed_privana()
-            check = await client.check_deposit(
-                DepositCheckRequest(
-                    chain_id=self._client.w3.eth.chain_id,
-                    tx_hash=transfer_tx,
-                    amount=realized_usdc,
-                )
-            )
-            if check.status == "error":
-                logger.warning(
-                    "MidasStrategy.withdraw_from_earn: check_deposit reported error: %s; "
-                    "relying on relay auto-pickup",
-                    check.detail,
-                )
-        except Exception as exc:
-            logger.warning(
-                "MidasStrategy.withdraw_from_earn: check_deposit nudge failed (%s); "
-                "relying on relay auto-pickup",
-                exc,
-            )
-
         target_balance = pre_balance + realized_usdc
-        await self._poll_until_balance_at_least(target_balance)
+        await self._poll_until_credited(target_balance, transfer_tx, realized_usdc)
         logger.info(
             "MidasStrategy.withdraw_from_earn: pool balance credited pool=%s token=%s amount=%d",
             self._pool_address, self._token_id, realized_usdc,
@@ -492,6 +470,18 @@ class MidasStrategy(BaseStrategy):
             except NetworkError as exc:
                 logger.warning(
                     "MidasStrategy.%s: transient network error, retrying after %.1fs (%s)",
+                    op, self._poll_interval_sec, exc,
+                )
+                await asyncio.sleep(self._poll_interval_sec)
+            except AccountingApiError as exc:
+                # A 5xx is the accounting API failing, not the read being
+                # wrong; aborting here has stranded funds mid-bridge after
+                # the on-chain legs already ran. 4xx stays fatal: the server
+                # understood the read and refused it.
+                if exc.status_code < 500:
+                    raise
+                logger.warning(
+                    "MidasStrategy.%s: accounting 5xx, retrying after %.1fs (%s)",
                     op, self._poll_interval_sec, exc,
                 )
                 await asyncio.sleep(self._poll_interval_sec)
@@ -594,8 +584,44 @@ class MidasStrategy(BaseStrategy):
         balance = await self._retry_on_network_error("get_balance", _get_balance)
         return int(balance.balance)
 
-    async def _poll_until_balance_at_least(self, target_balance: int) -> None:
+    async def _nudge_check_deposit(self, tx_hash: str, amount: int) -> bool:
+        """One check_deposit attempt for the forwarded transfer, True once
+        accounting accepts the report (credited or pending). Mirrors
+        AaveStrategy._nudge_check_deposit: the relay has no watcher on pool
+        deposit addresses, so the caller retries until accepted.
+        """
+        try:
+            client = await self._get_authed_privana()
+            check = await client.check_deposit(
+                DepositCheckRequest(
+                    chain_id=self._client.w3.eth.chain_id,
+                    tx_hash=tx_hash,
+                    amount=amount,
+                )
+            )
+        except Exception as exc:
+            logger.warning(
+                "MidasStrategy.withdraw_from_earn: check_deposit not accepted yet "
+                "(%s); will retry",
+                exc,
+            )
+            return False
+        if check.status == "error":
+            logger.warning(
+                "MidasStrategy.withdraw_from_earn: check_deposit reported error: %s; "
+                "will retry",
+                check.detail,
+            )
+            return False
+        return True
+
+    async def _poll_until_credited(
+        self, target_balance: int, tx_hash: str, amount: int
+    ) -> None:
+        nudged = False
         while True:
+            if not nudged:
+                nudged = await self._nudge_check_deposit(tx_hash, amount)
             current = await self._read_pool_balance()
             if current >= target_balance:
                 return

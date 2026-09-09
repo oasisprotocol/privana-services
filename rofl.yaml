@@ -1,5 +1,5 @@
 name: privana-services
-version: 0.1.4
+version: 0.1.6
 tee: tdx
 kind: container
 resources:
@@ -58,8 +58,8 @@ deployments:
           min_tcb_evaluation_data_number: 18
           tdx: {}
       enclaves:
-        - id: sYwt+m8MkFGb2Q30kS7HWet0Aw/BvQ+J4qarsv8D9uQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
-        - id: LlDNVpYlxBDZhhn0Aw3K4OcMLdvkkGiasm3VKqj1S0cAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
+        - id: lCh+k8GWx9sGcHEii40kdNtvhajSiSak11E8QxNQ2UcAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
+        - id: /QOXlI8FTqUA/c6JtvHFTXYKLvr9ZW8AFWgRihTxI4cAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
       endorsements:
         - provider_instance_admin: oasis1qrljut7rndrl74cnnatlxnadnnazjxdy6yleagwu
       fees: endorsing_node
@@ -69,6 +69,8 @@ deployments:
         value: pGJwa1ggh6fiMzshzjBAEFHyCz+7e79U+jSXFXLxR3QOxsm4aCxkbmFtZVgt8cK9Dq/uIOKTahzuUCkcRoWAdVPR2TpQxZ6AYqH6dKx79F8RHvxgDEdQt6PNZW5vbmNlT2ESVl7amg5Jd9LD5g7T62V2YWx1ZVhSZPYN3L8A4YchXpCz/plNg9uwmlLnCRzUxrGIKyXcmSmU7XDMv0UDEmwbUcGGqg36h+Vy+BO3ZGGjLId5iI9wcOlq9gT8AjhjQ010TtP79utpvQ==
       - name: LIFI_API_KEY
         value: pGJwa1gg5FzX/+hc/r/JaOiLEgeTfCfQZs6fV68854SfhlzJZFlkbmFtZVgc4JFhLow3YXhKxuDs9GH2FOvVc8ANXF2ogC216mVub25jZU/R+1NM8D7QsZleCLy8WjdldmFsdWVYWciv7Ci/zOsriI14YOoHRhXD1qYKMllHDc89Ag7dQ67FoeSArCF964ezk2h7pP56fp/SQTzbPoDTFOITIPUB51WjlAz18ISShvp12iniWPoxOX4AhJRGfcyE
+      - name: EARN_POOL_SECRET_KEY
+        value: pGJwa1ggoHLG+4n7aIS8vQtydtTW3smK04iHTtiqJC6HKIFX531kbmFtZVgkCWE1S/7Tm4pMHx5ScZKgedI53Tf0FTFyrvIc09FPv1z10F2ZZW5vbmNlT5WIluo2QVqDsgTcNeKCGmV2YWx1ZVhSoXqUs28CfNvrFVprzNAeNZI34xxTaBlAMHD4ZxHX0sNBVkWn2Cpzsj3vxkoKGl+h72jNijSOMR6MO+TFDtUunIli7X8T800OOzRhbyGmEuTM4w==
     machines:
       default:
         provider: oasis1qzc8pldvm8vm3duvdrj63wgvkw34y9ucfcxzetqr
@@ -94,8 +96,8 @@ deployments:
           min_tcb_evaluation_data_number: 18
           tdx: {}
       enclaves:
-        - id: 6OLdxEOd6jlXbHeINU+UOCk0nlyRBBh0yqXrYn3w7DYAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
-        - id: 5g72m69eHfEMYHLZmrB7gBGARmS/B79s3OuZgyCKRaQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
+        - id: ggXu8hUx4a5FiSW97Ce/ihzHYOy1mFZ+YkZezvuzKycAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
+        - id: sVx5k6yqSxnIeOdDIxaykkABJ6fM0BU944C9b901WJEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
       endorsements:
         - provider_instance_admin: oasis1qzql9cw9ly746jren7j66jscd36h5c3mfq6d6mct
       fees: endorsing_node
@@ -105,6 +107,8 @@ deployments:
         value: pGJwa1ggqLjfe3gdWZzOB4+NvX/lpucr9TUGRqf24dmkAsT9lVpkbmFtZVgtxWWODQnNvVdNs515l7II110g/vDauv7ebbwuVeoNaoctZy5PNq6jT2Q+tXGSZW5vbmNlT0DroOCAxZ4txUZp9/D0ZGV2YWx1ZVhTeIsNESdGe0kqHYC+PhCBhKOFkUd0+YFTYNso30osqRM/pClMWmQAZSRuRlZdFnhHuEz9ujEq6Q27xiAdyYn3agGJULXkhYQz4dgMT1EjJkV8QJE=
       - name: LIFI_API_KEY
         value: pGJwa1ggUTvXlptQs4+lrdBe9H3U4kCfyI5aQaA42oTc1b0jEUFkbmFtZVgcIjCfx+ONliAI8dwscW1Ih9MYsNApgB/zpN9nkGVub25jZU/gFHgamZcDbDT6ZMzfZPJldmFsdWVYWmz7VXlZ04KHkx54i7oAKedauQvsZGGRxkG1LeVIO2MO0C1QgGXb/TMwPoAjF9lAi/vyCb6+Z1iLF+VdVJPOnVwA43zrPecnWxlQDoj+PSt3Id2R82EI+T4KTA==
+      - name: EARN_POOL_SECRET_KEY
+        value: pGJwa1ggAcdzI3S/mHdkc04NImIHLoR+IMZhUZgXtR6rvuEIx1FkbmFtZVgkw33qbeqV8ueTctv7pE7nf3X0rRxhMSnBbCgwB80m6JM7sEsDZW5vbmNlTxkpXHdWSVXo0WEETKfPXGV2YWx1ZVhS8AOholOaNgxPAptUPLBqYnbWiA4F4HTOrWpKswI0HQQr5/XEZXX+TSgFUILma5XaczdEtm0OpBAYq70CDNnX+hN813KFUGiUsxaRJ3PApV0hTw==
     machines:
       default:
         provider: oasis1qp2ens0hsp7gh23wajxa4hpetkdek3swyyulyrmz

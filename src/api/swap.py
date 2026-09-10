@@ -8,12 +8,18 @@ from src.models.api import (
     SwapResponse,
     SwapStatusResponse,
 )
-from src.services.swap.executor import get_swap_executor
+from src.models.swap import SwapStatus
 from src.services.swap.quote_service import get_quote_service
+from src.services.swap.scheduler import get_swap_scheduler
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1", tags=["Swap"])
+
+_SWAP_MESSAGES = {
+    SwapStatus.COMPLETED.value: "Swap completed",
+    SwapStatus.FAILED.value: "Swap failed",
+}
 
 
 @router.get("/quote", response_model=QuoteResponse)
@@ -43,8 +49,8 @@ async def get_quote(
 @router.post("/swap", response_model=SwapResponse)
 async def execute_swap(payload: SwapRequest) -> SwapResponse:
     try:
-        executor = get_swap_executor()
-        swap = await executor.execute_swap(
+        executor = get_swap_scheduler()
+        swap = await executor.schedule_swap(
             quote_id=payload.quote_id,
             input_nonce=payload.input_nonce,
             input_signature=payload.input_signature,
@@ -52,7 +58,7 @@ async def execute_swap(payload: SwapRequest) -> SwapResponse:
         return SwapResponse(
             swap_id=swap.id,
             status=swap.status,
-            message="Swap completed" if swap.status == "completed" else "Swap failed",
+            message=_SWAP_MESSAGES.get(swap.status, "Swap scheduled"),
             tx_hash=swap.swap_tx_hash,
         )
     except ValueError as exc:
@@ -65,7 +71,7 @@ async def execute_swap(payload: SwapRequest) -> SwapResponse:
 @router.get("/swap/{swap_id}/status", response_model=SwapStatusResponse)
 async def get_swap_status(swap_id: str) -> SwapStatusResponse:
     try:
-        executor = get_swap_executor()
+        executor = get_swap_scheduler()
         swap = executor._get_swap(swap_id)
         return SwapStatusResponse(
             swap_id=swap.id,

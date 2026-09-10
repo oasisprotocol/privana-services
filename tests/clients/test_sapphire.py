@@ -81,3 +81,64 @@ class TestGetPoolAdminSapphireClient:
             second = sapphire_module.get_pool_admin_sapphire_client()
             assert first is second
             client_cls.assert_called_once()
+
+
+def _client_with_mock_w3():
+    """A SapphireClient with __init__ skipped, standing in a MagicMock w3/account."""
+    client = sapphire_module.SapphireClient.__new__(sapphire_module.SapphireClient)
+    client.account = MagicMock(address="0xLp")
+    client.w3 = MagicMock()
+    return client
+
+
+class TestSubmitAndWait:
+    def test_submit_without_nonce_omits_it_from_tx_params(self):
+        client = _client_with_mock_w3()
+        fn = client.w3.eth.contract.return_value.functions.__getitem__.return_value
+        fn.return_value.transact.return_value = bytes.fromhex("ff" * 32)
+
+        tx_hash = client.submit_contract_call("0x" + "11" * 20, [], "swap", [1, 2])
+
+        assert tx_hash == "0x" + "ff" * 32
+        tx_params = fn.return_value.transact.call_args.args[0]
+        assert "nonce" not in tx_params
+
+    def test_submit_with_explicit_nonce_passes_it_through(self):
+        client = _client_with_mock_w3()
+        fn = client.w3.eth.contract.return_value.functions.__getitem__.return_value
+        fn.return_value.transact.return_value = bytes.fromhex("ff" * 32)
+
+        client.submit_contract_call("0x" + "11" * 20, [], "swap", [1, 2], nonce=42)
+
+        tx_params = fn.return_value.transact.call_args.args[0]
+        assert tx_params["nonce"] == 42
+
+    def test_wait_for_receipt_raises_on_revert(self):
+        client = _client_with_mock_w3()
+        client.w3.eth.wait_for_transaction_receipt.return_value = {"status": 0}
+
+        with pytest.raises(RuntimeError, match="reverted"):
+            client.wait_for_receipt("0x" + "ff" * 32)
+
+    def test_wait_for_receipt_returns_none_on_success(self):
+        client = _client_with_mock_w3()
+        client.w3.eth.wait_for_transaction_receipt.return_value = {"status": 1}
+
+        client.wait_for_receipt("0x" + "ff" * 32)
+
+    def test_execute_contract_call_submits_then_waits(self):
+        client = _client_with_mock_w3()
+        client.submit_contract_call = MagicMock(return_value="0x" + "ff" * 32)
+        client.wait_for_receipt = MagicMock()
+
+        result = client.execute_contract_call("0x" + "11" * 20, [], "swap", [1, 2])
+
+        assert result == "0x" + "ff" * 32
+        client.wait_for_receipt.assert_called_once_with("0x" + "ff" * 32)
+
+    def test_get_pending_nonce_reads_pending_tx_count(self):
+        client = _client_with_mock_w3()
+        client.w3.eth.get_transaction_count.return_value = 7
+
+        assert client.get_pending_nonce() == 7
+        client.w3.eth.get_transaction_count.assert_called_once_with("0xLp", "pending")

@@ -7,7 +7,7 @@ from pydantic import BaseModel
 
 
 class SwapStatus(str, Enum):
-    PENDING = "pending"
+    SCHEDULED = "scheduled"
     EXECUTING = "executing"
     COMPLETED = "completed"
     FAILED = "failed"
@@ -55,6 +55,8 @@ class SwapRecord(BaseModel):
     from_amount: str
     to_amount_estimate: str
     to_amount_actual: Optional[str] = None
+    input_nonce: Optional[int] = None
+    input_signature: Optional[str] = None
     status: str
     swap_tx_hash: Optional[str] = None
     error: Optional[str] = None

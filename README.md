@@ -124,7 +124,7 @@ The API starts on `http://localhost:8000` by default. Configure with `API_HOST` 
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET` | `/v1/quote` | Quote a swap (LiFi rate + fee, returns LP transfer nonce) |
-| `POST` | `/v1/swap` | Execute the atomic dual-transfer through `SwapManager` on Sapphire |
+| `POST` | `/v1/swap` | Schedule the atomic dual-transfer through `SwapManager` on Sapphire |
 | `GET` | `/v1/swap/{swap_id}/status` | Status for a previously submitted swap |
 
 ### Earn

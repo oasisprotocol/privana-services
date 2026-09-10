@@ -1,8 +1,9 @@
 import logging
 import sqlite3
 import threading
+import uuid
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional, Union
 
 logger = logging.getLogger(__name__)
 
@@ -10,7 +11,35 @@ _DB_PATH = Path(__file__).parent.parent.parent / "data" / "privana-services.db"
 _connection: Optional[sqlite3.Connection] = None
 _write_lock = threading.Lock()
 
-MIGRATIONS = [
+
+def _dedupe_swap_quote_ids(conn: sqlite3.Connection) -> None:
+    """Give every swap but the first sharing a quote_id a fresh, unbacked one.
+
+    A duplicate's own quote is already consumed by whichever swap landed
+    first, so reassigning it a random id with no quotes row behind it just
+    makes it fail as "quote expired" the next time it's processed, instead
+    of leaving the unique index migration right after this one unable to run.
+    """
+    rows = conn.execute(
+        """
+        SELECT id, quote_id FROM swaps
+        WHERE quote_id IN (
+            SELECT quote_id FROM swaps GROUP BY quote_id HAVING COUNT(*) > 1
+        )
+        ORDER BY quote_id, created_at, id
+        """
+    ).fetchall()
+    seen_quote_ids: set = set()
+    for swap_id, quote_id in rows:
+        if quote_id not in seen_quote_ids:
+            seen_quote_ids.add(quote_id)
+            continue
+        conn.execute(
+            "UPDATE swaps SET quote_id = ? WHERE id = ?", (str(uuid.uuid4()), swap_id)
+        )
+
+
+MIGRATIONS: list[Union[str, Callable[[sqlite3.Connection], None]]] = [
     """
     CREATE TABLE IF NOT EXISTS quotes (
         id TEXT PRIMARY KEY,
@@ -77,6 +106,19 @@ MIGRATIONS = [
     "ALTER TABLE swaps ADD COLUMN withdrawal_index INTEGER;",
     "ALTER TABLE swaps ADD COLUMN lifi_tx_hash TEXT;",
     "ALTER TABLE swaps ADD COLUMN deposit_tx_hash TEXT;",
+    "ALTER TABLE swaps ADD COLUMN input_nonce INTEGER;",
+    "ALTER TABLE swaps ADD COLUMN input_signature TEXT;",
+    # Swaps are queued for a worker now, so the pre-execution state says so.
+    "UPDATE swaps SET status = 'scheduled' WHERE status = 'pending';",
+    # One quote is consumed by exactly one swap attempt, ever. A duplicate
+    # POST /v1/swap for the same quote must fail at scheduling time rather
+    # than create a second row that races the first for the same input.
+    # Nothing enforced that before this migration, so a pre-existing DB can
+    # already have two swap rows sharing a quote_id; reassign every row but
+    # the first a fresh id first, or the index below fails on every future
+    # boot.
+    _dedupe_swap_quote_ids,
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_swaps_quote_id ON swaps(quote_id);",
     """
     CREATE TABLE IF NOT EXISTS token_price_history (
         coin_id TEXT NOT NULL,
@@ -173,9 +215,12 @@ def close_db() -> None:
 
 
 def _run_migrations(conn: sqlite3.Connection) -> None:
-    for sql in MIGRATIONS:
+    for migration in MIGRATIONS:
         try:
-            conn.execute(sql)
+            if callable(migration):
+                migration(conn)
+            else:
+                conn.execute(migration)
         except sqlite3.OperationalError as exc:
             if "duplicate column name" in str(exc).lower():
                 continue

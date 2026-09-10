@@ -564,6 +564,35 @@ async def test_withdraw_from_earn_redeems_forwards_and_polls(
 
 
 @pytest.mark.asyncio
+async def test_withdraw_from_earn_renudges_check_deposit_until_accepted(
+    strategy, midas_client, privana,
+) -> None:
+    from privana.client.errors import AccountingApiError
+
+    privana.check_deposit.side_effect = [
+        AccountingApiError(
+            "API request failed",
+            status_code=400,
+            detail="Insufficient finality: -1/15 confirmations on chain 8453",
+        ),
+        _DepositCheckResponse(status="pending", deposit_id="dep-1"),
+    ]
+    privana.get_balance.side_effect = [
+        _Balance(user_address=POOL_ADDRESS, token_id=TOKEN_ID, balance=0),
+        _Balance(user_address=POOL_ADDRESS, token_id=TOKEN_ID, balance=0),
+        _Balance(user_address=POOL_ADDRESS, token_id=TOKEN_ID, balance=1_002_300),
+    ]
+    midas_client.get_erc20_balance.side_effect = [0, 1_002_300]
+    midas_client.get_oracle_answer.return_value = 10**18
+    midas_client.get_oracle_decimals.return_value = 18
+    midas_client.get_redemption_instant_fee_bps.return_value = 25
+
+    await strategy.withdraw_from_earn(1_000_000)
+
+    assert privana.check_deposit.await_count == 2
+
+
+@pytest.mark.asyncio
 async def test_withdraw_from_earn_skips_approve_when_allowance_sufficient(
     strategy, midas_client, privana,
 ) -> None:

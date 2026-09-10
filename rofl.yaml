@@ -58,8 +58,8 @@ deployments:
           min_tcb_evaluation_data_number: 18
           tdx: {}
       enclaves:
-        - id: lCh+k8GWx9sGcHEii40kdNtvhajSiSak11E8QxNQ2UcAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
-        - id: /QOXlI8FTqUA/c6JtvHFTXYKLvr9ZW8AFWgRihTxI4cAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
+        - id: lX8b1zk1rdlBkQdiUTUbIUV3H8vlgGkO/7lAmjEHHlQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
+        - id: Hygf2EQiUGNzSpRrjLVCKwF60RGcM2xgvgaskXTpcIQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
       endorsements:
         - provider_instance_admin: oasis1qrljut7rndrl74cnnatlxnadnnazjxdy6yleagwu
       fees: endorsing_node
@@ -100,8 +100,8 @@ deployments:
           min_tcb_evaluation_data_number: 18
           tdx: {}
       enclaves:
-        - id: ggXu8hUx4a5FiSW97Ce/ihzHYOy1mFZ+YkZezvuzKycAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
-        - id: sVx5k6yqSxnIeOdDIxaykkABJ6fM0BU944C9b901WJEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
+        - id: 6zqI115nOaDQWd/u8zLvIvfQOhbzaKTFLKXUGazDMmwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
+        - id: K3uKIUud/XTCecDr8jEjheEOtCQwEnN/OTIkPJ6PB5MAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
       endorsements:
         - provider_instance_admin: oasis1qzql9cw9ly746jren7j66jscd36h5c3mfq6d6mct
       fees: endorsing_node

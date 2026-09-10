@@ -35,7 +35,7 @@ class MidasClient:
 
     def __init__(self) -> None:
         settings = load_settings()
-        self.w3 = Web3(Web3.HTTPProvider(settings.base_rpc_url))
+        self.w3 = Web3(Web3.HTTPProvider(settings.midas_rpc_url))
 
         self.issuance_vault_address = Web3.to_checksum_address(
             settings.midas_issuance_vault_address

@@ -18,6 +18,7 @@ def _make_client(with_signer: bool = False):
     settings = replace(
         load_settings(),
         base_rpc_url="http://localhost:8545",
+        midas_rpc_url="http://localhost:8546",
         midas_issuance_vault_address=TEST_ISSUANCE_VAULT,
         midas_redemption_vault_address=TEST_REDEMPTION_VAULT,
         midas_mtbill_token_address=TEST_MTBILL,
@@ -291,3 +292,29 @@ def test_write_tx_raises_on_reverted_receipt():
 
     with pytest.raises(RuntimeError, match="depositInstant tx reverted"):
         client.deposit_instant(TEST_USDC, 1_000_000, 950_000_000_000_000_000)
+
+
+def test_connects_to_the_midas_chain_not_the_base_chain():
+    """Midas keeps its instant liquidity on Ethereum, so the client must dial
+    MIDAS_RPC_URL rather than the Base RPC the rest of earn uses.
+    """
+    settings = replace(
+        load_settings(),
+        base_rpc_url="http://base.invalid",
+        midas_rpc_url="http://midas-chain.example",
+        midas_issuance_vault_address=TEST_ISSUANCE_VAULT,
+        midas_redemption_vault_address=TEST_REDEMPTION_VAULT,
+        midas_mtbill_token_address=TEST_MTBILL,
+        midas_oracle_address=TEST_ORACLE,
+    )
+    with patch("src.clients.midas.load_settings") as mock_settings, \
+         patch("src.clients.midas.Web3") as mock_web3_cls:
+        mock_settings.return_value = settings
+        mock_web3_cls.return_value = MagicMock()
+        mock_web3_cls.HTTPProvider = MagicMock()
+        mock_web3_cls.to_checksum_address = lambda a: a
+
+        from src.clients.midas import MidasClient
+        MidasClient()
+
+    mock_web3_cls.HTTPProvider.assert_called_once_with("http://midas-chain.example")

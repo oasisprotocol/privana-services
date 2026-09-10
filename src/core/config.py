@@ -88,6 +88,7 @@ def load_settings(refresh: bool = False) -> Settings:
             max_swap_amount_usd=_get_int("MAX_SWAP_AMOUNT_USD"),
             lifi_token_map=os.getenv("LIFI_TOKEN_MAP"),
             base_rpc_url=os.getenv("BASE_RPC_URL"),
+            midas_rpc_url=os.getenv("MIDAS_RPC_URL") or os.getenv("BASE_RPC_URL") or "",
             aave_pool_address=os.getenv("AAVE_POOL_ADDRESS"),
             aave_pool_assets=os.getenv("AAVE_POOL_ASSETS"),
             midas_issuance_vault_address=os.getenv("MIDAS_ISSUANCE_VAULT_ADDRESS"),

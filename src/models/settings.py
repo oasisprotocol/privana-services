@@ -31,6 +31,10 @@ class Settings:
     lifi_token_map: str
 
     base_rpc_url: str
+    # Chain the Midas vaults live on. Falls back to base_rpc_url, but Midas
+    # keeps its instant redemption liquidity on Ethereum, so a deployment can
+    # point the Midas strategy there while Aave stays on Base.
+    midas_rpc_url: str
     aave_pool_address: str
     aave_pool_assets: str
     midas_issuance_vault_address: str

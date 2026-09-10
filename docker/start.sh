@@ -2,7 +2,10 @@
 
 set -a
 
+# Preserve variables already in the environment e.g. injected via ROFL secrets.
+preexisting_env=$(export -p)
 source .env
+eval "$preexisting_env"
 
 pushd solidity
   if [ "${ACCOUNTING_CHAIN_ID}" = "23293" ]; then

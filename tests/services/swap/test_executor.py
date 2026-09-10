@@ -4,43 +4,72 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from eth_account import Account
-from web3 import Web3
 
+from src.core.db import db_write
 from src.core.eip712 import sign_transfer
-from src.models.common import Balance
 from src.models.swap import SwapStatus
 
 USER_SK = "0x" + "11" * 32
 USER_ADDRESS = Account.from_key(USER_SK).address
 
-SUFFICIENT_BALANCE = Balance(
-    user_address="0xlp", token_id="0xbbbb", balance="999999999999999999999"
-)
-
 
 def _make_executor(settings):
-    with patch("src.services.swap.executor.get_accounting_client") as mock_acct, \
-         patch("src.services.swap.executor.get_sapphire_client") as mock_saph, \
-         patch("src.services.swap.executor.load_settings") as mock_settings:
-        mock_settings.return_value = settings
-
-        acct = AsyncMock()
-        acct.get_transfer_nonce = AsyncMock(return_value=0)
-        acct.get_lp_balance = AsyncMock(return_value=SUFFICIENT_BALANCE)
-        mock_acct.return_value = acct
-
-        saph = MagicMock()
-        saph.execute_contract_call = MagicMock(return_value="0x" + "ff" * 32)
-        mock_saph.return_value = saph
-
+    with patch("src.services.swap.executor.load_settings", return_value=settings):
         from src.services.swap.executor import SwapExecutor
-        executor = SwapExecutor()
-        return executor
+        return SwapExecutor()
 
 
-class TestSwapStatus:
-    def test_six_states(self):
-        assert len(SwapStatus) == 6
+def _quote_fields(**overrides):
+    fields = dict(
+        user_address=USER_ADDRESS.lower(),
+        from_token_id="0xaaaa",
+        to_token_id="0xbbbb",
+        from_amount="1000000",
+        to_amount_gross="45000000000000000",
+        to_amount_estimate="44000000000000000",
+        to_amount_min="43000000000000000",
+        route_tool="okx",
+    )
+    fields.update(overrides)
+    return fields
+
+
+def _sign_input(settings):
+    return sign_transfer(
+        private_key=USER_SK,
+        chain_id=settings.accounting_chain_id,
+        verifying_contract=settings.accounting_contract_address,
+        to_address=settings.liquidity_provider_address,
+        token_id="0xaaaa",
+        amount=1000000,
+        nonce=0,
+    )
+
+
+def _insert_swap_row(test_db, swap_id, status, venue="internal"):
+    now = int(time.time())
+    db_write(
+        test_db,
+        """INSERT INTO swaps
+           (id, quote_id, user_address, from_token_id, to_token_id, from_amount,
+            to_amount_estimate, input_nonce, input_signature, status, venue,
+            created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (swap_id, "q_row", USER_ADDRESS.lower(), "0xaaaa", "0xbbbb", "1000000",
+         "44000000000000000", 0, "0x" + "ab" * 65, status, venue, now, now),
+    )
+
+
+def _stub_pipelines():
+    """Patch both venue pipelines, returning (internal, lifi) mocks."""
+    internal, lifi = MagicMock(), MagicMock()
+    internal.execute_swap = AsyncMock()
+    lifi.execute_swap = AsyncMock()
+    return internal, lifi, patch.multiple(
+        "src.services.swap.executor",
+        get_internal_pipeline=MagicMock(return_value=internal),
+        get_lifi_pipeline=MagicMock(return_value=lifi),
+    )
 
 
 class TestValidateQuote:
@@ -50,437 +79,174 @@ class TestValidateQuote:
         with pytest.raises(ValueError, match="Quote has expired"):
             executor._validate_quote("expired_q")
 
-    def test_missing_quote_raises(self, test_db, settings):
-        executor = _make_executor(settings)
-        with pytest.raises(ValueError, match="Quote not found"):
-            executor._validate_quote("nonexistent")
-
-    def test_valid_quote_returns_dict(self, test_db, settings, insert_quote):
-        user = "0xd8991364507fafC256EafF950d28618735753476"
-        insert_quote(
-            "q_valid",
-            user_address=user.lower(),
-            from_token_id="0xaaaa",
-            to_token_id="0xbbbb",
-            from_amount="1000000",
-            to_amount_gross="45000000000000000",
-            to_amount_estimate="44000000000000000",
-            to_amount_min="43000000000000000",
-            route_tool="okx",
-        )
-        executor = _make_executor(settings)
-        result = executor._validate_quote("q_valid")
-        assert isinstance(result, dict)
-        assert result["id"] == "q_valid"
-
-
-class TestExecuteSwap:
-    @pytest.fixture
-    def user_address(self):
-        return USER_ADDRESS
-
-    @pytest.fixture
-    def input_signature(self, settings):
-        return sign_transfer(
-            private_key=USER_SK,
-            chain_id=settings.accounting_chain_id,
-            verifying_contract=settings.accounting_contract_address,
-            to_address=settings.liquidity_provider_address,
-            token_id="0xaaaa",
-            amount=1000000,
-            nonce=0,
-        )
-
-    async def test_signer_mismatch_rejected(
-        self, test_db, settings, insert_quote, user_address, input_signature
-    ):
-        insert_quote(
-            "q_stranger",
-            user_address="0x" + "9" * 40,
-            from_token_id="0xaaaa",
-            to_token_id="0xbbbb",
-            from_amount="1000000",
-            to_amount_gross="45000000000000000",
-            to_amount_estimate="44000000000000000",
-            to_amount_min="43000000000000000",
-            route_tool="okx",
-        )
-        executor = _make_executor(settings)
-        with pytest.raises(ValueError, match="Quote was not created for this user"):
-            await executor.execute_swap("q_stranger", 0, input_signature)
-
-    async def test_successful_swap(self, test_db, settings, insert_quote, user_address, input_signature):
-        insert_quote(
-            "q_success",
-            user_address=user_address.lower(),
-            from_token_id="0xaaaa",
-            to_token_id="0xbbbb",
-            from_amount="1000000",
-            to_amount_gross="45000000000000000",
-            to_amount_estimate="44000000000000000",
-            to_amount_min="43000000000000000",
-            route_tool="okx",
-        )
-        executor = _make_executor(settings)
-        result = await executor.execute_swap("q_success", 0, input_signature)
-        assert result.status == SwapStatus.COMPLETED.value
-        assert result.swap_tx_hash == "0x" + "ff" * 32
-
-    async def test_failed_swap(self, test_db, settings, insert_quote, user_address, input_signature):
-        insert_quote(
-            "q_fail",
-            user_address=user_address.lower(),
-            from_token_id="0xaaaa",
-            to_token_id="0xbbbb",
-            from_amount="1000000",
-            to_amount_gross="45000000000000000",
-            to_amount_estimate="44000000000000000",
-            to_amount_min="43000000000000000",
-            route_tool="okx",
-        )
-        executor = _make_executor(settings)
-        executor.sapphire.execute_contract_call = MagicMock(
-            side_effect=RuntimeError("tx reverted")
-        )
-        result = await executor.execute_swap("q_fail", 0, input_signature)
-        assert result.status == SwapStatus.FAILED.value
-        assert "reverted" in result.error.lower()
-
-    async def test_swap_that_would_revert_is_rejected_before_broadcast(
-        self, test_db, settings, insert_quote, user_address, input_signature
-    ):
-        insert_quote(
-            "q_sim_revert",
-            user_address=user_address.lower(),
-            from_token_id="0xaaaa",
-            to_token_id="0xbbbb",
-            from_amount="1000000",
-            to_amount_gross="45000000000000000",
-            to_amount_estimate="44000000000000000",
-            to_amount_min="43000000000000000",
-            route_tool="okx",
-        )
-        executor = _make_executor(settings)
-        executor.sapphire.simulate_contract_call = MagicMock(
-            side_effect=RuntimeError("execution reverted: InsufficientBalance")
-        )
-
-        with pytest.raises(ValueError, match="would revert on-chain"):
-            await executor.execute_swap("q_sim_revert", 0, input_signature)
-
-        executor.sapphire.execute_contract_call.assert_not_called()
-
-    async def test_rejected_swap_is_not_left_pending(
-        self, test_db, settings, insert_quote, user_address, input_signature
-    ):
-        # The swap row is inserted before execution, so a rejection that
-        # propagates as a 400 must still close the row out. A stranded PENDING
-        # row sits in /v1/operations/unsettled forever.
-        insert_quote(
-            "q_not_pending",
-            user_address=user_address.lower(),
-            from_token_id="0xaaaa",
-            to_token_id="0xbbbb",
-            from_amount="1000000",
-            to_amount_gross="45000000000000000",
-            to_amount_estimate="44000000000000000",
-            to_amount_min="43000000000000000",
-            route_tool="okx",
-        )
-        executor = _make_executor(settings)
-        executor.sapphire.simulate_contract_call = MagicMock(
-            side_effect=RuntimeError("execution reverted")
-        )
-
-        with pytest.raises(ValueError):
-            await executor.execute_swap("q_not_pending", 0, input_signature)
-
-        row = test_db.execute("SELECT status, error FROM swaps").fetchone()
-        assert row["status"] == SwapStatus.FAILED.value
-        assert row["error"] is not None
-
-    async def test_unexpected_value_error_still_closes_the_swap_row(
-        self, test_db, settings, insert_quote, user_address, input_signature
-    ):
-        # Not just the simulation path: any ValueError raised mid-execution
-        # must leave a settled row rather than a pending one.
-        insert_quote(
-            "q_value_error",
-            user_address=user_address.lower(),
-            from_token_id="0xaaaa",
-            to_token_id="0xbbbb",
-            from_amount="1000000",
-            to_amount_gross="45000000000000000",
-            to_amount_estimate="44000000000000000",
-            to_amount_min="43000000000000000",
-            route_tool="okx",
-        )
-        executor = _make_executor(settings)
-        executor.sapphire.execute_contract_call = MagicMock(
-            side_effect=ValueError("malformed argument")
-        )
-
-        with pytest.raises(ValueError):
-            await executor.execute_swap("q_value_error", 0, input_signature)
-
-        row = test_db.execute("SELECT status FROM swaps").fetchone()
-        assert row["status"] == SwapStatus.FAILED.value
-
-    async def test_simulation_runs_before_execution(
-        self, test_db, settings, insert_quote, user_address, input_signature
-    ):
-        insert_quote(
-            "q_sim_order",
-            user_address=user_address.lower(),
-            from_token_id="0xaaaa",
-            to_token_id="0xbbbb",
-            from_amount="1000000",
-            to_amount_gross="45000000000000000",
-            to_amount_estimate="44000000000000000",
-            to_amount_min="43000000000000000",
-            route_tool="okx",
-        )
-        executor = _make_executor(settings)
-        calls = []
-        executor.sapphire.simulate_contract_call = MagicMock(
-            side_effect=lambda **kw: calls.append("simulate")
-        )
-        executor.sapphire.execute_contract_call = MagicMock(
-            side_effect=lambda **kw: calls.append("execute") or ("0x" + "ff" * 32)
-        )
-
-        await executor.execute_swap("q_sim_order", 0, input_signature)
-
-        assert calls == ["simulate", "execute"]
-
-    async def test_insufficient_liquidity_raises_value_error(
-        self, test_db, settings, insert_quote, user_address, input_signature
-    ):
-        insert_quote(
-            "q_no_liq",
-            user_address=user_address.lower(),
-            from_token_id="0xaaaa",
-            to_token_id="0xbbbb",
-            from_amount="1000000",
-            to_amount_gross="45000000000000000",
-            to_amount_estimate="44000000000000000",
-            to_amount_min="43000000000000000",
-            route_tool="okx",
-        )
-        executor = _make_executor(settings)
-        low_balance = Balance(user_address="0xlp", token_id="0xbbbb", balance="1")
-        executor.accounting.get_lp_balance = AsyncMock(return_value=low_balance)
-        with pytest.raises(ValueError, match="Insufficient liquidity"):
-            await executor.execute_swap("q_no_liq", 0, input_signature)
-
-    async def test_creates_swap_record_before_calling_sapphire(
-        self, test_db, settings, insert_quote, user_address, input_signature
-    ):
-        insert_quote(
-            "q_record",
-            user_address=user_address.lower(),
-            from_token_id="0xaaaa",
-            to_token_id="0xbbbb",
-            from_amount="1000000",
-            to_amount_gross="45000000000000000",
-            to_amount_estimate="44000000000000000",
-            to_amount_min="43000000000000000",
-            route_tool="okx",
-        )
-        executor = _make_executor(settings)
-
-        original_execute = executor.sapphire.execute_contract_call
-
-        def check_record_exists(*args, **kwargs):
-            row = test_db.execute(
-                "SELECT COUNT(*) as cnt FROM swaps WHERE quote_id = ?", ("q_record",)
-            ).fetchone()
-            assert row["cnt"] == 1
-            return original_execute(*args, **kwargs)
-
-        executor.sapphire.execute_contract_call = MagicMock(side_effect=check_record_exists)
-        await executor.execute_swap("q_record", 0, input_signature)
-
-    async def test_passes_correct_params_to_sapphire(
-        self, test_db, settings, insert_quote, user_address, input_signature
-    ):
-        insert_quote(
-            "q_params",
-            user_address=user_address.lower(),
-            from_token_id="0xaaaa",
-            to_token_id="0xbbbb",
-            from_amount="1000000",
-            to_amount_gross="45000000000000000",
-            to_amount_estimate="44000000000000000",
-            to_amount_min="43000000000000000",
-            route_tool="okx",
-        )
-        executor = _make_executor(settings)
-        await executor.execute_swap("q_params", 0, input_signature)
-
-        call_kwargs = executor.sapphire.execute_contract_call.call_args
-        assert call_kwargs.kwargs["function_name"] == "swap"
-        swap_args = call_kwargs.kwargs["args"]
-        assert swap_args[0] == Web3.to_checksum_address(user_address)
-        assert swap_args[1] == bytes.fromhex("aaaa")
-        assert swap_args[2] == 1000000
-        assert swap_args[3] == 0
-        assert swap_args[5] == bytes.fromhex("bbbb")
-        assert swap_args[6] == 44000000000000000
-        assert swap_args[7] == 0
-
-    async def test_signs_output_transfer_with_lp_key(
-        self, test_db, settings, insert_quote, user_address, input_signature
-    ):
-        insert_quote(
-            "q_sign",
-            user_address=user_address.lower(),
-            from_token_id="0xaaaa",
-            to_token_id="0xbbbb",
-            from_amount="1000000",
-            to_amount_gross="45000000000000000",
-            to_amount_estimate="44000000000000000",
-            to_amount_min="43000000000000000",
-            route_tool="okx",
-        )
-
-        with patch("src.services.swap.executor.get_accounting_client") as mock_acct, \
-             patch("src.services.swap.executor.get_sapphire_client") as mock_saph, \
-             patch("src.services.swap.executor.load_settings") as mock_settings, \
-             patch("src.services.swap.executor.sign_transfer") as mock_sign:
-            mock_settings.return_value = settings
-
-            acct = AsyncMock()
-            acct.get_transfer_nonce = AsyncMock(return_value=7)
-            acct.get_lp_balance = AsyncMock(return_value=SUFFICIENT_BALANCE)
-            mock_acct.return_value = acct
-
-            saph = MagicMock()
-            saph.execute_contract_call = MagicMock(return_value="0x" + "ff" * 32)
-            mock_saph.return_value = saph
-
-            mock_sign.return_value = "0x" + "cc" * 65
-
-            from src.services.swap.executor import SwapExecutor
-            executor = SwapExecutor()
-            await executor.execute_swap("q_sign", 0, input_signature)
-
-            mock_sign.assert_called_once_with(
-                private_key=settings.liquidity_provider_secret_key,
-                chain_id=settings.accounting_chain_id,
-                verifying_contract=settings.accounting_contract_address,
-                to_address=user_address,
-                token_id="0xbbbb",
-                amount=44000000000000000,
-                nonce=7,
-            )
-
-    async def test_swap_lock_prevents_concurrent_nonce_reads(
-        self, test_db, settings, insert_quote, user_address, input_signature
-    ):
-        insert_quote(
-            "q_lock1",
-            user_address=user_address.lower(),
-            from_token_id="0xaaaa",
-            to_token_id="0xbbbb",
-            from_amount="1000000",
-            to_amount_gross="45000000000000000",
-            to_amount_estimate="44000000000000000",
-            to_amount_min="43000000000000000",
-            route_tool="okx",
-        )
-        insert_quote(
-            "q_lock2",
-            user_address=user_address.lower(),
-            from_token_id="0xaaaa",
-            to_token_id="0xbbbb",
-            from_amount="1000000",
-            to_amount_gross="45000000000000000",
-            to_amount_estimate="44000000000000000",
-            to_amount_min="43000000000000000",
-            route_tool="okx",
-        )
-
-        executor = _make_executor(settings)
-
-        nonce_call_times = []
-        original_get_nonce = executor.accounting.get_transfer_nonce
-
-        async def tracked_get_nonce(*args, **kwargs):
-            nonce_call_times.append(time.monotonic())
-            await asyncio.sleep(0.05)
-            return await original_get_nonce(*args, **kwargs)
-
-        executor.accounting.get_transfer_nonce = AsyncMock(side_effect=tracked_get_nonce)
-
-        await asyncio.gather(
-            executor.execute_swap("q_lock1", 0, input_signature),
-            executor.execute_swap("q_lock2", 0, input_signature),
-        )
-
-        assert len(nonce_call_times) == 2
-        assert abs(nonce_call_times[1] - nonce_call_times[0]) >= 0.04
-
-
-class TestExpiryBoundary:
     def test_quote_at_exact_expiry_raises(self, test_db, settings, insert_quote):
         insert_quote("q_boundary", expires_at=int(time.time()))
         executor = _make_executor(settings)
         with pytest.raises(ValueError, match="Quote has expired"):
             executor._validate_quote("q_boundary")
 
+    def test_missing_quote_raises(self, test_db, settings):
+        executor = _make_executor(settings)
+        with pytest.raises(ValueError, match="Quote not found"):
+            executor._validate_quote("nonexistent")
 
-class TestZeroFeeExecution:
+    def test_valid_quote_returns_dict(self, test_db, settings, insert_quote):
+        insert_quote("q_valid", **_quote_fields())
+        executor = _make_executor(settings)
+        result = executor._validate_quote("q_valid")
+        assert isinstance(result, dict)
+        assert result["id"] == "q_valid"
+
+
+class TestScheduleSwap:
     @pytest.fixture
     def input_signature(self, settings):
-        return sign_transfer(
-            private_key=USER_SK,
-            chain_id=settings.accounting_chain_id,
-            verifying_contract=settings.accounting_contract_address,
-            to_address=settings.liquidity_provider_address,
-            token_id="0xaaaa",
-            amount=1000000,
-            nonce=0,
-        )
+        return _sign_input(settings)
 
-    def _zero_fee_quote(self, insert_quote, quote_id):
-        gross = "45000000000000000"
-        insert_quote(
-            quote_id,
-            user_address=USER_ADDRESS.lower(),
-            from_token_id="0xaaaa",
-            to_token_id="0xbbbb",
-            from_amount="1000000",
-            to_amount_gross=gross,
-            to_amount_estimate=gross,
-            to_amount_min=gross,
-            route_tool="okx",
-            fee_bps=0,
-            fee_amount="0",
-        )
-        return int(gross)
+    async def test_signer_mismatch_rejected(self, test_db, settings, insert_quote, input_signature):
+        insert_quote("q_stranger", **_quote_fields(user_address="0x" + "9" * 40))
+        executor = _make_executor(settings)
+        with pytest.raises(ValueError, match="Quote was not created for this user"):
+            await executor.schedule_swap("q_stranger", 0, input_signature)
 
-    async def test_zero_fee_quote_executes_when_lp_covers_gross(
+    async def test_malformed_signature_rejected(self, test_db, settings, insert_quote):
+        insert_quote("q_badsig", **_quote_fields())
+        executor = _make_executor(settings)
+        with pytest.raises(ValueError):
+            await executor.schedule_swap("q_badsig", 0, "0xdeadbeef")
+
+    async def test_queues_the_swap_without_executing_it(
         self, test_db, settings, insert_quote, input_signature
     ):
-        gross = self._zero_fee_quote(insert_quote, "q_zero_fee")
+        insert_quote("q_sched", **_quote_fields())
         executor = _make_executor(settings)
-        executor.accounting.get_lp_balance = AsyncMock(
-            return_value=Balance(user_address="0xlp", token_id="0xbbbb", balance=str(gross))
-        )
-        result = await executor.execute_swap("q_zero_fee", 0, input_signature)
-        assert result.status == SwapStatus.COMPLETED.value
-        assert result.to_amount_estimate == str(gross)
+        internal, lifi, pipelines = _stub_pipelines()
 
-    async def test_zero_fee_quote_rejected_when_lp_below_gross(
+        with pipelines:
+            result = await executor.schedule_swap("q_sched", 0, input_signature)
+
+        assert result.status == SwapStatus.SCHEDULED.value
+        assert result.venue == "internal"
+        assert result.swap_tx_hash is None
+        assert result.input_nonce == 0
+        assert result.input_signature == input_signature
+        internal.execute_swap.assert_not_awaited()
+        lifi.execute_swap.assert_not_awaited()
+
+    async def test_lifi_quote_is_queued_on_the_lifi_venue(
         self, test_db, settings, insert_quote, input_signature
     ):
-        gross = self._zero_fee_quote(insert_quote, "q_zero_fee_short")
+        insert_quote("q_lifi", **_quote_fields(venue="lifi"))
         executor = _make_executor(settings)
-        executor.accounting.get_lp_balance = AsyncMock(
-            return_value=Balance(
-                user_address="0xlp", token_id="0xbbbb", balance=str(gross - 1)
-            )
-        )
-        with pytest.raises(ValueError, match="Insufficient liquidity"):
-            await executor.execute_swap("q_zero_fee_short", 0, input_signature)
+
+        result = await executor.schedule_swap("q_lifi", 0, input_signature)
+
+        assert result.status == SwapStatus.SCHEDULED.value
+        assert result.venue == "lifi"
+
+
+class TestProcessPendingSwaps:
+    async def test_scheduled_internal_row_goes_to_the_internal_pipeline(
+        self, test_db, settings
+    ):
+        _insert_swap_row(test_db, "s_int", SwapStatus.SCHEDULED.value)
+        executor = _make_executor(settings)
+        internal, lifi, pipelines = _stub_pipelines()
+
+        with pipelines:
+            await executor._process_pending_swaps()
+
+        assert internal.execute_swap.await_args.args[0].id == "s_int"
+        lifi.execute_swap.assert_not_awaited()
+
+    async def test_executing_internal_row_is_retried(self, test_db, settings):
+        _insert_swap_row(test_db, "s_int_run", SwapStatus.EXECUTING.value)
+        executor = _make_executor(settings)
+        internal, _, pipelines = _stub_pipelines()
+
+        with pipelines:
+            await executor._process_pending_swaps()
+
+        assert internal.execute_swap.await_args.args[0].id == "s_int_run"
+
+    async def test_scheduled_lifi_row_goes_to_the_lifi_pipeline(self, test_db, settings):
+        _insert_swap_row(test_db, "s_lifi", SwapStatus.SCHEDULED.value, venue="lifi")
+        executor = _make_executor(settings)
+        internal, lifi, pipelines = _stub_pipelines()
+
+        with pipelines:
+            await executor._process_pending_swaps()
+
+        assert lifi.execute_swap.await_args.args[0].id == "s_lifi"
+        internal.execute_swap.assert_not_awaited()
+
+    async def test_executing_lifi_row_left_to_its_background_task(self, test_db, settings):
+        _insert_swap_row(test_db, "s_lifi_run", SwapStatus.EXECUTING.value, venue="lifi")
+        executor = _make_executor(settings)
+        _, lifi, pipelines = _stub_pipelines()
+
+        with pipelines:
+            await executor._process_pending_swaps()
+
+        lifi.execute_swap.assert_not_awaited()
+
+    async def test_settled_rows_are_left_alone(self, test_db, settings):
+        _insert_swap_row(test_db, "s_done", SwapStatus.COMPLETED.value)
+        _insert_swap_row(test_db, "s_failed", SwapStatus.FAILED.value)
+        executor = _make_executor(settings)
+        internal, _, pipelines = _stub_pipelines()
+
+        with pipelines:
+            await executor._process_pending_swaps()
+
+        internal.execute_swap.assert_not_awaited()
+
+    async def test_executes_queued_swaps_oldest_first(self, test_db, settings):
+        now = int(time.time())
+        _insert_swap_row(test_db, "s_new", SwapStatus.SCHEDULED.value)
+        _insert_swap_row(test_db, "s_old", SwapStatus.SCHEDULED.value)
+        db_write(test_db, "UPDATE swaps SET created_at = ? WHERE id = ?", (now - 60, "s_old"))
+        executor = _make_executor(settings)
+        internal, _, pipelines = _stub_pipelines()
+
+        with pipelines:
+            await executor._process_pending_swaps()
+
+        assert [c.args[0].id for c in internal.execute_swap.await_args_list] == ["s_old", "s_new"]
+
+
+class TestWorker:
+    async def test_start_drains_the_queue_and_stop_cancels(self, test_db, settings):
+        _insert_swap_row(test_db, "s_worker", SwapStatus.SCHEDULED.value)
+        executor = _make_executor(settings)
+        internal, _, pipelines = _stub_pipelines()
+
+        with pipelines:
+            await executor.start()
+            try:
+                for _ in range(200):
+                    if internal.execute_swap.await_count:
+                        break
+                    await asyncio.sleep(0.01)
+            finally:
+                await executor.stop()
+
+        assert internal.execute_swap.await_args.args[0].id == "s_worker"
+        assert executor._worker_task is None
+
+    async def test_worker_survives_a_failing_pass(self, test_db, settings):
+        _insert_swap_row(test_db, "s_boom", SwapStatus.SCHEDULED.value)
+        executor = _make_executor(settings)
+        internal, _, pipelines = _stub_pipelines()
+        internal.execute_swap = AsyncMock(side_effect=RuntimeError("pipeline exploded"))
+
+        with pipelines:
+            await executor.start()
+            try:
+                for _ in range(200):
+                    if internal.execute_swap.await_count:
+                        break
+                    await asyncio.sleep(0.01)
+                assert not executor._worker_task.done()
+            finally:
+                await executor.stop()

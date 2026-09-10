@@ -63,6 +63,7 @@ async def lifespan(_app: FastAPI):
     )
     from src.services.pool_rate_history import get_pool_rate_sampler
     from src.services.price_history import get_price_sampler
+    from src.services.swap.executor import get_swap_executor
 
     logger.info("Privana services starting...")
 
@@ -92,9 +93,11 @@ async def lifespan(_app: FastAPI):
         logger.exception("Midas strategy registration failed; affected pools fall back to manual")
 
     if settings.lifi_execution_enabled:
-        from src.services.swap.lifi_pipeline import recover_inflight_lifi_swaps
+        from src.services.swap.lifi import recover_inflight_lifi_swaps
 
         asyncio.create_task(recover_inflight_lifi_swaps())
+
+    await get_swap_executor().start()
 
     try:
         await get_price_sampler().start()
@@ -107,6 +110,8 @@ async def lifespan(_app: FastAPI):
         logger.exception("Pool rate sampler failed to start; no earn rate history will be recorded")
 
     yield
+
+    await get_swap_executor().stop()
 
     try:
         await get_price_sampler().stop()

@@ -8,7 +8,7 @@ from src.models.operations import UnsettledOperation
 # write "scheduled" and earn transactions "pending" for the same pre-execution
 # state. "undeployed" is unsettled by design: the shares exist but the funds
 # still need an operator to redeploy them into the strategy.
-UNSETTLED_STATUSES = ("scheduled", "pending", "failed", "canceled", "undeployed")
+UNSETTLED_STATUSES = ("scheduled", "pending", "executing", "failed", "refunding", "canceled", "undeployed")
 
 
 def list_unsettled_operations(user_address: str, limit: int) -> list[UnsettledOperation]:

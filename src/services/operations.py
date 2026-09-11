@@ -4,10 +4,11 @@ from src.core.db import get_db
 from src.models.operations import UnsettledOperation
 
 # "canceled" is part of the read contract even though current writers only
-# produce pending, completed, failed, and undeployed rows. "undeployed" is
-# unsettled by design: the shares exist but the funds still need an operator
-# to redeploy them into the strategy.
-UNSETTLED_STATUSES = ("pending", "failed", "canceled", "undeployed")
+# produce scheduled, pending, completed, failed, and undeployed rows. Swaps
+# write "scheduled" and earn transactions "pending" for the same pre-execution
+# state. "undeployed" is unsettled by design: the shares exist but the funds
+# still need an operator to redeploy them into the strategy.
+UNSETTLED_STATUSES = ("scheduled", "pending", "executing", "failed", "refunding", "canceled", "undeployed")
 
 
 def list_unsettled_operations(user_address: str, limit: int) -> list[UnsettledOperation]:

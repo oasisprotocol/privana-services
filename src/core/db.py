@@ -77,6 +77,10 @@ MIGRATIONS = [
     "ALTER TABLE swaps ADD COLUMN withdrawal_index INTEGER;",
     "ALTER TABLE swaps ADD COLUMN lifi_tx_hash TEXT;",
     "ALTER TABLE swaps ADD COLUMN deposit_tx_hash TEXT;",
+    "ALTER TABLE swaps ADD COLUMN input_nonce INTEGER;",
+    "ALTER TABLE swaps ADD COLUMN input_signature TEXT;",
+    # Swaps are queued for a worker now, so the pre-execution state says so.
+    "UPDATE swaps SET status = 'scheduled' WHERE status = 'pending';",
     """
     CREATE TABLE IF NOT EXISTS token_price_history (
         coin_id TEXT NOT NULL,

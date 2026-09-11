@@ -33,7 +33,7 @@ EXEC_QUOTE = {
 
 
 def _make_pipeline(settings):
-    from src.services.swap.lifi_pipeline import LifiSwapPipeline
+    from src.services.swap.lifi import LifiSwap
 
     accounting = MagicMock()
     accounting.get_transfer_nonce = AsyncMock(side_effect=[6, 70])
@@ -62,7 +62,7 @@ def _make_pipeline(settings):
     async def privana_factory():
         return privana
 
-    pipeline = LifiSwapPipeline(
+    pipeline = LifiSwap(
         accounting=accounting, lifi=lifi, bridge=bridge, evm=evm,
         privana_factory=privana_factory, poll_interval_sec=0.0,
     )
@@ -84,40 +84,94 @@ def _quote(quote_id="q_lifi"):
     }
 
 
-class TestLaunch:
-    async def test_rejected_input_returns_failed_record(self, test_db, settings, insert_quote):
+def _scheduled_swap(test_db, quote_id):
+    """A swap row as the executor queues it, before the pipeline picks it up."""
+    from src.core.db import db_write
+    from src.models.swap import SwapRecord
+
+    now = int(time.time())
+    swap_id = f"s_{quote_id}"
+    db_write(
+        test_db,
+        """INSERT INTO swaps
+           (id, quote_id, user_address, from_token_id, to_token_id, from_amount,
+            to_amount_estimate, input_nonce, input_signature, status, venue,
+            created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (swap_id, quote_id, USER, FROM_TOKEN, TO_TOKEN, "1000000", "57000",
+         5, "0x" + "ab" * 65, "scheduled", "lifi", now, now),
+    )
+    row = test_db.execute("SELECT * FROM swaps WHERE id = ?", (swap_id,)).fetchone()
+    return SwapRecord(**dict(row))
+
+
+class TestExecuteSwap:
+    async def test_rejected_input_fails_the_swap(self, test_db, settings, insert_quote):
         insert_quote("q_rej", venue="lifi", user_address=USER,
                      from_token_id=FROM_TOKEN, to_token_id=TO_TOKEN)
         pipeline = _make_pipeline(settings)
         privana = await pipeline._privana_factory()
         privana.transfer_funds = AsyncMock(return_value=MagicMock(status="rejected", detail="bad sig"))
-        record = await pipeline.launch(_quote("q_rej"), USER, 5, "0x" + "ab" * 65)
+        swap = _scheduled_swap(test_db, "q_rej")
+        await pipeline.execute_swap(swap)
+        record = pipeline._get_swap(swap.id)
         assert record.status == "failed"
         assert record.venue == "lifi"
 
-    async def test_accepted_input_returns_executing_record(self, test_db, settings, insert_quote):
+    async def test_accepted_input_moves_to_executing(self, test_db, settings, insert_quote):
         insert_quote("q_ok", venue="lifi", user_address=USER,
                      from_token_id=FROM_TOKEN, to_token_id=TO_TOKEN)
         pipeline = _make_pipeline(settings)
-        pipeline.spawn_background = MagicMock()
-        record = await pipeline.launch(_quote("q_ok"), USER, 5, "0x" + "ab" * 65)
+        pipeline._spawn_background = MagicMock()
+        swap = _scheduled_swap(test_db, "q_ok")
+        await pipeline.execute_swap(swap)
+        record = pipeline._get_swap(swap.id)
         assert record.status == "executing"
         assert record.step == "input_transfer"
-        pipeline.spawn_background.assert_called_once()
+        pipeline._spawn_background.assert_called_once()
+
+    async def test_missing_quote_fails_the_swap(self, test_db, settings):
+        pipeline = _make_pipeline(settings)
+        pipeline._spawn_background = MagicMock()
+        swap = _scheduled_swap(test_db, "q_gone")
+        await pipeline.execute_swap(swap)
+        record = pipeline._get_swap(swap.id)
+        assert record.status == "failed"
+        assert "expired" in record.error
+        pipeline._spawn_background.assert_not_called()
+
+    async def test_lapsed_quote_is_not_submitted(self, test_db, settings, insert_quote):
+        # Still present in the table — cleanup_expired_quotes is throttled —
+        # but past expires_at, so the quoted price is stale.
+        insert_quote("q_lapsed", expires_at=int(time.time()) - 1, venue="lifi",
+                     user_address=USER, from_token_id=FROM_TOKEN, to_token_id=TO_TOKEN)
+        pipeline = _make_pipeline(settings)
+        pipeline._spawn_background = MagicMock()
+        swap = _scheduled_swap(test_db, "q_lapsed")
+
+        await pipeline.execute_swap(swap)
+
+        record = pipeline._get_swap(swap.id)
+        assert record.status == "failed"
+        assert "expired" in record.error
+        privana = await pipeline._privana_factory()
+        privana.transfer_funds.assert_not_awaited()
+        pipeline._spawn_background.assert_not_called()
 
 
 class TestRun:
-    async def _launch_and_run(self, pipeline, quote):
-        pipeline.spawn_background = MagicMock()
-        record = await pipeline.launch(quote, USER, 5, "0x" + "ab" * 65)
-        await pipeline._run(record.id, quote, 5)
-        return record.id
+    async def _launch_and_run(self, pipeline, quote, test_db):
+        pipeline._spawn_background = MagicMock()
+        swap = _scheduled_swap(test_db, quote["id"])
+        await pipeline.execute_swap(swap)
+        await pipeline._run(swap.id, quote, 5)
+        return swap.id
 
     async def test_happy_path_completes_with_actual_amount(self, test_db, settings, insert_quote):
         insert_quote("q1", venue="lifi", user_address=USER,
                      from_token_id=FROM_TOKEN, to_token_id=TO_TOKEN)
         pipeline = _make_pipeline(settings)
-        swap_id = await self._launch_and_run(pipeline, _quote("q1"))
+        swap_id = await self._launch_and_run(pipeline, _quote("q1"), test_db)
         row = dict(test_db.execute("SELECT * FROM swaps WHERE id=?", (swap_id,)).fetchone())
         credited, _ = calculate_fee(60000, 10)
         assert row["status"] == "completed"
@@ -133,7 +187,7 @@ class TestRun:
         pipeline = _make_pipeline(settings)
         low_quote = {**EXEC_QUOTE, "estimate": {**EXEC_QUOTE["estimate"], "toAmountMin": "50000"}}
         pipeline.lifi.get_execution_quote = AsyncMock(return_value=low_quote)
-        swap_id = await self._launch_and_run(pipeline, _quote("q2"))
+        swap_id = await self._launch_and_run(pipeline, _quote("q2"), test_db)
         row = dict(test_db.execute("SELECT * FROM swaps WHERE id=?", (swap_id,)).fetchone())
         assert row["status"] == "failed"
         pipeline.evm.send_transaction_request.assert_not_called()
@@ -143,7 +197,7 @@ class TestRun:
                      from_token_id=FROM_TOKEN, to_token_id=TO_TOKEN)
         pipeline = _make_pipeline(settings)
         pipeline.lifi.get_status = AsyncMock(return_value={"status": "FAILED"})
-        swap_id = await self._launch_and_run(pipeline, _quote("q3"))
+        swap_id = await self._launch_and_run(pipeline, _quote("q3"), test_db)
         row = dict(test_db.execute("SELECT * FROM swaps WHERE id=?", (swap_id,)).fetchone())
         assert row["status"] == "failed"
 
@@ -158,18 +212,19 @@ class TestRun:
             MagicMock(status="submitted", detail=None),
         ])
         pipeline.accounting.get_transfer_nonce = AsyncMock(side_effect=[6, 70, 70])
-        swap_id = await self._launch_and_run(pipeline, _quote("q4"))
+        swap_id = await self._launch_and_run(pipeline, _quote("q4"), test_db)
         row = dict(test_db.execute("SELECT * FROM swaps WHERE id=?", (swap_id,)).fetchone())
         assert row["status"] == "completed"
         assert privana.transfer_funds.await_count == 3
 
 
 class TestRefund:
-    async def _launch_and_run(self, pipeline, quote):
-        pipeline.spawn_background = MagicMock()
-        record = await pipeline.launch(quote, USER, 5, "0x" + "ab" * 65)
-        await pipeline._run(record.id, quote, 5)
-        return record.id
+    async def _launch_and_run(self, pipeline, quote, test_db):
+        pipeline._spawn_background = MagicMock()
+        swap = _scheduled_swap(test_db, quote["id"])
+        await pipeline.execute_swap(swap)
+        await pipeline._run(swap.id, quote, 5)
+        return swap.id
 
     async def test_withdraw_failure_refunds_input(self, test_db, settings, insert_quote):
         insert_quote("q_w", venue="lifi", user_address=USER,
@@ -177,7 +232,7 @@ class TestRefund:
         pipeline = _make_pipeline(settings)
         pipeline.bridge.withdraw_to_chain = AsyncMock(side_effect=RuntimeError("relay down"))
         pipeline.accounting.get_transfer_nonce = AsyncMock(side_effect=[6, 70])
-        swap_id = await self._launch_and_run(pipeline, _quote("q_w"))
+        swap_id = await self._launch_and_run(pipeline, _quote("q_w"), test_db)
         row = dict(test_db.execute("SELECT * FROM swaps WHERE id=?", (swap_id,)).fetchone())
         assert row["status"] == "refunded"
         privana = await pipeline._privana_factory()
@@ -195,7 +250,7 @@ class TestRefund:
         pipeline.accounting.get_transfer_nonce = AsyncMock(side_effect=[6, 70])
         pipeline.accounting.get_token_info = AsyncMock(
             side_effect=[FROM_INFO, TO_INFO, FROM_INFO])
-        swap_id = await self._launch_and_run(pipeline, _quote("q_e"))
+        swap_id = await self._launch_and_run(pipeline, _quote("q_e"), test_db)
         row = dict(test_db.execute("SELECT * FROM swaps WHERE id=?", (swap_id,)).fetchone())
         assert row["status"] == "refunded"
         pipeline.evm.transfer_erc20.assert_called_once()
@@ -207,7 +262,7 @@ class TestRefund:
         pipeline = _make_pipeline(settings)
         pipeline._deposit_max_retries = 2
         pipeline.bridge.await_deposit_credit = AsyncMock(side_effect=RuntimeError("relay stuck"))
-        swap_id = await self._launch_and_run(pipeline, _quote("q_d"))
+        swap_id = await self._launch_and_run(pipeline, _quote("q_d"), test_db)
         row = dict(test_db.execute("SELECT * FROM swaps WHERE id=?", (swap_id,)).fetchone())
         assert row["status"] == "failed"
         assert "deposit" in row["error"]
@@ -225,7 +280,7 @@ class TestRefund:
             MagicMock(status="rejected", detail="boom"),
         ])
         pipeline.accounting.get_transfer_nonce = AsyncMock(side_effect=[6, 70, 70])
-        swap_id = await self._launch_and_run(pipeline, _quote("q_c"))
+        swap_id = await self._launch_and_run(pipeline, _quote("q_c"), test_db)
         row = dict(test_db.execute("SELECT * FROM swaps WHERE id=?", (swap_id,)).fetchone())
         assert row["status"] == "failed"
         assert "credit" in row["error"]
@@ -248,7 +303,7 @@ class TestRecovery:
         )
 
     async def test_inflight_swaps_routed_to_refund_or_failed(self, test_db, settings):
-        from src.services.swap.lifi_pipeline import recover_inflight_lifi_swaps
+        from src.services.swap.lifi import recover_inflight_lifi_swaps
         self._insert_swap(test_db, "s_withdraw", "withdraw")
         self._insert_swap(test_db, "s_credit", "credit")
         pipeline = _make_pipeline(settings)
@@ -264,7 +319,7 @@ class TestRecovery:
         import time as _t
 
         from src.core.db import db_write
-        from src.services.swap.lifi_pipeline import recover_inflight_lifi_swaps
+        from src.services.swap.lifi import recover_inflight_lifi_swaps
         now = int(_t.time())
         db_write(
             test_db,
@@ -272,7 +327,7 @@ class TestRecovery:
                (id, quote_id, user_address, from_token_id, to_token_id,
                 from_amount, to_amount_estimate, status, venue, created_at, updated_at)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            ("s_int", "q_i", USER, FROM_TOKEN, TO_TOKEN, "1", "1", "pending", "internal", now, now),
+            ("s_int", "q_i", USER, FROM_TOKEN, TO_TOKEN, "1", "1", "scheduled", "internal", now, now),
         )
         pipeline = _make_pipeline(settings)
         pipeline._refund = AsyncMock()
@@ -301,18 +356,21 @@ class TestExecutorDispatch:
             amount=1000000,
             nonce=5,
         )
-        fake_record = MagicMock()
         fake_pipeline = MagicMock()
-        fake_pipeline.launch = AsyncMock(return_value=fake_record)
-        with patch("src.services.swap.executor.get_accounting_client"), \
-             patch("src.services.swap.executor.get_sapphire_client"), \
-             patch("src.services.swap.executor.load_settings", return_value=settings), \
+        fake_pipeline.execute_swap = AsyncMock()
+        with patch("src.services.swap.executor.load_settings", return_value=settings), \
              patch("src.services.swap.executor.get_lifi_pipeline", return_value=fake_pipeline):
             from src.services.swap.executor import SwapExecutor
             executor = SwapExecutor()
-            result = await executor.execute_swap("q_disp", 5, sig)
-        assert result is fake_record
-        fake_pipeline.launch.assert_awaited_once()
+            scheduled = await executor.schedule_swap("q_disp", 5, sig)
+            assert scheduled.venue == "lifi"
+            assert scheduled.status == "scheduled"
+            await executor._process_pending_swaps()
+
+        dispatched = fake_pipeline.execute_swap.await_args.args[0]
+        assert dispatched.id == scheduled.id
+        assert dispatched.input_nonce == 5
+        assert dispatched.input_signature == sig
 
 
 class TestQuoteFeeBps:

@@ -81,8 +81,8 @@ def _stub_quote_service(lifi_enabled=True):
 
 
 def _stub_pipeline(settings, lifi_status="DONE"):
-    import src.services.swap.lifi_pipeline as lp_mod
-    from src.services.swap.lifi_pipeline import LifiSwapPipeline
+    import src.services.swap.lifi as lp_mod
+    from src.services.swap.lifi import LifiSwap
 
     accounting = MagicMock()
     accounting.get_transfer_nonce = AsyncMock(side_effect=[6, 70, 70, 70])
@@ -107,7 +107,7 @@ def _stub_pipeline(settings, lifi_status="DONE"):
     async def privana_factory():
         return privana
 
-    pipeline = LifiSwapPipeline(
+    pipeline = LifiSwap(
         accounting=accounting, lifi=lifi, bridge=bridge, evm=evm,
         privana_factory=privana_factory, poll_interval_sec=0.0,
     )
@@ -119,10 +119,7 @@ def _stub_pipeline(settings, lifi_status="DONE"):
 def _stub_executor(settings):
     import src.services.swap.executor as se_mod
 
-    with patch("src.services.swap.executor.get_accounting_client") as mock_acct, \
-         patch("src.services.swap.executor.get_sapphire_client"), \
-         patch("src.services.swap.executor.load_settings", return_value=settings):
-        mock_acct.return_value = MagicMock()
+    with patch("src.services.swap.executor.load_settings", return_value=settings):
         from src.services.swap.executor import SwapExecutor
         executor = SwapExecutor()
     se_mod._executor_instance = executor
@@ -156,7 +153,7 @@ class TestLifiSwapEndToEnd:
     async def test_full_lifi_swap_completes_via_polling(self, api_client, settings):
         _stub_quote_service(lifi_enabled=True)
         pipeline = _stub_pipeline(settings)
-        _stub_executor(settings)
+        executor = _stub_executor(settings)
 
         quote_resp = await api_client.get("/v1/quote", params={
             "from_token_id": FROM_TOKEN, "to_token_id": TO_TOKEN,
@@ -170,8 +167,9 @@ class TestLifiSwapEndToEnd:
         })
         assert swap_resp.status_code == 200
         body = swap_resp.json()
-        assert body["status"] == "executing"
+        assert body["status"] == "scheduled"
 
+        await executor._process_pending_swaps()
         await _drain_background(pipeline)
 
         status_resp = await api_client.get(f"/v1/swap/{body['swap_id']}/status")
@@ -183,7 +181,7 @@ class TestLifiSwapEndToEnd:
     async def test_lifi_failure_ends_refunded(self, api_client, settings):
         _stub_quote_service(lifi_enabled=True)
         pipeline = _stub_pipeline(settings, lifi_status="FAILED")
-        _stub_executor(settings)
+        executor = _stub_executor(settings)
 
         quote_resp = await api_client.get("/v1/quote", params={
             "from_token_id": FROM_TOKEN, "to_token_id": TO_TOKEN,
@@ -195,8 +193,9 @@ class TestLifiSwapEndToEnd:
             "quote_id": quote_id,
             "input_nonce": 5, "input_signature": _sign_input(settings),
         })
-        assert swap_resp.json()["status"] == "executing"
+        assert swap_resp.json()["status"] == "scheduled"
 
+        await executor._process_pending_swaps()
         await _drain_background(pipeline)
 
         status_resp = await api_client.get(f"/v1/swap/{swap_resp.json()['swap_id']}/status")

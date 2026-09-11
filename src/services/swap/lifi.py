@@ -1,7 +1,6 @@
 import asyncio
 import logging
 import time
-import uuid
 from typing import Any, Awaitable, Callable, Optional
 
 from privana.types import TransferFundsRequest
@@ -17,6 +16,7 @@ from src.core.fees import calculate_fee
 from src.core.validation import sanitize_error
 from src.models.swap import LifiSwapStep, SwapRecord, SwapStatus, SwapVenue
 from src.services.swap.bridge import AccountingBridge
+from src.services.swap.quote_service import load_unexpired_quote
 
 logger = logging.getLogger(__name__)
 
@@ -30,10 +30,8 @@ CREDIT_MAX_RETRIES = 20
 DEPOSIT_MAX_RETRIES = 10
 REFUND_BALANCE_POLLS = 30
 
-lp_transfer_lock = asyncio.Lock()
 
-
-class LifiSwapPipeline:
+class LifiSwap:
     def __init__(
         self,
         accounting: Optional[Any] = None,
@@ -54,27 +52,26 @@ class LifiSwapPipeline:
         self._deposit_max_retries = DEPOSIT_MAX_RETRIES
         self._tasks: set[asyncio.Task] = set()
 
-    async def launch(
-        self, quote: dict, user_address: str, input_nonce: int, input_signature: str
-    ) -> SwapRecord:
-        swap_id = self._insert_swap(quote, user_address)
+    async def execute_swap(self, swap: SwapRecord) -> None:
         try:
-            await self._submit_input(quote, input_nonce, input_signature)
+            # Priced against the quote's floor and fee, neither of which is
+            # copied onto the swap row.
+            quote = load_unexpired_quote(swap.quote_id)
+            await self._submit_input(quote, swap.input_nonce, swap.input_signature)
         except ValueError as exc:
             self._update_swap(
-                swap_id, status=SwapStatus.FAILED.value, error=sanitize_error(str(exc))
+                swap.id, status=SwapStatus.FAILED.value, error=sanitize_error(str(exc))
             )
-            return self._get_swap(swap_id)
+            return
 
         self._update_swap(
-            swap_id,
+            swap.id,
             status=SwapStatus.EXECUTING.value,
             step=LifiSwapStep.INPUT_TRANSFER.value,
         )
-        self.spawn_background(swap_id, quote, input_nonce)
-        return self._get_swap(swap_id)
+        self._spawn_background(swap.id, quote, swap.input_nonce)
 
-    def spawn_background(self, swap_id: str, quote: dict, input_nonce: int) -> None:
+    def _spawn_background(self, swap_id: str, quote: dict, input_nonce: int) -> None:
         task = asyncio.create_task(self._run(swap_id, quote, input_nonce))
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
@@ -288,53 +285,36 @@ class LifiSwapPipeline:
     async def _lp_transfer(self, to_address: str, token_id: str, amount: int) -> None:
         client = await self._privana_factory()
         last_detail = None
+        # The LP nonce is re-read every attempt: a concurrent internal swap or
+        # another Li.Fi transfer can spend it first, and the rejection is
+        # recovered by signing against the advanced nonce.
         for _ in range(self._credit_max_retries):
-            async with lp_transfer_lock:
-                lp_nonce = await self.accounting.get_transfer_nonce(
-                    self.settings.liquidity_provider_address
-                )
-                signature = sign_transfer(
-                    private_key=self.settings.liquidity_provider_secret_key,
-                    chain_id=self.settings.accounting_chain_id,
-                    verifying_contract=self.settings.accounting_contract_address,
+            lp_nonce = await self.accounting.get_transfer_nonce(
+                self.settings.liquidity_provider_address
+            )
+            signature = sign_transfer(
+                private_key=self.settings.liquidity_provider_secret_key,
+                chain_id=self.settings.accounting_chain_id,
+                verifying_contract=self.settings.accounting_contract_address,
+                to_address=to_address,
+                token_id=token_id,
+                amount=amount,
+                nonce=lp_nonce,
+            )
+            submission = await client.transfer_funds(
+                TransferFundsRequest(
                     to_address=to_address,
                     token_id=token_id,
                     amount=amount,
                     nonce=lp_nonce,
+                    signature=signature,
                 )
-                submission = await client.transfer_funds(
-                    TransferFundsRequest(
-                        to_address=to_address,
-                        token_id=token_id,
-                        amount=amount,
-                        nonce=lp_nonce,
-                        signature=signature,
-                    )
-                )
+            )
             if submission.status in ACCEPTED_SUBMISSION_STATUSES:
                 return
             last_detail = submission.detail
             await asyncio.sleep(self._poll_interval_sec)
         raise RuntimeError(f"credit retries exhausted: {last_detail}")
-
-    def _insert_swap(self, quote: dict, user_address: str) -> str:
-        swap_id = str(uuid.uuid4())
-        now = int(time.time())
-        db = get_db()
-        db_write(
-            db,
-            """INSERT INTO swaps
-               (id, quote_id, user_address, from_token_id, to_token_id,
-                from_amount, to_amount_estimate, status, venue, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                swap_id, quote["id"], user_address.lower(),
-                quote["from_token_id"], quote["to_token_id"],
-                quote["from_amount"], quote["to_amount_estimate"],
-                SwapStatus.PENDING.value, SwapVenue.LIFI.value, now, now,
-            ),
-        )
-        return swap_id
 
     def _update_swap(self, swap_id: str, **fields) -> None:
         db = get_db()
@@ -351,14 +331,13 @@ class LifiSwapPipeline:
         return SwapRecord(**dict(row))
 
 
-async def recover_inflight_lifi_swaps(pipeline: Optional[LifiSwapPipeline] = None) -> None:
+async def recover_inflight_lifi_swaps(pipeline: Optional[LifiSwap] = None) -> None:
     db = get_db()
     rows = db.execute(
         """SELECT * FROM swaps
-           WHERE venue = ? AND status IN (?, ?, ?)""",
+           WHERE venue = ? AND status IN (?, ?)""",
         (
             SwapVenue.LIFI.value,
-            SwapStatus.PENDING.value,
             SwapStatus.EXECUTING.value,
             SwapStatus.REFUNDING.value,
         ),
@@ -392,11 +371,11 @@ async def recover_inflight_lifi_swaps(pipeline: Optional[LifiSwapPipeline] = Non
         )
 
 
-_pipeline_instance: Optional[LifiSwapPipeline] = None
+_pipeline_instance: Optional[LifiSwap] = None
 
 
-def get_lifi_pipeline() -> LifiSwapPipeline:
+def get_lifi_pipeline() -> LifiSwap:
     global _pipeline_instance
     if _pipeline_instance is None:
-        _pipeline_instance = LifiSwapPipeline()
+        _pipeline_instance = LifiSwap()
     return _pipeline_instance

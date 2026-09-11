@@ -29,8 +29,6 @@ CREDIT_MAX_RETRIES = 20
 DEPOSIT_MAX_RETRIES = 10
 REFUND_BALANCE_POLLS = 30
 
-lp_transfer_lock = asyncio.Lock()
-
 
 class LifiSwap:
     def __init__(
@@ -297,29 +295,31 @@ class LifiSwap:
     async def _lp_transfer(self, to_address: str, token_id: str, amount: int) -> None:
         client = await self._privana_factory()
         last_detail = None
+        # The LP nonce is re-read every attempt: a concurrent internal swap or
+        # another Li.Fi transfer can spend it first, and the rejection is
+        # recovered by signing against the advanced nonce.
         for _ in range(self._credit_max_retries):
-            async with lp_transfer_lock:
-                lp_nonce = await self.accounting.get_transfer_nonce(
-                    self.settings.liquidity_provider_address
-                )
-                signature = sign_transfer(
-                    private_key=self.settings.liquidity_provider_secret_key,
-                    chain_id=self.settings.accounting_chain_id,
-                    verifying_contract=self.settings.accounting_contract_address,
+            lp_nonce = await self.accounting.get_transfer_nonce(
+                self.settings.liquidity_provider_address
+            )
+            signature = sign_transfer(
+                private_key=self.settings.liquidity_provider_secret_key,
+                chain_id=self.settings.accounting_chain_id,
+                verifying_contract=self.settings.accounting_contract_address,
+                to_address=to_address,
+                token_id=token_id,
+                amount=amount,
+                nonce=lp_nonce,
+            )
+            submission = await client.transfer_funds(
+                TransferFundsRequest(
                     to_address=to_address,
                     token_id=token_id,
                     amount=amount,
                     nonce=lp_nonce,
+                    signature=signature,
                 )
-                submission = await client.transfer_funds(
-                    TransferFundsRequest(
-                        to_address=to_address,
-                        token_id=token_id,
-                        amount=amount,
-                        nonce=lp_nonce,
-                        signature=signature,
-                    )
-                )
+            )
             if submission.status in ACCEPTED_SUBMISSION_STATUSES:
                 return
             last_detail = submission.detail

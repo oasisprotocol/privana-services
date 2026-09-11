@@ -1,6 +1,7 @@
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 from eth_account import Account
 from web3 import Web3
 
@@ -20,6 +21,13 @@ TX_HASH = "0x" + "ff" * 32
 SUFFICIENT_BALANCE = Balance(
     user_address="0xlp", token_id=TO_TOKEN, balance="999999999999999999999"
 )
+
+
+@pytest.fixture(autouse=True)
+def _instant_retries():
+    """Keep the real attempt count, drop the 3s wait between attempts."""
+    with patch("src.services.swap.internal.LP_RETRY_DELAY_SEC", 0):
+        yield
 
 
 def _make_pipeline(settings):
@@ -177,6 +185,41 @@ class TestExecuteSwap:
         ).fetchone()
         assert row["output_nonce"] == 7
         assert row["output_signature"] == "0x" + "cc" * 65
+
+    async def test_retries_against_the_advanced_nonce_after_a_conflict(
+        self, test_db, settings
+    ):
+        # A concurrent Li.Fi transfer spends nonce 0 between our read and our
+        # broadcast, so the first attempt reverts and the second has to sign
+        # against the nonce the ledger actually moved to.
+        pipeline = _make_pipeline(settings)
+        pipeline.accounting.get_transfer_nonce = AsyncMock(side_effect=[0, 1])
+        pipeline.sapphire.simulate_contract_call = MagicMock(
+            side_effect=[RuntimeError("execution reverted: InvalidNonce"), None]
+        )
+        swap = _scheduled_swap(test_db, settings)
+
+        await pipeline.execute_swap(swap)
+
+        result = pipeline._get_swap(swap.id)
+        assert result.status == SwapStatus.COMPLETED.value
+        assert result.swap_tx_hash == TX_HASH
+        assert pipeline.sapphire.execute_contract_call.call_args.kwargs["args"][7] == 1
+
+    async def test_gives_up_after_the_attempt_limit(self, test_db, settings):
+        pipeline = _make_pipeline(settings)
+        pipeline.sapphire.simulate_contract_call = MagicMock(
+            side_effect=RuntimeError("execution reverted: InvalidNonce")
+        )
+        swap = _scheduled_swap(test_db, settings)
+
+        with patch("src.services.swap.internal.LP_RETRY_ATTEMPTS", 4):
+            await pipeline.execute_swap(swap)
+
+        result = pipeline._get_swap(swap.id)
+        assert result.status == SwapStatus.FAILED.value
+        assert "InvalidNonce" in result.error
+        assert pipeline.sapphire.simulate_contract_call.call_count == 4
 
     async def test_retries_swap_interrupted_mid_execution(self, test_db, settings):
         pipeline = _make_pipeline(settings)

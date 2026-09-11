@@ -137,7 +137,25 @@ class TestExecuteSwap:
         await pipeline.execute_swap(swap)
         record = pipeline._get_swap(swap.id)
         assert record.status == "failed"
-        assert "quote" in record.error
+        assert "expired" in record.error
+        pipeline._spawn_background.assert_not_called()
+
+    async def test_lapsed_quote_is_not_submitted(self, test_db, settings, insert_quote):
+        # Still present in the table — cleanup_expired_quotes is throttled —
+        # but past expires_at, so the quoted price is stale.
+        insert_quote("q_lapsed", expires_at=int(time.time()) - 1, venue="lifi",
+                     user_address=USER, from_token_id=FROM_TOKEN, to_token_id=TO_TOKEN)
+        pipeline = _make_pipeline(settings)
+        pipeline._spawn_background = MagicMock()
+        swap = _scheduled_swap(test_db, "q_lapsed")
+
+        await pipeline.execute_swap(swap)
+
+        record = pipeline._get_swap(swap.id)
+        assert record.status == "failed"
+        assert "expired" in record.error
+        privana = await pipeline._privana_factory()
+        privana.transfer_funds.assert_not_awaited()
         pipeline._spawn_background.assert_not_called()
 
 

@@ -57,9 +57,20 @@ def _input_signature(settings):
     )
 
 
-def _scheduled_swap(test_db, settings, swap_id="s_int"):
+def _scheduled_swap(test_db, settings, swap_id="s_int", expires_in=300):
     """A swap row as the executor queues it, before the pipeline picks it up."""
     now = int(time.time())
+    db_write(
+        test_db,
+        """INSERT INTO quotes
+           (id, user_address, from_token_id, to_token_id, from_chain_id, to_chain_id,
+            from_amount, to_amount_gross, to_amount_estimate, to_amount_min,
+            route_tool, liquidity_provider, expires_at, created_at, venue)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        ("q_int", USER_ADDRESS.lower(), FROM_TOKEN, TO_TOKEN, 84532, 84532,
+         FROM_AMOUNT, TO_AMOUNT, TO_AMOUNT, TO_AMOUNT, "okx",
+         settings.liquidity_provider_address, now + expires_in, now, "internal"),
+    )
     db_write(
         test_db,
         """INSERT INTO swaps
@@ -185,6 +196,28 @@ class TestExecuteSwap:
         ).fetchone()
         assert row["output_nonce"] == 7
         assert row["output_signature"] == "0x" + "cc" * 65
+
+    async def test_expired_quote_fails_before_signing(self, test_db, settings):
+        pipeline = _make_pipeline(settings)
+        swap = _scheduled_swap(test_db, settings, expires_in=-1)
+
+        await pipeline.execute_swap(swap)
+
+        result = pipeline._get_swap(swap.id)
+        assert result.status == SwapStatus.FAILED.value
+        assert "expired" in result.error
+        pipeline.accounting.get_lp_balance.assert_not_awaited()
+        pipeline.sapphire.execute_contract_call.assert_not_called()
+
+    async def test_purged_quote_counts_as_expired(self, test_db, settings):
+        pipeline = _make_pipeline(settings)
+        swap = _scheduled_swap(test_db, settings)
+        db_write(test_db, "DELETE FROM quotes WHERE id = ?", ("q_int",))
+
+        await pipeline.execute_swap(swap)
+
+        assert pipeline._get_swap(swap.id).status == SwapStatus.FAILED.value
+        pipeline.sapphire.execute_contract_call.assert_not_called()
 
     async def test_retries_against_the_advanced_nonce_after_a_conflict(
         self, test_db, settings

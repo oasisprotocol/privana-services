@@ -16,6 +16,7 @@ from src.core.fees import calculate_fee
 from src.core.validation import sanitize_error
 from src.models.swap import LifiSwapStep, SwapRecord, SwapStatus, SwapVenue
 from src.services.swap.bridge import AccountingBridge
+from src.services.swap.quote_service import load_unexpired_quote
 
 logger = logging.getLogger(__name__)
 
@@ -52,21 +53,10 @@ class LifiSwap:
         self._tasks: set[asyncio.Task] = set()
 
     async def execute_swap(self, swap: SwapRecord) -> None:
-        # Priced against the quote's floor and fee, neither of which is copied
-        # onto the swap row.
-        row = get_db().execute(
-            "SELECT * FROM quotes WHERE id = ?", (swap.quote_id,)
-        ).fetchone()
-        if row is None:
-            self._update_swap(
-                swap.id,
-                status=SwapStatus.FAILED.value,
-                error="quote expired before execution",
-            )
-            return
-        quote = dict(row)
-
         try:
+            # Priced against the quote's floor and fee, neither of which is
+            # copied onto the swap row.
+            quote = load_unexpired_quote(swap.quote_id)
             await self._submit_input(quote, swap.input_nonce, swap.input_signature)
         except ValueError as exc:
             self._update_swap(

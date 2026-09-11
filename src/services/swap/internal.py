@@ -13,6 +13,7 @@ from src.core.db import db_write, get_db
 from src.core.eip712 import sign_transfer
 from src.core.validation import sanitize_error
 from src.models.swap import SwapRecord, SwapStatus
+from src.services.swap.quote_service import load_unexpired_quote
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +38,8 @@ class InternalSwap:
     async def execute_swap(self, swap: SwapRecord) -> None:
         self._update_swap(swap.id, status=SwapStatus.EXECUTING.value)
         try:
+            load_unexpired_quote(swap.quote_id)
+
             lp_balance = await self.accounting.get_lp_balance(swap.to_token_id)
             if int(lp_balance.balance) < int(swap.to_amount_estimate):
                 raise ValueError("Insufficient liquidity for this swap")

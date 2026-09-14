@@ -105,7 +105,9 @@ def _strategy_settings() -> Settings:
 
 @pytest.fixture
 def aave_client():
-    return MagicMock()
+    client = MagicMock()
+    client.get_aToken_balance.return_value = 10**12
+    return client
 
 
 @pytest.fixture
@@ -455,6 +457,122 @@ async def test_retry_on_network_error_recovers_from_transient_drop(strategy) -> 
 
     assert result == "ok"
     assert factory.call_count == 3
+
+
+@pytest.mark.asyncio
+async def test_retry_on_network_error_retries_accounting_5xx(strategy) -> None:
+    from privana.client.errors import AccountingApiError
+
+    factory = MagicMock(
+        side_effect=[
+            AccountingApiError("API request failed", status_code=500, detail="Failed to retrieve balance"),
+            AccountingApiError("API request failed", status_code=502),
+            "ok",
+        ]
+    )
+
+    async def call() -> str:
+        return factory()
+
+    result = await strategy._retry_on_network_error("probe", call)
+
+    assert result == "ok"
+    assert factory.call_count == 3
+
+
+@pytest.mark.asyncio
+async def test_retry_on_network_error_raises_accounting_4xx(strategy) -> None:
+    from privana.client.errors import AccountingApiError
+
+    async def call() -> str:
+        raise AccountingApiError("API request failed", status_code=404, detail="No such token")
+
+    with pytest.raises(AccountingApiError):
+        await strategy._retry_on_network_error("probe", call)
+
+
+@pytest.mark.asyncio
+async def test_withdraw_from_earn_renudges_check_deposit_until_accepted(
+    strategy, aave_client, privana
+) -> None:
+    from privana.client.errors import AccountingApiError
+
+    aave_client.withdraw.return_value = "0xredeem"
+    aave_client.transfer_erc20.return_value = "0xtransfer"
+    privana.check_deposit.side_effect = [
+        AccountingApiError(
+            "API request failed",
+            status_code=400,
+            detail="Insufficient finality: -1/15 confirmations on chain 8453",
+        ),
+        _DepositCheckResponse(status="error", detail="Insufficient finality"),
+        _DepositCheckResponse(status="pending", deposit_id="dep-1"),
+    ]
+    privana.get_balance.side_effect = [
+        _Balance(user_address=POOL_ADDRESS, token_id=TOKEN_ID, balance=0),
+        _Balance(user_address=POOL_ADDRESS, token_id=TOKEN_ID, balance=0),
+        _Balance(user_address=POOL_ADDRESS, token_id=TOKEN_ID, balance=0),
+        _Balance(user_address=POOL_ADDRESS, token_id=TOKEN_ID, balance=1_000_000),
+    ]
+
+    await strategy.withdraw_from_earn(1_000_000)
+
+    assert privana.check_deposit.await_count == 3
+    for await_call in privana.check_deposit.await_args_list:
+        assert await_call.args[0].tx_hash == "0xtransfer"
+
+
+@pytest.mark.asyncio
+async def test_withdraw_from_earn_stops_nudging_once_accepted(
+    strategy, aave_client, privana
+) -> None:
+    aave_client.withdraw.return_value = "0xredeem"
+    aave_client.transfer_erc20.return_value = "0xtransfer"
+    privana.get_balance.side_effect = [
+        _Balance(user_address=POOL_ADDRESS, token_id=TOKEN_ID, balance=0),
+        _Balance(user_address=POOL_ADDRESS, token_id=TOKEN_ID, balance=0),
+        _Balance(user_address=POOL_ADDRESS, token_id=TOKEN_ID, balance=0),
+        _Balance(user_address=POOL_ADDRESS, token_id=TOKEN_ID, balance=1_000_000),
+    ]
+
+    await strategy.withdraw_from_earn(1_000_000)
+
+    privana.check_deposit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_withdraw_from_earn_clamps_dust_short_position(
+    strategy, aave_client, privana
+) -> None:
+    # Aave supply can credit 1 wei less than supplied; reclaiming the exact
+    # principal must redeem the position instead of reverting.
+    aave_client.get_aToken_balance.return_value = 999_999
+    aave_client.withdraw.return_value = "0xredeem"
+    aave_client.transfer_erc20.return_value = "0xtransfer"
+    privana.get_balance.side_effect = [
+        _Balance(user_address=POOL_ADDRESS, token_id=TOKEN_ID, balance=0),
+        _Balance(user_address=POOL_ADDRESS, token_id=TOKEN_ID, balance=999_999),
+    ]
+
+    await strategy.withdraw_from_earn(1_000_000)
+
+    aave_client.withdraw.assert_called_once_with(ASSET_ADDRESS, 999_999, to=POOL_ADDRESS)
+    aave_client.transfer_erc20.assert_called_once_with(
+        ASSET_ADDRESS, DEPOSIT_ADDRESS_BASE, 999_999,
+    )
+    assert privana.check_deposit.await_args.args[0].amount == 999_999
+
+
+@pytest.mark.asyncio
+async def test_withdraw_from_earn_rejects_real_position_shortfall(
+    strategy, aave_client
+) -> None:
+    aave_client.get_aToken_balance.return_value = 900_000
+
+    with pytest.raises(RuntimeError, match="cannot cover reclaim"):
+        await strategy.withdraw_from_earn(1_000_000)
+
+    aave_client.withdraw.assert_not_called()
 
 
 @pytest.mark.asyncio

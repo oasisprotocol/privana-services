@@ -159,6 +159,86 @@ def test_supply_builds_and_sends_signed_tx():
     assert tx_hash.startswith("0x")
 
 
+def test_gas_limit_uses_estimate_with_headroom():
+    client, pool, w3 = _make_client(with_signer=True)
+    client._account = MagicMock()
+    fn = MagicMock()
+    fn.estimate_gas.return_value = 1_000_000
+
+    assert client._tx_gas_limit("withdraw", fn) == 1_300_000
+
+
+def test_gas_limit_caps_at_max():
+    client, pool, w3 = _make_client(with_signer=True)
+    client._account = MagicMock()
+    fn = MagicMock()
+    fn.estimate_gas.return_value = 10_000_000
+
+    assert client._tx_gas_limit("withdraw", fn) == 3_000_000
+
+
+def test_gas_estimation_persistent_revert_raises_before_sending():
+    from web3.exceptions import ContractLogicError
+
+    client, pool, w3 = _make_client(with_signer=True)
+    client._account = MagicMock()
+    fn = MagicMock()
+    fn.estimate_gas.side_effect = ContractLogicError("execution reverted: 0xace2a47e")
+
+    with patch("src.clients.aave.time.sleep"), pytest.raises(RuntimeError, match="would revert"):
+        client._tx_gas_limit("withdraw", fn)
+
+    assert fn.estimate_gas.call_count == 3
+
+
+def test_gas_estimation_transient_revert_from_stale_node_retries():
+    from web3.exceptions import ContractLogicError
+
+    client, pool, w3 = _make_client(with_signer=True)
+    client._account = MagicMock()
+    fn = MagicMock()
+    fn.estimate_gas.side_effect = [
+        ContractLogicError("ERC20: transfer amount exceeds allowance"),
+        200_000,
+    ]
+
+    with patch("src.clients.aave.time.sleep"):
+        assert client._tx_gas_limit("supply", fn) == 260_000
+
+
+def test_gas_estimation_rpc_failure_falls_back_to_default():
+    client, pool, w3 = _make_client(with_signer=True)
+    client._account = MagicMock()
+    fn = MagicMock()
+    fn.estimate_gas.side_effect = ConnectionError("429")
+
+    assert client._tx_gas_limit("withdraw", fn) == 500_000
+
+
+def test_receipt_read_retries_transient_rpc_failures():
+    client, pool, w3 = _make_client(with_signer=True)
+    w3.eth.wait_for_transaction_receipt.side_effect = [
+        ConnectionError("429 Too Many Requests"),
+        {"status": 1},
+    ]
+
+    with patch("src.clients.aave.time.sleep"):
+        receipt = client._wait_for_receipt(b"\xab" * 32)
+
+    assert receipt == {"status": 1}
+    assert w3.eth.wait_for_transaction_receipt.call_count == 2
+
+
+def test_receipt_read_raises_after_exhausting_retries():
+    client, pool, w3 = _make_client(with_signer=True)
+    w3.eth.wait_for_transaction_receipt.side_effect = ConnectionError("403 Forbidden")
+
+    with patch("src.clients.aave.time.sleep"), pytest.raises(ConnectionError):
+        client._wait_for_receipt(b"\xab" * 32)
+
+    assert w3.eth.wait_for_transaction_receipt.call_count == 3
+
+
 def test_withdraw_defaults_recipient_to_signer():
     client, pool, w3 = _make_client(with_signer=True)
     w3.eth.get_transaction_count.return_value = 1

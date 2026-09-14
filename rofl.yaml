@@ -1,5 +1,5 @@
 name: privana-services
-version: 0.1.7
+version: 0.1.8
 tee: tdx
 kind: container
 resources:
@@ -58,8 +58,8 @@ deployments:
           min_tcb_evaluation_data_number: 18
           tdx: {}
       enclaves:
-        - id: lCh+k8GWx9sGcHEii40kdNtvhajSiSak11E8QxNQ2UcAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
-        - id: /QOXlI8FTqUA/c6JtvHFTXYKLvr9ZW8AFWgRihTxI4cAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
+        - id: J+jX1Z2klePMKC4LEr2igyWvunkevj8wT0+7ZBAJN+gAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
+        - id: oHKEMZBzOeFgqptDbX96kbwkeI4vFhJfSySrrbX9+2kAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
       endorsements:
         - provider_instance_admin: oasis1qrljut7rndrl74cnnatlxnadnnazjxdy6yleagwu
       fees: endorsing_node
@@ -100,8 +100,8 @@ deployments:
           min_tcb_evaluation_data_number: 18
           tdx: {}
       enclaves:
-        - id: ggXu8hUx4a5FiSW97Ce/ihzHYOy1mFZ+YkZezvuzKycAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
-        - id: sVx5k6yqSxnIeOdDIxaykkABJ6fM0BU944C9b901WJEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
+        - id: 6zqI115nOaDQWd/u8zLvIvfQOhbzaKTFLKXUGazDMmwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
+        - id: K3uKIUud/XTCecDr8jEjheEOtCQwEnN/OTIkPJ6PB5MAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
       endorsements:
         - provider_instance_admin: oasis1qzql9cw9ly746jren7j66jscd36h5c3mfq6d6mct
       fees: endorsing_node

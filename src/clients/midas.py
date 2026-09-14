@@ -1,8 +1,10 @@
 import logging
+import time
 from typing import Optional
 
 from eth_account import Account
 from web3 import Web3
+from web3.exceptions import ContractLogicError
 
 from src.core.abi import load_abi
 from src.core.config import load_settings
@@ -15,6 +17,12 @@ ORACLE_ABI = load_abi("ChronicleOracle")
 ERC20_ABI = load_abi("ERC20")
 
 DEFAULT_GAS_LIMIT = 500_000
+MAX_GAS_LIMIT = 3_000_000
+ESTIMATE_REVERT_ATTEMPTS = 3
+ESTIMATE_REVERT_BACKOFF_SEC = 2.0
+GAS_HEADROOM_NUM, GAS_HEADROOM_DEN = 13, 10
+RECEIPT_RETRY_ATTEMPTS = 3
+RECEIPT_RETRY_BACKOFF_SEC = 2.0
 ZERO_REFERRER_ID = b"\x00" * 32
 
 
@@ -195,15 +203,69 @@ class MidasClient:
         contract = self.w3.eth.contract(address=asset, abi=ERC20_ABI)
         return self._send_write_tx(asset, contract, "transfer", [recipient, amount])
 
+    def _tx_gas_limit(self, function_name: str, fn) -> int:
+        """Estimate gas with 30% headroom, falling back to DEFAULT_GAS_LIMIT
+        when estimation is unavailable. A revert during estimation is the tx's
+        real outcome, surfaced before spending gas. The old hardcoded limit
+        starved gas-heavy calls into bare out-of-gas reverts that masked the
+        contract's actual error.
+        """
+        for attempt in range(1, ESTIMATE_REVERT_ATTEMPTS + 1):
+            try:
+                estimated = fn.estimate_gas({"from": self._account.address})
+            except ContractLogicError as exc:
+                # Load-balanced RPCs can estimate against a node that has not
+                # seen the previous tx yet (e.g. an approve), reverting on
+                # stale state. Only a persistent revert is the tx's real
+                # outcome.
+                if attempt == ESTIMATE_REVERT_ATTEMPTS:
+                    raise RuntimeError(
+                        f"Midas {function_name} would revert: {exc}"
+                    ) from exc
+                logger.warning(
+                    "Midas %s estimation reverted (attempt %d/%d), retrying: %s",
+                    function_name, attempt, ESTIMATE_REVERT_ATTEMPTS, exc,
+                )
+                time.sleep(ESTIMATE_REVERT_BACKOFF_SEC)
+            except Exception as exc:
+                logger.warning(
+                    "Midas %s gas estimation failed (%s); using default %d",
+                    function_name, exc, DEFAULT_GAS_LIMIT,
+                )
+                return DEFAULT_GAS_LIMIT
+            else:
+                return min(int(estimated) * GAS_HEADROOM_NUM // GAS_HEADROOM_DEN, MAX_GAS_LIMIT)
+
+    def _wait_for_receipt(self, tx_hash):
+        """Fetch the receipt of an already-sent tx, retrying transient RPC
+        failures. The tx is on-chain regardless of whether this read works,
+        so giving up on a dropped or rate-limited response misreports the
+        outcome (a revert surfaced as an RPC error, live, 2026-09-09).
+        """
+        last_exc: Exception | None = None
+        for attempt in range(1, RECEIPT_RETRY_ATTEMPTS + 1):
+            try:
+                return self.w3.eth.wait_for_transaction_receipt(tx_hash)
+            except Exception as exc:
+                last_exc = exc
+                if attempt < RECEIPT_RETRY_ATTEMPTS:
+                    logger.warning(
+                        "Midas receipt read failed (attempt %d/%d), retrying: %s",
+                        attempt, RECEIPT_RETRY_ATTEMPTS, exc,
+                    )
+                    time.sleep(RECEIPT_RETRY_BACKOFF_SEC * attempt)
+        raise last_exc
+
     def _send_write_tx(self, to_address: str, contract, function_name: str, args: list) -> str:
         if self._account is None:
             raise RuntimeError("MidasClient has no signer configured")
         fn = getattr(contract.functions, function_name)(*args)
+        gas_limit = self._tx_gas_limit(function_name, fn)
         nonce = self.w3.eth.get_transaction_count(self._account.address, "pending")
         tx = fn.build_transaction({
             "from": self._account.address,
             "nonce": nonce,
-            "gas": DEFAULT_GAS_LIMIT,
+            "gas": gas_limit,
             "gasPrice": self.w3.eth.gas_price,
             "chainId": self.w3.eth.chain_id,
         })
@@ -212,7 +274,7 @@ class MidasClient:
         tx_hash_hex = tx_hash.hex() if isinstance(tx_hash, bytes) else str(tx_hash)
         logger.info("Midas tx sent: fn=%s to=%s hash=%s", function_name, to_address, tx_hash_hex)
 
-        receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash)
+        receipt = self._wait_for_receipt(tx_hash)
         if receipt["status"] != 1:
             raise RuntimeError(f"Midas {function_name} tx reverted: {tx_hash_hex}")
 

@@ -18,7 +18,8 @@ def _make_client(with_signer: bool = False):
     settings = replace(
         load_settings(),
         base_rpc_url="http://localhost:8545",
-        midas_rpc_url="http://localhost:8546",
+        ethereum_rpc_url="http://localhost:8546",
+        midas_chain_id=1,
         midas_issuance_vault_address=TEST_ISSUANCE_VAULT,
         midas_redemption_vault_address=TEST_REDEMPTION_VAULT,
         midas_mtbill_token_address=TEST_MTBILL,
@@ -294,19 +295,20 @@ def test_write_tx_raises_on_reverted_receipt():
         client.deposit_instant(TEST_USDC, 1_000_000, 950_000_000_000_000_000)
 
 
-def test_connects_to_the_midas_chain_not_the_base_chain():
-    """Midas keeps its instant liquidity on Ethereum, so the client must dial
-    MIDAS_RPC_URL rather than the Base RPC the rest of earn uses.
-    """
-    settings = replace(
+def _settings_for_chain(chain_id: int):
+    return replace(
         load_settings(),
-        base_rpc_url="http://base.invalid",
-        midas_rpc_url="http://midas-chain.example",
+        base_rpc_url="http://base.example",
+        ethereum_rpc_url="http://ethereum.example",
+        midas_chain_id=chain_id,
         midas_issuance_vault_address=TEST_ISSUANCE_VAULT,
         midas_redemption_vault_address=TEST_REDEMPTION_VAULT,
         midas_mtbill_token_address=TEST_MTBILL,
         midas_oracle_address=TEST_ORACLE,
     )
+
+
+def _construct_with(settings):
     with patch("src.clients.midas.load_settings") as mock_settings, \
          patch("src.clients.midas.Web3") as mock_web3_cls:
         mock_settings.return_value = settings
@@ -317,4 +319,33 @@ def test_connects_to_the_midas_chain_not_the_base_chain():
         from src.clients.midas import MidasClient
         MidasClient()
 
-    mock_web3_cls.HTTPProvider.assert_called_once_with("http://midas-chain.example")
+    return mock_web3_cls.HTTPProvider
+
+
+@pytest.mark.parametrize(
+    "chain_id,expected_url",
+    [(1, "http://ethereum.example"), (8453, "http://base.example")],
+)
+def test_dials_the_rpc_for_the_configured_midas_chain(chain_id, expected_url):
+    provider = _construct_with(_settings_for_chain(chain_id))
+    provider.assert_called_once_with(expected_url)
+
+
+def test_rejects_a_chain_with_no_rpc_configured():
+    settings = replace(_settings_for_chain(1), ethereum_rpc_url="")
+
+    with patch("src.clients.midas.load_settings") as mock_settings:
+        mock_settings.return_value = settings
+        from src.clients.midas import MidasClient
+
+        with pytest.raises(ValueError, match="requires ETHEREUM_RPC_URL"):
+            MidasClient()
+
+
+def test_rejects_an_unsupported_midas_chain():
+    with patch("src.clients.midas.load_settings") as mock_settings:
+        mock_settings.return_value = _settings_for_chain(999)
+        from src.clients.midas import MidasClient
+
+        with pytest.raises(ValueError, match="unsupported MIDAS_CHAIN_ID=999"):
+            MidasClient()

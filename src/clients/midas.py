@@ -8,6 +8,7 @@ from web3.exceptions import ContractLogicError
 
 from src.core.abi import load_abi
 from src.core.config import load_settings
+from src.models.settings import Settings
 
 logger = logging.getLogger(__name__)
 
@@ -25,16 +26,35 @@ RECEIPT_RETRY_ATTEMPTS = 3
 RECEIPT_RETRY_BACKOFF_SEC = 2.0
 ZERO_REFERRER_ID = b"\x00" * 32
 
+ETHEREUM_CHAIN_ID = 1
+BASE_CHAIN_ID = 8453
+
+
+def _rpc_url_for_chain(settings: Settings, chain_id: int) -> str:
+    urls = {
+        ETHEREUM_CHAIN_ID: (settings.ethereum_rpc_url, "ETHEREUM_RPC_URL"),
+        BASE_CHAIN_ID: (settings.base_rpc_url, "BASE_RPC_URL"),
+    }
+    if chain_id not in urls:
+        raise ValueError(
+            f"MidasClient: unsupported MIDAS_CHAIN_ID={chain_id}; "
+            f"expected one of {sorted(urls)}"
+        )
+    url, var = urls[chain_id]
+    if not url:
+        raise ValueError(f"MidasClient: MIDAS_CHAIN_ID={chain_id} requires {var} to be set")
+    return url
+
 
 class MidasClient:
     """Midas mTBILL client. Reads vault config + oracle, writes
     depositInstant / redeemInstant / approve / ERC20 transfer.
 
     Reads are free (no signer). Writes use the LP EOA via standard web3
-    signing — same shape as AaveClient. The strategy holds the business
-    logic; this class is a thin protocol wrapper. Midas only exists on Base
-    mainnet, so this client only gets constructed on deploys where
-    BASE_RPC_URL points there (testnet leaves MIDAS_POOL_ASSETS empty).
+    signing, same shape as AaveClient. The strategy holds the business
+    logic; this class is a thin protocol wrapper. Midas is deployed on
+    several chains and keeps its instant redemption liquidity on Ethereum,
+    so MIDAS_CHAIN_ID picks which chain RPC this client dials.
 
     Four contracts are bound at construction so the strategy never reaches
     for raw addresses: issuance vault, redemption vault, mTBILL token,
@@ -43,7 +63,9 @@ class MidasClient:
 
     def __init__(self) -> None:
         settings = load_settings()
-        self.w3 = Web3(Web3.HTTPProvider(settings.midas_rpc_url))
+        self.w3 = Web3(
+            Web3.HTTPProvider(_rpc_url_for_chain(settings, settings.midas_chain_id))
+        )
 
         self.issuance_vault_address = Web3.to_checksum_address(
             settings.midas_issuance_vault_address

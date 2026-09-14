@@ -198,6 +198,86 @@ describe('EarnManager', function () {
     });
   });
 
+  describe('seeded liquidity', function () {
+    it('should record seed principal without minting any shares', async function () {
+      const { earnManager, mockAccounting, owner, poolWallet } = await deployWithPool();
+      const seed = ethers.parseUnits('100000', 6);
+
+      await mockAccounting.setBalance(owner.address, TOKEN_ID, seed);
+      await earnManager.seedLiquidity(POOL_ID, seed, 0, mockSig(owner.address));
+
+      const pool = await earnManager.pools(POOL_ID);
+      expect(await earnManager.getSeededAssets(POOL_ID)).to.equal(seed);
+      expect(pool.totalShares).to.equal(0n);
+      expect(pool.totalAssets).to.equal(0n);
+      expect(await mockAccounting.balances(poolWallet.address, TOKEN_ID)).to.equal(seed);
+    });
+
+    it('should leave a depositor claiming only their own deposit', async function () {
+      const { earnManager, mockAccounting, owner, user } = await deployWithPool();
+      const seed = ethers.parseUnits('100000', 6);
+      const deposit = ethers.parseUnits('1000', 6);
+
+      await mockAccounting.setBalance(owner.address, TOKEN_ID, seed);
+      await earnManager.seedLiquidity(POOL_ID, seed, 0, mockSig(owner.address));
+
+      await mockAccounting.setBalance(user.address, TOKEN_ID, deposit);
+      await earnManager.deposit(POOL_ID, user.address, deposit, 0, mockSig(user.address));
+
+      const shares = await earnManager.getUserShares(POOL_ID, authToken(user.address));
+      const claim = await earnManager.convertToAssets(POOL_ID, shares);
+      expect(claim).to.be.lte(deposit);
+      expect(claim).to.be.gte(deposit - 2n);
+    });
+
+    it('should return seed principal on unseed', async function () {
+      const { earnManager, mockAccounting, owner, poolWallet, otherUser } = await deployWithPool();
+      const seed = ethers.parseUnits('100000', 6);
+
+      await mockAccounting.setBalance(owner.address, TOKEN_ID, seed);
+      await earnManager.seedLiquidity(POOL_ID, seed, 0, mockSig(owner.address));
+      await earnManager.unseedLiquidity(POOL_ID, otherUser.address, seed, 0, mockSig(poolWallet.address));
+
+      expect(await earnManager.getSeededAssets(POOL_ID)).to.equal(0n);
+      expect(await mockAccounting.balances(otherUser.address, TOKEN_ID)).to.equal(seed);
+    });
+
+    it('should refuse to unseed more than was seeded', async function () {
+      const { earnManager, mockAccounting, owner, poolWallet, otherUser } = await deployWithPool();
+      const seed = ethers.parseUnits('100000', 6);
+
+      await mockAccounting.setBalance(owner.address, TOKEN_ID, seed);
+      await earnManager.seedLiquidity(POOL_ID, seed, 0, mockSig(owner.address));
+
+      await expect(
+        earnManager.unseedLiquidity(POOL_ID, otherUser.address, seed + 1n, 0, mockSig(poolWallet.address)),
+      ).to.be.revertedWithCustomError(earnManager, 'SeedBelowZero');
+    });
+
+    it('should gate seed, unseed and the baseline setter to poolAdmin', async function () {
+      const { earnManager, user, otherUser } = await deployWithPool();
+
+      await expect(earnManager.connect(user).seedLiquidity(POOL_ID, 1, 0, mockSig(user.address)))
+        .to.be.revertedWithCustomError(earnManager, 'NotPoolAdmin');
+      await expect(earnManager.connect(user).unseedLiquidity(POOL_ID, otherUser.address, 1, 0, mockSig(user.address)))
+        .to.be.revertedWithCustomError(earnManager, 'NotPoolAdmin');
+      await expect(earnManager.connect(user).setSeededAssets(POOL_ID, 1))
+        .to.be.revertedWithCustomError(earnManager, 'NotPoolAdmin');
+    });
+
+    it('should not collide with the slot a future append would take', async function () {
+      const { earnManager, mockAccounting, owner } = await deployWithPool();
+      const seed = ethers.parseUnits('100000', 6);
+
+      await mockAccounting.setBalance(owner.address, TOKEN_ID, seed);
+      await earnManager.seedLiquidity(POOL_ID, seed, 0, mockSig(owner.address));
+
+      const addr = await earnManager.getAddress();
+      expect(await ethers.provider.getStorage(addr, 6)).to.equal(ethers.ZeroHash);
+      expect(await ethers.provider.getStorage(addr, 7)).to.equal(ethers.ZeroHash);
+    });
+  });
+
   describe('deposit', function () {
     it('should mint shares scaled by VIRTUAL_SHARES for first depositor', async function () {
       const { earnManager, mockAccounting, user, poolWallet } = await deployWithPool();

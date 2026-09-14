@@ -37,7 +37,7 @@ contract EarnManager is
     /// -----------------------------------------------------------------------
 
     /// @notice Contract version, bumped on each upgrade for tracking/verification.
-    uint64 public constant VERSION = 1;
+    uint64 public constant VERSION = 2;
     
     /// @dev EIP-712 typehash for the user's withdraw consent message.
     /// The signer is recovered from the signature, so `user` is intentionally
@@ -99,6 +99,30 @@ contract EarnManager is
     /// new variable to keep the total occupied storage size constant.
     uint256[49] private __gap;
 
+    /// @custom:storage-location erc7201:privana.storage.EarnManagerSeed
+    struct SeedStorage {
+        /// @dev Protocol-owned principal per pool, held in the pool's own
+        /// accounting balance but deliberately excluded from `totalAssets`.
+        /// Shares are never minted against it, so no user can ever claim it,
+        /// while the yield it earns lands in `totalAssets` and lifts every
+        /// share.
+        mapping(bytes32 => uint256) seededAssets;
+    }
+
+    /// @dev keccak256(abi.encode(uint256(keccak256("privana.storage.EarnManagerSeed")) - 1)) & ~bytes32(uint256(0xff))
+    /// A namespaced slot rather than the next `__gap` entry: other in-flight
+    /// upgrades also append state, and a hashed location cannot collide with
+    /// whichever of them lands first.
+    bytes32 private constant _SEED_STORAGE =
+        0xd80b2d47965e213ddec022fd452b2066a5b4c950efa4c159148bd77257251500;
+
+    function _seedStorage() private pure returns (SeedStorage storage $) {
+        bytes32 slot = _SEED_STORAGE;
+        assembly {
+            $.slot := slot
+        }
+    }
+
     /// -----------------------------------------------------------------------
     /// Errors
     /// -----------------------------------------------------------------------
@@ -111,6 +135,7 @@ contract EarnManager is
     error InsufficientShares();
     error InvalidWithdrawSignature();
     error NotPoolAdmin();
+    error SeedBelowZero();
 
     /// -----------------------------------------------------------------------
     /// Modifiers
@@ -192,6 +217,89 @@ contract EarnManager is
         Pool storage pool = pools[poolId];
         if (pool.poolAddress == address(0)) revert PoolNotFound();
         pool.totalAssets = newTotalAssets;
+    }
+
+    /// @notice Move protocol-owned principal into a pool without minting any
+    /// shares against it.
+    ///
+    /// The funds land in the pool's accounting balance like any deposit, so
+    /// they back redemptions and earn in the pool's strategy. They are
+    /// recorded in `seededAssets` rather than `totalAssets`, which is what
+    /// keeps them out of every share's claim: the off-chain valuation writes
+    /// `totalAssets = backing - seededAssets`, so the yield this principal
+    /// earns raises the share price while the principal itself never does.
+    /// @param poolId Earn pool receiving the seed.
+    /// @param amount Principal to move in.
+    /// @param nonce Accounting transfer nonce for the seeder recovered from
+    /// `signature`.
+    /// @param signature Seeder's EIP-712 ``Transfer(seeder, pool, ...)`` in
+    /// the accounting domain. Accounting recovers the payer from it, so the
+    /// funds come from whoever signed, never from an account this call names.
+    function seedLiquidity(
+        bytes32 poolId,
+        uint256 amount,
+        uint256 nonce,
+        bytes calldata signature
+    ) external onlyPoolAdmin {
+        Pool storage pool = pools[poolId];
+        if (pool.poolAddress == address(0)) revert PoolNotFound();
+        if (amount == 0) revert ZeroAmount();
+
+        accounting.transferBalance(pool.poolAddress, pool.tokenId, amount, nonce, signature);
+        _seedStorage().seededAssets[poolId] += amount;
+    }
+
+    /// @notice Return protocol-owned principal from a pool to `toAddress`.
+    ///
+    /// Reverts rather than dipping into user-backed assets: a pool can only
+    /// give back what it was seeded. Note this does not verify the funds are
+    /// liquid right now. The caller reclaims from the strategy first, and
+    /// only calls this once the pool's accounting balance actually holds the
+    /// amount, otherwise the accounting transfer reverts on its own.
+    /// @param poolId Earn pool to unseed.
+    /// @param toAddress Account receiving the principal.
+    /// @param amount Principal to move out.
+    /// @param nonce Accounting transfer nonce for the pool's outbound transfer.
+    /// @param signature Pool's EIP-712 ``Transfer(pool, toAddress, ...)``.
+    function unseedLiquidity(
+        bytes32 poolId,
+        address toAddress,
+        uint256 amount,
+        uint256 nonce,
+        bytes calldata signature
+    ) external onlyPoolAdmin {
+        Pool storage pool = pools[poolId];
+        if (pool.poolAddress == address(0)) revert PoolNotFound();
+        if (amount == 0) revert ZeroAmount();
+        if (toAddress == address(0)) revert ZeroAddress();
+
+        SeedStorage storage $ = _seedStorage();
+        if ($.seededAssets[poolId] < amount) revert SeedBelowZero();
+        $.seededAssets[poolId] -= amount;
+
+        accounting.transferBalance(toAddress, pool.tokenId, amount, nonce, signature);
+    }
+
+    /// @notice Overwrite the recorded protocol-owned principal without
+    /// moving any funds.
+    ///
+    /// Two jobs. While a pool has no shares there is nobody to earn, so the
+    /// off-chain valuation rolls the seed's accrued yield into the baseline
+    /// here rather than letting it sit as user assets that the first
+    /// depositor would find already on the books. It is also the operator
+    /// lever for marking the seed down after a realised loss deeper than the
+    /// user tranche.
+    function setSeededAssets(bytes32 poolId, uint256 newSeededAssets) external onlyPoolAdmin {
+        if (pools[poolId].poolAddress == address(0)) revert PoolNotFound();
+        _seedStorage().seededAssets[poolId] = newSeededAssets;
+    }
+
+    /// @notice Protocol-owned principal recorded against `poolId`. Public
+    /// because it is protocol-level state, not a user position: the amount
+    /// says nothing about any individual and the off-chain valuation needs it
+    /// on every sync.
+    function getSeededAssets(bytes32 poolId) external view returns (uint256) {
+        return _seedStorage().seededAssets[poolId];
     }
 
     /// -----------------------------------------------------------------------

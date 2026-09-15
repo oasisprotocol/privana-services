@@ -44,7 +44,7 @@ async def get_quote(
 async def execute_swap(payload: SwapRequest) -> SwapResponse:
     try:
         executor = get_swap_executor()
-        swap = await executor.execute_swap(
+        swap = await executor.schedule_swap(
             quote_id=payload.quote_id,
             input_nonce=payload.input_nonce,
             input_signature=payload.input_signature,
@@ -52,7 +52,7 @@ async def execute_swap(payload: SwapRequest) -> SwapResponse:
         return SwapResponse(
             swap_id=swap.id,
             status=swap.status,
-            message="Swap completed" if swap.status == "completed" else "Swap failed",
+            message=f"Swap {swap.status}",
             tx_hash=swap.swap_tx_hash,
         )
     except ValueError as exc:

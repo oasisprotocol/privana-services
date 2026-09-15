@@ -47,6 +47,10 @@ def _make_service(registry=None):
         # ``contract.functions.withdrawNonces.return_value.call.return_value``.
         contract.functions.withdrawNonces.return_value.call.return_value = 0
 
+        # No protocol-owned seed by default, so the netting is a no-op and
+        # every pre-seed expectation still reads as the plain backing figure.
+        contract.functions.getSeededAssets.return_value.call.return_value = 0
+
         from src.services.earn.vault_service import VaultService
         service = VaultService(registry=registry)
         service.contract = contract
@@ -908,6 +912,111 @@ class TestStrategyApyBpsSafe:
 
         # Failure must not crash the listing endpoint; surface 0 instead.
         assert await service.strategy_apy_bps_safe(POOL_ID_HEX) == 0
+
+
+class TestSeededLiquidity:
+    @staticmethod
+    def _registry_with(total_assets: int, idle: int):
+        from src.services.earn.registry import StrategyRegistry
+
+        registry = StrategyRegistry()
+        strategy = MagicMock()
+        strategy.name = "aave-v3"
+        strategy.is_healthy = AsyncMock(return_value=True)
+        strategy.total_assets = AsyncMock(return_value=total_assets)
+        strategy.idle_assets = AsyncMock(return_value=idle)
+        registry.register(POOL_ID_HEX, strategy)
+        return registry
+
+    def test_seed_comes_off_the_top_leaving_only_user_assets(self):
+        service, _, _, _ = _make_service()
+        # 100k seed, 10k of user principal, 400 of yield on the whole balance.
+        assert service._net_of_seed(110_400, 100_000, total_shares=10_000) == 10_400
+
+    def test_users_absorb_a_shortfall_before_the_seed_does(self):
+        service, _, _, _ = _make_service()
+        # Backing falls 10 below the combined position: the seed stays whole.
+        assert service._net_of_seed(90, 50, total_shares=10) == 40
+
+    def test_user_assets_clamp_at_zero_rather_than_going_negative(self):
+        service, _, _, _ = _make_service()
+        assert service._net_of_seed(30, 50, total_shares=10) == 0
+
+    def test_nothing_is_user_backed_before_the_first_deposit(self):
+        service, _, _, _ = _make_service()
+        # Yield earned while no shares exist stays with the seed.
+        assert service._net_of_seed(100_400, 100_000, total_shares=0) == 0
+
+    def test_an_unseeded_pool_is_left_exactly_as_it_was(self):
+        service, _, _, _ = _make_service()
+        # No seed, no shares, idle balance present: must stay the plain
+        # backing figure, never be reported as zero and never be recorded as
+        # protocol principal.
+        assert service._net_of_seed(1_500, 0, total_shares=0) == 1_500
+        assert service._net_of_seed(1_500, 0, total_shares=10) == 1_500
+
+    async def test_sync_never_invents_seed_on_a_pool_that_has_none(self):
+        registry = self._registry_with(total_assets=1_400, idle=100)
+        service, contract, sapphire, _ = _make_service(registry=registry)
+        contract.functions.pools.return_value.call.return_value = (
+            bytes.fromhex(USDC_TOKEN_ID[2:]),
+            POOL_ADDRESS,
+            0, 0, True,
+        )
+        contract.functions.getSeededAssets.return_value.call.return_value = 0
+
+        await service.sync_total_assets(POOL_ID_HEX)
+
+        written = [
+            c.kwargs["function_name"] for c in sapphire.execute_contract_call.call_args_list
+        ]
+        assert "setSeededAssets" not in written
+
+    async def test_sync_writes_backing_net_of_seed(self):
+        registry = self._registry_with(total_assets=110_000, idle=400)
+        service, contract, sapphire, _ = _make_service(registry=registry)
+        contract.functions.pools.return_value.call.return_value = (
+            bytes.fromhex(USDC_TOKEN_ID[2:]),
+            POOL_ADDRESS,
+            10_000, 10_000, True,
+        )
+        contract.functions.getSeededAssets.return_value.call.return_value = 100_000
+
+        result = await service.sync_total_assets(POOL_ID_HEX)
+
+        assert result == 10_400
+        assert sapphire.execute_contract_call.call_args.kwargs["args"][1] == 10_400
+
+    async def test_sync_rolls_pre_deposit_yield_into_the_seed_baseline(self):
+        registry = self._registry_with(total_assets=100_400, idle=0)
+        service, contract, sapphire, _ = _make_service(registry=registry)
+        contract.functions.pools.return_value.call.return_value = (
+            bytes.fromhex(USDC_TOKEN_ID[2:]),
+            POOL_ADDRESS,
+            0, 0, True,
+        )
+        contract.functions.getSeededAssets.return_value.call.return_value = 100_000
+
+        result = await service.sync_total_assets(POOL_ID_HEX)
+
+        # The 400 of yield becomes seed, not assets the first depositor finds
+        # already on the books.
+        assert result == 0
+        call = sapphire.execute_contract_call.call_args
+        assert call.kwargs["function_name"] == "setSeededAssets"
+        assert call.kwargs["args"][1] == 100_400
+
+    async def test_live_aum_reports_user_assets_not_the_whole_balance(self):
+        registry = self._registry_with(total_assets=110_000, idle=400)
+        service, contract, _, _ = _make_service(registry=registry)
+        contract.functions.pools.return_value.call.return_value = (
+            bytes.fromhex(USDC_TOKEN_ID[2:]),
+            POOL_ADDRESS,
+            10_000, 10_000, True,
+        )
+        contract.functions.getSeededAssets.return_value.call.return_value = 100_000
+
+        assert await service.effective_total_assets(POOL_ID_HEX, 10_000) == 10_400
 
 
 class TestSyncTotalAssets:

@@ -153,6 +153,30 @@ class VaultService:
         token_bytes = bytes.fromhex(token_hex.removeprefix("0x"))
         return self.contract.functions.getWithdrawNonce(token_bytes).call()
 
+    def get_seeded_assets(self, pool_id: bytes) -> int:
+        return self.contract.functions.getSeededAssets(pool_id).call()
+
+    def _net_of_seed(self, gross: int, seeded: int, total_shares: int) -> int:
+        """User-backed assets, given everything the pool holds.
+
+        Seed principal is senior: it comes off the top, so a shortfall lands
+        on the user tranche first and the clamp at zero is the point at which
+        the seed itself would have to be marked down by an operator. While no
+        shares exist there is nobody to earn, so the whole balance stays with
+        the seed and the first depositor does not find yield already on the
+        books.
+
+        A pool nobody has seeded is left exactly as it was before seeding
+        existed. Otherwise an unseeded pool sitting at zero shares would have
+        its idle balance reported as nothing, and the sync path would go on to
+        record that balance as protocol principal it never was.
+        """
+        if seeded == 0:
+            return gross
+        if total_shares == 0:
+            return 0
+        return max(gross - seeded, 0)
+
     def convert_to_shares(self, pool_id: bytes, assets: int) -> int:
         return self.contract.functions.convertToShares(pool_id, assets).call()
 
@@ -621,10 +645,26 @@ class VaultService:
                 pool_id_hex, strategy.name,
             )
             return on_chain_total
-        total = external + idle
-        return total if total > 0 else on_chain_total
+        gross = external + idle
+        if gross <= 0:
+            return on_chain_total
+        pool_id = bytes.fromhex(pool_id_hex.removeprefix("0x"))
+        try:
+            seeded = await asyncio.to_thread(self.get_seeded_assets, pool_id)
+            shares = self.get_pool(pool_id)["total_shares"]
+        except Exception:
+            logger.exception(
+                "seed read failed pool=%s; falling back to on-chain", pool_id_hex
+            )
+            return on_chain_total
+        return self._net_of_seed(gross, seeded, shares)
 
-    async def strict_total_assets(self, pool_id_hex: str, on_chain_total: int) -> Optional[int]:
+    async def strict_total_assets(
+        self,
+        pool_id_hex: str,
+        on_chain_total: int,
+        total_shares: Optional[int] = None,
+    ) -> Optional[int]:
         """Every asset the pool's shares are backed by, or None.
 
         ``effective_total_assets`` degrades to the on-chain principal when the
@@ -651,8 +691,21 @@ class VaultService:
                 pool_id_hex, strategy.name,
             )
             return None
-        total = external + idle
-        return total if total > 0 else on_chain_total
+        gross = external + idle
+        if gross <= 0:
+            return on_chain_total
+        pool_id = bytes.fromhex(pool_id_hex.removeprefix("0x"))
+        try:
+            seeded = await asyncio.to_thread(self.get_seeded_assets, pool_id)
+            shares = (
+                total_shares
+                if total_shares is not None
+                else self.get_pool(pool_id)["total_shares"]
+            )
+        except Exception:
+            logger.exception("seed read failed pool=%s; no rate snapshot", pool_id_hex)
+            return None
+        return self._net_of_seed(gross, seeded, shares)
 
     async def rate_snapshot(self, pool_id_hex: str) -> Optional[tuple[int, int]]:
         """A coherent ``(total_assets, total_shares)`` pair, or None.
@@ -666,7 +719,9 @@ class VaultService:
         """
         pool_id = bytes.fromhex(pool_id_hex.removeprefix("0x"))
         before = await asyncio.to_thread(self.get_pool, pool_id)
-        assets = await self.strict_total_assets(pool_id_hex, before["total_assets"])
+        assets = await self.strict_total_assets(
+            pool_id_hex, before["total_assets"], total_shares=int(before["total_shares"])
+        )
         if assets is None:
             return None
         after = await asyncio.to_thread(self.get_pool, pool_id)
@@ -685,8 +740,9 @@ class VaultService:
 
         Backing is strategy assets PLUS idle assets (funds credited to the
         pool but not yet deployed, e.g. an undeployed deposit or a reclaim
-        awaiting redeploy). Counting only the strategy would understate the
-        denominator whenever funds sit idle — including right after a failed
+        awaiting redeploy) MINUS protocol-owned seed principal, which sits in
+        the same balance but backs no shares. Counting only the strategy would
+        understate the denominator whenever funds sit idle — including right after a failed
         withdrawal rollback — and let the next deposit mint against a false,
         low denominator.
 
@@ -715,7 +771,33 @@ class VaultService:
             )
             return None
 
-        backing = external + idle
+        gross = external + idle
+        pool = self.get_pool(pool_id)
+        seeded = await asyncio.to_thread(self.get_seeded_assets, pool_id)
+
+        if seeded > 0 and pool["total_shares"] == 0:
+            # Nobody holds a claim yet, so everything the pool holds is still
+            # the seed's, yield included. Roll it into the baseline instead of
+            # leaving it as user assets the first depositor would arrive to
+            # find already on the books.
+            if gross != seeded:
+                try:
+                    await asyncio.to_thread(
+                        self.sapphire.execute_contract_call,
+                        contract_address=self.contract_address,
+                        abi=EARN_MANAGER_ABI,
+                        function_name="setSeededAssets",
+                        args=[pool_id, gross],
+                    )
+                except Exception:
+                    logger.exception(
+                        "setSeededAssets tx failed pool=%s old=%d new=%d",
+                        pool_id_hex, seeded, gross,
+                    )
+                    return None
+            return 0 if on_chain == 0 else await self._write_total_assets(pool_id, pool_id_hex, on_chain, 0)
+
+        backing = self._net_of_seed(gross, seeded, pool["total_shares"])
         if backing == on_chain:
             return on_chain
         if backing < on_chain and (on_chain - backing) * 10_000 > on_chain * SYNC_MAX_DROP_BPS:
@@ -733,25 +815,30 @@ class VaultService:
             )
             return None
 
+        return await self._write_total_assets(pool_id, pool_id_hex, on_chain, backing)
+
+    async def _write_total_assets(
+        self, pool_id: bytes, pool_id_hex: str, on_chain: int, target: int
+    ) -> Optional[int]:
         try:
             await asyncio.to_thread(
                 self.sapphire.execute_contract_call,
                 contract_address=self.contract_address,
                 abi=EARN_MANAGER_ABI,
                 function_name="syncTotalAssets",
-                args=[pool_id, backing],
+                args=[pool_id, target],
             )
         except Exception:
             logger.exception(
                 "syncTotalAssets tx failed pool=%s old=%d new=%d",
-                pool_id_hex, on_chain, backing,
+                pool_id_hex, on_chain, target,
             )
             return None
         logger.info(
             "syncTotalAssets succeeded pool=%s old=%d new=%d",
-            pool_id_hex, on_chain, backing,
+            pool_id_hex, on_chain, target,
         )
-        return backing
+        return target
 
     def _record_transaction(
         self,

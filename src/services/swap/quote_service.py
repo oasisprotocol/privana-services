@@ -280,12 +280,21 @@ class QuoteService:
             logger.info(f"Cleaned up {deleted} expired quotes")
         return deleted
 
-    def get_stored_quote(self, quote_id: str) -> Optional[dict]:
-        db = get_db()
-        row = db.execute("SELECT * FROM quotes WHERE id = ?", (quote_id,)).fetchone()
-        if row is None:
-            return None
-        return dict(row)
+
+def load_unexpired_quote(quote_id: str) -> dict:
+    """Load the quote a queued swap was priced against.
+
+    Execution happens after a queueing delay, so the price can have gone
+    stale in between. A missing row counts as expired: cleanup_expired_quotes
+    purges quotes once they lapse.
+    """
+    row = get_db().execute(
+        "SELECT * FROM quotes WHERE id = ?", (quote_id,)
+    ).fetchone()
+    if row is None or int(time.time()) >= row["expires_at"]:
+        raise ValueError("Quote expired before execution")
+    return dict(row)
+
 
 _service_instance: Optional[QuoteService] = None
 

@@ -1,9 +1,9 @@
 import asyncio
 import logging
 import time
-import uuid
 from typing import Any, Awaitable, Callable, Optional
 
+from privana import AccountingApiError
 from privana.types import TransferFundsRequest
 
 from src.clients.accounting import get_accounting_client
@@ -17,6 +17,8 @@ from src.core.fees import calculate_fee
 from src.core.validation import sanitize_error
 from src.models.swap import LifiSwapStep, SwapRecord, SwapStatus, SwapVenue
 from src.services.swap.bridge import AccountingBridge
+from src.services.swap.quote_service import load_unexpired_quote
+from src.services.swap.worker import SwapWorker
 
 logger = logging.getLogger(__name__)
 
@@ -30,10 +32,32 @@ CREDIT_MAX_RETRIES = 20
 DEPOSIT_MAX_RETRIES = 10
 REFUND_BALANCE_POLLS = 30
 
-lp_transfer_lock = asyncio.Lock()
+# Li.Fi rows are only claimed while SCHEDULED — once executing, an in-process
+# background task owns them, and recover_inflight_lifi_swaps settles rows a
+# restart orphaned.
+LIFI_CLAIM_SQL = """
+    SELECT * FROM swaps
+    WHERE venue = ? AND status = ?
+    ORDER BY created_at, id
+"""
+LIFI_CLAIM_PARAMS = (
+    SwapVenue.LIFI.value,
+    SwapStatus.SCHEDULED.value,
+)
 
 
-class LifiSwapPipeline:
+def _is_nonce_conflict(exc: Exception) -> bool:
+    """Whether an accounting error means the signed transfer was already spent.
+
+    The accounting service rejects a replayed transfer nonce with 409/422.
+    Those are the exact recoverable races the LP-nonce retry loops exist for:
+    a concurrent internal swap or another Li.Fi leg can spend the LP nonce
+    between our read and our submission.
+    """
+    return isinstance(exc, AccountingApiError) and exc.status_code in (409, 422)
+
+
+class LifiSwap:
     def __init__(
         self,
         accounting: Optional[Any] = None,
@@ -54,27 +78,26 @@ class LifiSwapPipeline:
         self._deposit_max_retries = DEPOSIT_MAX_RETRIES
         self._tasks: set[asyncio.Task] = set()
 
-    async def launch(
-        self, quote: dict, user_address: str, input_nonce: int, input_signature: str
-    ) -> SwapRecord:
-        swap_id = self._insert_swap(quote, user_address)
+    async def execute_swap(self, swap: SwapRecord) -> None:
         try:
-            await self._submit_input(quote, input_nonce, input_signature)
+            # Priced against the quote's floor and fee, neither of which is
+            # copied onto the swap row.
+            quote = load_unexpired_quote(swap.quote_id)
+            await self._submit_input(quote, swap.input_nonce, swap.input_signature)
         except ValueError as exc:
             self._update_swap(
-                swap_id, status=SwapStatus.FAILED.value, error=sanitize_error(str(exc))
+                swap.id, status=SwapStatus.FAILED.value, error=sanitize_error(str(exc))
             )
-            return self._get_swap(swap_id)
+            return
 
         self._update_swap(
-            swap_id,
+            swap.id,
             status=SwapStatus.EXECUTING.value,
             step=LifiSwapStep.INPUT_TRANSFER.value,
         )
-        self.spawn_background(swap_id, quote, input_nonce)
-        return self._get_swap(swap_id)
+        self._spawn_background(swap.id, quote, swap.input_nonce)
 
-    def spawn_background(self, swap_id: str, quote: dict, input_nonce: int) -> None:
+    def _spawn_background(self, swap_id: str, quote: dict, input_nonce: int) -> None:
         task = asyncio.create_task(self._run(swap_id, quote, input_nonce))
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
@@ -152,22 +175,53 @@ class LifiSwapPipeline:
     async def _submit_input(
         self, quote: dict, input_nonce: int, input_signature: str
     ) -> None:
+        """Submit the signed input transfer on the user's behalf.
+
+        A nonce conflict here means our specific request was rejected, not
+        accepted - the transfer that actually consumed the nonce could be
+        this same swap resuming after a crash between the input landing and
+        EXECUTING being written, but it could just as well be something
+        this service doesn't control (the nonce sequence is shared with any
+        other transfer the user can sign, e.g. an out-of-band /funds/transfer).
+        There's no way to tell those apart, so this never assumes success on
+        a conflict: it fails the swap outright. That makes the crash-resume
+        case pay a cost - the swap shows FAILED even though the LP did
+        receive the funds - but that is recoverable by checking the LP's
+        transfer history and returning the user's assets manually, whereas
+        wrongly adopting an unrelated transfer is a real fund-loss path with
+        no recovery. See PR #103 review comment
+        https://github.com/oasisprotocol/privana-services/pull/103#discussion_r4005915070.
+        """
         client = await self._privana_factory()
-        submission = await client.transfer_funds(
-            TransferFundsRequest(
-                to_address=self.settings.liquidity_provider_address,
-                token_id=quote["from_token_id"],
-                amount=int(quote["from_amount"]),
-                nonce=input_nonce,
-                signature=input_signature,
+        try:
+            submission = await client.transfer_funds(
+                TransferFundsRequest(
+                    to_address=self.settings.liquidity_provider_address,
+                    token_id=quote["from_token_id"],
+                    amount=int(quote["from_amount"]),
+                    nonce=input_nonce,
+                    signature=input_signature,
+                )
             )
-        )
+        except AccountingApiError as exc:
+            if not _is_nonce_conflict(exc):
+                raise
+            raise ValueError(
+                f"input transfer nonce conflict: {sanitize_error(str(exc))}"
+            ) from exc
         if submission.status not in ACCEPTED_SUBMISSION_STATUSES:
             raise ValueError(
                 f"input transfer rejected: status={submission.status} detail={submission.detail}"
             )
 
     async def _confirm_input(self, quote: dict, input_nonce: int) -> None:
+        """Wait for the user's transfer nonce to pass input_nonce.
+
+        Only ever called after _submit_input's own request was accepted
+        specifically for this swap (to_address=LP, this token/amount), so
+        this is confirming settlement of a claim already known to be ours,
+        not verifying an ambiguous one.
+        """
         for _ in range(MAX_INPUT_CONFIRM_POLLS):
             nonce = await self.accounting.get_transfer_nonce(quote["user_address"])
             if nonce > input_nonce:
@@ -288,20 +342,25 @@ class LifiSwapPipeline:
     async def _lp_transfer(self, to_address: str, token_id: str, amount: int) -> None:
         client = await self._privana_factory()
         last_detail = None
+        # The LP nonce is re-read every attempt: a concurrent internal swap or
+        # another Li.Fi transfer can spend it first, and the rejection is
+        # recovered by signing against the advanced nonce. The ledger reports
+        # the spent nonce as an HTTP 409/422, which the SDK surfaces as an
+        # AccountingApiError rather than a failed submission.
         for _ in range(self._credit_max_retries):
-            async with lp_transfer_lock:
-                lp_nonce = await self.accounting.get_transfer_nonce(
-                    self.settings.liquidity_provider_address
-                )
-                signature = sign_transfer(
-                    private_key=self.settings.liquidity_provider_secret_key,
-                    chain_id=self.settings.accounting_chain_id,
-                    verifying_contract=self.settings.accounting_contract_address,
-                    to_address=to_address,
-                    token_id=token_id,
-                    amount=amount,
-                    nonce=lp_nonce,
-                )
+            lp_nonce = await self.accounting.get_transfer_nonce(
+                self.settings.liquidity_provider_address
+            )
+            signature = sign_transfer(
+                private_key=self.settings.liquidity_provider_secret_key,
+                chain_id=self.settings.accounting_chain_id,
+                verifying_contract=self.settings.accounting_contract_address,
+                to_address=to_address,
+                token_id=token_id,
+                amount=amount,
+                nonce=lp_nonce,
+            )
+            try:
                 submission = await client.transfer_funds(
                     TransferFundsRequest(
                         to_address=to_address,
@@ -311,30 +370,19 @@ class LifiSwapPipeline:
                         signature=signature,
                     )
                 )
+            except AccountingApiError as exc:
+                if not _is_nonce_conflict(exc):
+                    raise
+                # A concurrent transfer spent the nonce between our read and
+                # this submission; re-read and re-sign on the next attempt.
+                last_detail = exc.detail
+                await asyncio.sleep(self._poll_interval_sec)
+                continue
             if submission.status in ACCEPTED_SUBMISSION_STATUSES:
                 return
             last_detail = submission.detail
             await asyncio.sleep(self._poll_interval_sec)
         raise RuntimeError(f"credit retries exhausted: {last_detail}")
-
-    def _insert_swap(self, quote: dict, user_address: str) -> str:
-        swap_id = str(uuid.uuid4())
-        now = int(time.time())
-        db = get_db()
-        db_write(
-            db,
-            """INSERT INTO swaps
-               (id, quote_id, user_address, from_token_id, to_token_id,
-                from_amount, to_amount_estimate, status, venue, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                swap_id, quote["id"], user_address.lower(),
-                quote["from_token_id"], quote["to_token_id"],
-                quote["from_amount"], quote["to_amount_estimate"],
-                SwapStatus.PENDING.value, SwapVenue.LIFI.value, now, now,
-            ),
-        )
-        return swap_id
 
     def _update_swap(self, swap_id: str, **fields) -> None:
         db = get_db()
@@ -351,14 +399,13 @@ class LifiSwapPipeline:
         return SwapRecord(**dict(row))
 
 
-async def recover_inflight_lifi_swaps(pipeline: Optional[LifiSwapPipeline] = None) -> None:
+async def recover_inflight_lifi_swaps(pipeline: Optional[LifiSwap] = None) -> None:
     db = get_db()
     rows = db.execute(
         """SELECT * FROM swaps
-           WHERE venue = ? AND status IN (?, ?, ?)""",
+           WHERE venue = ? AND status IN (?, ?)""",
         (
             SwapVenue.LIFI.value,
-            SwapStatus.PENDING.value,
             SwapStatus.EXECUTING.value,
             SwapStatus.REFUNDING.value,
         ),
@@ -392,11 +439,30 @@ async def recover_inflight_lifi_swaps(pipeline: Optional[LifiSwapPipeline] = Non
         )
 
 
-_pipeline_instance: Optional[LifiSwapPipeline] = None
+_pipeline_instance: Optional[LifiSwap] = None
 
 
-def get_lifi_pipeline() -> LifiSwapPipeline:
+def get_lifi_pipeline() -> LifiSwap:
     global _pipeline_instance
     if _pipeline_instance is None:
-        _pipeline_instance = LifiSwapPipeline()
+        _pipeline_instance = LifiSwap()
     return _pipeline_instance
+
+
+async def _exec_lifi_swap(swap: SwapRecord) -> None:
+    await get_lifi_pipeline().execute_swap(swap)
+
+
+_lifi_worker: Optional[SwapWorker] = None
+
+
+def get_lifi_worker() -> SwapWorker:
+    global _lifi_worker
+    if _lifi_worker is None:
+        _lifi_worker = SwapWorker(
+            name="lifi",
+            claim_sql=LIFI_CLAIM_SQL,
+            claim_params=LIFI_CLAIM_PARAMS,
+            execute=_exec_lifi_swap,
+        )
+    return _lifi_worker

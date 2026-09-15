@@ -88,6 +88,48 @@ class SapphireClient:
         contract = self.w3.eth.contract(address=address, abi=abi)
         contract.functions[function_name](*args).call({"from": self.account.address})
 
+    def get_pending_nonce(self) -> int:
+        """Next tx nonce for the signing account, including our own unconfirmed sends."""
+        return self.w3.eth.get_transaction_count(self.account.address, "pending")
+
+    def submit_contract_call(
+        self,
+        contract_address: str,
+        abi: list,
+        function_name: str,
+        args: list,
+        gas_limit: int = DEFAULT_GAS_LIMIT,
+        nonce: Optional[int] = None,
+    ) -> str:
+        """Sign and broadcast a call, returning its hash without waiting for a receipt.
+
+        An explicit ``nonce`` lets a caller submit several calls back-to-back
+        so they land in the same block, instead of each ``transact()``
+        re-querying the pending nonce (which only sees our own prior sends,
+        not a same-block conflict with another sender on this account).
+        """
+        address = Web3.to_checksum_address(contract_address)
+        contract = self.w3.eth.contract(address=address, abi=abi)
+        tx_params = {
+            "from": self.account.address,
+            "gas": gas_limit,
+            "gasPrice": self.w3.eth.gas_price,
+        }
+        if nonce is not None:
+            tx_params["nonce"] = nonce
+        tx_hash = contract.functions[function_name](*args).transact(tx_params)
+        tx_hash_hex = tx_hash.hex()
+        if not tx_hash_hex.startswith("0x"):
+            tx_hash_hex = "0x" + tx_hash_hex
+        logger.info(f"Tx sent (encrypted): {tx_hash_hex}")
+        return tx_hash_hex
+
+    def wait_for_receipt(self, tx_hash: str) -> None:
+        receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash)
+        if receipt["status"] != 1:
+            raise RuntimeError(f"Transaction reverted: {tx_hash}")
+        logger.info(f"Tx confirmed: {tx_hash}")
+
     def execute_contract_call(
         self,
         contract_address: str,
@@ -96,22 +138,15 @@ class SapphireClient:
         args: list,
         gas_limit: int = DEFAULT_GAS_LIMIT,
     ) -> str:
-        address = Web3.to_checksum_address(contract_address)
-        contract = self.w3.eth.contract(address=address, abi=abi)
-        tx_hash = contract.functions[function_name](*args).transact({
-            "from": self.account.address,
-            "gas": gas_limit,
-            "gasPrice": self.w3.eth.gas_price,
-        })
-        tx_hash_hex = tx_hash.hex()
-        if not tx_hash_hex.startswith("0x"):
-            tx_hash_hex = "0x" + tx_hash_hex
-        logger.info(f"Tx sent (encrypted): {tx_hash_hex}")
-        receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash)
-        if receipt["status"] != 1:
-            raise RuntimeError(f"Transaction reverted: {tx_hash_hex}")
-        logger.info(f"Tx confirmed: {tx_hash_hex}")
-        return tx_hash_hex
+        tx_hash = self.submit_contract_call(
+            contract_address=contract_address,
+            abi=abi,
+            function_name=function_name,
+            args=args,
+            gas_limit=gas_limit,
+        )
+        self.wait_for_receipt(tx_hash)
+        return tx_hash
 
 
 _client_instance: Optional[SapphireClient] = None

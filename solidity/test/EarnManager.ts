@@ -254,6 +254,27 @@ describe('EarnManager', function () {
       ).to.be.revertedWithCustomError(earnManager, 'SeedBelowZero');
     });
 
+    it('should leave the seed counter intact when the pool cannot pay', async function () {
+      const { earnManager, mockAccounting, owner, poolWallet, otherUser } = await deployWithPool();
+      const seed = ethers.parseUnits('100000', 6);
+
+      await mockAccounting.setBalance(owner.address, TOKEN_ID, seed);
+      await earnManager.seedLiquidity(POOL_ID, seed, 0, mockSig(owner.address));
+
+      // Stand in for principal still sitting in Aave/Midas: the pool's
+      // accounting balance cannot cover the unseed.
+      await mockAccounting.setBalance(poolWallet.address, TOKEN_ID, 0);
+
+      await expect(
+        earnManager.unseedLiquidity(POOL_ID, otherUser.address, seed, 0, mockSig(poolWallet.address)),
+      ).to.be.reverted;
+
+      // The decrement happens before the transfer, so the revert has to carry
+      // it back out. A counter left short here would silently write off
+      // principal the pool still owes.
+      expect(await earnManager.getSeededAssets(POOL_ID)).to.equal(seed);
+    });
+
     it('should gate seed, unseed and the baseline setter to poolAdmin', async function () {
       const { earnManager, user, otherUser } = await deployWithPool();
 
@@ -263,6 +284,29 @@ describe('EarnManager', function () {
         .to.be.revertedWithCustomError(earnManager, 'NotPoolAdmin');
       await expect(earnManager.connect(user).setSeededAssets(POOL_ID, 1))
         .to.be.revertedWithCustomError(earnManager, 'NotPoolAdmin');
+    });
+
+    it('should hold seed at the erc-7201 slot its constant names', async function () {
+      const { earnManager, mockAccounting, owner } = await deployWithPool();
+      const seed = ethers.parseUnits('100000', 6);
+
+      await mockAccounting.setBalance(owner.address, TOKEN_ID, seed);
+      await earnManager.seedLiquidity(POOL_ID, seed, 0, mockSig(owner.address));
+
+      // Derive the namespace slot independently of the contract, then the
+      // mapping entry inside it, and read raw storage. If the constant and
+      // the assembly accessor ever drift apart, this is what catches it.
+      const ns = ethers.keccak256(ethers.toUtf8Bytes('privana.storage.EarnManagerSeed'));
+      const base = ethers.toBeHex(
+        (BigInt(ethers.keccak256(ethers.AbiCoder.defaultAbiCoder().encode(['uint256'], [BigInt(ns) - 1n]))) >> 8n) << 8n,
+        32,
+      );
+      const entry = ethers.keccak256(
+        ethers.AbiCoder.defaultAbiCoder().encode(['bytes32', 'uint256'], [POOL_ID, base]),
+      );
+
+      const raw = await ethers.provider.getStorage(await earnManager.getAddress(), entry);
+      expect(BigInt(raw)).to.equal(seed);
     });
 
     it('should not collide with the slot a future append would take', async function () {

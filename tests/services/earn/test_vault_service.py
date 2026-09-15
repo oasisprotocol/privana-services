@@ -947,6 +947,31 @@ class TestSeededLiquidity:
         # Yield earned while no shares exist stays with the seed.
         assert service._net_of_seed(100_400, 100_000, total_shares=0) == 0
 
+    def test_an_unseeded_pool_is_left_exactly_as_it_was(self):
+        service, _, _, _ = _make_service()
+        # No seed, no shares, idle balance present: must stay the plain
+        # backing figure, never be reported as zero and never be recorded as
+        # protocol principal.
+        assert service._net_of_seed(1_500, 0, total_shares=0) == 1_500
+        assert service._net_of_seed(1_500, 0, total_shares=10) == 1_500
+
+    async def test_sync_never_invents_seed_on_a_pool_that_has_none(self):
+        registry = self._registry_with(total_assets=1_400, idle=100)
+        service, contract, sapphire, _ = _make_service(registry=registry)
+        contract.functions.pools.return_value.call.return_value = (
+            bytes.fromhex(USDC_TOKEN_ID[2:]),
+            POOL_ADDRESS,
+            0, 0, True,
+        )
+        contract.functions.getSeededAssets.return_value.call.return_value = 0
+
+        await service.sync_total_assets(POOL_ID_HEX)
+
+        written = [
+            c.kwargs["function_name"] for c in sapphire.execute_contract_call.call_args_list
+        ]
+        assert "setSeededAssets" not in written
+
     async def test_sync_writes_backing_net_of_seed(self):
         registry = self._registry_with(total_assets=110_000, idle=400)
         service, contract, sapphire, _ = _make_service(registry=registry)

@@ -165,7 +165,14 @@ class VaultService:
         shares exist there is nobody to earn, so the whole balance stays with
         the seed and the first depositor does not find yield already on the
         books.
+
+        A pool nobody has seeded is left exactly as it was before seeding
+        existed. Otherwise an unseeded pool sitting at zero shares would have
+        its idle balance reported as nothing, and the sync path would go on to
+        record that balance as protocol principal it never was.
         """
+        if seeded == 0:
+            return gross
         if total_shares == 0:
             return 0
         return max(gross - seeded, 0)
@@ -768,7 +775,7 @@ class VaultService:
         pool = self.get_pool(pool_id)
         seeded = await asyncio.to_thread(self.get_seeded_assets, pool_id)
 
-        if pool["total_shares"] == 0:
+        if seeded > 0 and pool["total_shares"] == 0:
             # Nobody holds a claim yet, so everything the pool holds is still
             # the seed's, yield included. Roll it into the baseline instead of
             # leaving it as user assets the first depositor would arrive to

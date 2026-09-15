@@ -81,3 +81,60 @@ class TestGetPoolAdminSapphireClient:
             second = sapphire_module.get_pool_admin_sapphire_client()
             assert first is second
             client_cls.assert_called_once()
+
+
+class TestTransactionSubmission:
+    def _client(self):
+        client = sapphire_module.SapphireClient.__new__(sapphire_module.SapphireClient)
+        client.account = MagicMock(address="0x" + "11" * 20)
+        client.w3 = MagicMock()
+        client.w3.eth.get_transaction_count.return_value = 9
+        client.w3.eth.gas_price = 100
+        contract = client.w3.eth.contract.return_value
+        contract.functions.__getitem__.return_value.return_value.transact.return_value = bytes.fromhex("ab" * 32)
+        return client
+
+    def test_submit_uses_pending_nonce_without_waiting_for_receipt(self):
+        client = self._client()
+        tx_hash = client.submit_contract_call("0x" + "22" * 20, [], "swap", [1], 1_000_000)
+        assert tx_hash == "0x" + "ab" * 32
+        client.w3.eth.get_transaction_count.assert_called_once_with(client.account.address, "pending")
+        call = client.w3.eth.contract.return_value.functions.__getitem__.return_value.return_value
+        assert call.transact.call_args.args[0]["nonce"] == 9
+        assert call.transact.call_args.args[0]["gas"] == 1_000_000
+        client.w3.eth.wait_for_transaction_receipt.assert_not_called()
+
+    def test_existing_execute_method_still_waits_and_checks_status(self):
+        client = self._client()
+        client.w3.eth.wait_for_transaction_receipt.return_value = {"status": 0}
+        with pytest.raises(RuntimeError, match="Transaction reverted"):
+            client.execute_contract_call("0x" + "22" * 20, [], "swap", [])
+        client.w3.eth.wait_for_transaction_receipt.assert_called_once()
+
+    def test_concurrent_submissions_allocate_distinct_evm_nonces(self):
+        import time
+        from concurrent.futures import ThreadPoolExecutor
+
+        client = self._client()
+        next_nonce = 9
+        submitted = []
+
+        def get_nonce(*args):
+            value = next_nonce
+            time.sleep(0.01)
+            return value
+
+        def submit(params):
+            nonlocal next_nonce
+            submitted.append(params["nonce"])
+            next_nonce += 1
+            return next_nonce.to_bytes(32, "big")
+
+        client.w3.eth.get_transaction_count.side_effect = get_nonce
+        call = client.w3.eth.contract.return_value.functions.__getitem__.return_value.return_value
+        call.transact.side_effect = submit
+        with ThreadPoolExecutor(max_workers=5) as pool:
+            futures = [pool.submit(client.submit_contract_call, "0x" + "22" * 20, [], "swap", []) for _ in range(5)]
+            hashes = [f.result() for f in futures]
+        assert submitted == [9, 10, 11, 12, 13]
+        assert len(set(hashes)) == 5

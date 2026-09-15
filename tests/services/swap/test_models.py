@@ -10,7 +10,7 @@ class TestSwapVenue:
 class TestSwapStatus:
     def test_six_states(self):
         assert {s.value for s in SwapStatus} == {
-            "pending", "executing", "completed", "failed", "refunding", "refunded",
+            "scheduled", "executing", "completed", "failed", "refunding", "refunded",
         }
 
 

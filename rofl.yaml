@@ -1,5 +1,5 @@
 name: privana-services
-version: 0.1.8
+version: 0.1.9
 tee: tdx
 kind: container
 resources:

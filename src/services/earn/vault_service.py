@@ -3,10 +3,11 @@ import logging
 import time
 import uuid
 from decimal import Decimal
+from functools import partial
 from typing import Optional
 
 from web3 import Web3
-from web3.exceptions import ContractLogicError
+from web3.exceptions import ContractLogicError, Web3RPCError
 
 from src.clients.accounting import get_accounting_client
 from src.clients.sapphire import get_pool_admin_sapphire_client
@@ -48,6 +49,18 @@ EARN_STATUS_UNDEPLOYED = "undeployed"
 
 SYNC_MAX_DROP_BPS = 100
 
+# Sapphire authenticates a read by wrapping it in a signed query whose leash
+# pins a recent block. The client reads the head and then the block before it
+# as two calls, so when the chain moves between them the node rejects the
+# leash. It is transient by nature: the next attempt builds a fresh one.
+_STALE_LEASH = "base block not found"
+READ_RETRY_ATTEMPTS = 3
+READ_RETRY_BACKOFF_SEC = 0.2
+
+# Protocol-owned principal only moves when an operator records or drops it,
+# so re-reading it on every quote buys nothing and costs a signed query.
+SEED_CACHE_TTL_SEC = 30
+
 
 def _exchange_rate(total_assets: int, total_shares: int) -> str:
     if total_shares == 0:
@@ -63,6 +76,7 @@ class VaultService:
         self._pools_tx_lock = asyncio.Lock()
         self._registry = registry if registry is not None else get_strategy_registry()
         self._seed_read_warned = False
+        self._seed_cache: dict[str, tuple[float, int]] = {}
         self.contract_address = Web3.to_checksum_address(
             self.settings.earn_manager_contract_address
         )
@@ -116,7 +130,7 @@ class VaultService:
             )
 
     def get_pool(self, pool_id: bytes) -> dict:
-        pool = self.contract.functions.pools(pool_id).call()
+        pool = self._read_with_retry(self.contract.functions.pools(pool_id).call, "pools")
         return {
             "token_id": "0x" + pool[0].hex(),
             "pool_address": pool[1],
@@ -155,7 +169,26 @@ class VaultService:
         token_bytes = bytes.fromhex(token_hex.removeprefix("0x"))
         return self.contract.functions.getWithdrawNonce(token_bytes).call()
 
-    def get_seeded_assets(self, pool_id: bytes) -> int:
+    @staticmethod
+    def _read_with_retry(call, label: str):
+        """Run a contract read, retrying a stale signed-query leash.
+
+        Only that one error is retried. Anything else is the chain's real
+        answer and is left to the caller.
+        """
+        for attempt in range(1, READ_RETRY_ATTEMPTS + 1):
+            try:
+                return call()
+            except Web3RPCError as exc:
+                if _STALE_LEASH not in str(exc) or attempt == READ_RETRY_ATTEMPTS:
+                    raise
+                logger.warning(
+                    "%s hit a stale signed-query leash (attempt %d/%d); retrying",
+                    label, attempt, READ_RETRY_ATTEMPTS,
+                )
+                time.sleep(READ_RETRY_BACKOFF_SEC * attempt)
+
+    def get_seeded_assets(self, pool_id: bytes, *, fresh: bool = False) -> int:
         """Protocol-owned principal recorded against the pool.
 
         Reverts against a contract that predates seeding, which has no such
@@ -165,8 +198,14 @@ class VaultService:
         them as zero is what lets the service run against a proxy that has
         not been upgraded yet, rather than failing every quote until it is.
         """
+        key = pool_id.hex()
+        cached = self._seed_cache.get(key)
+        if not fresh and cached is not None and time.time() - cached[0] < SEED_CACHE_TTL_SEC:
+            return cached[1]
         try:
-            return self.contract.functions.getSeededAssets(pool_id).call()
+            value = self._read_with_retry(
+                self.contract.functions.getSeededAssets(pool_id).call, "getSeededAssets",
+            )
         except ContractLogicError:
             if not self._seed_read_warned:
                 logger.warning(
@@ -175,7 +214,9 @@ class VaultService:
                     "service signs as the pool admin."
                 )
                 self._seed_read_warned = True
-            return 0
+            value = 0
+        self._seed_cache[key] = (time.time(), value)
+        return value
 
     def _net_of_seed(self, gross: int, seeded: int, total_shares: int) -> int:
         """User-backed assets, given everything the pool holds.
@@ -538,7 +579,9 @@ class VaultService:
             # different: the seed is senior, so a withdrawal priced on a
             # denominator that no longer holds would pay the user out of
             # foundation principal.
-            if synced is None and await asyncio.to_thread(self.get_seeded_assets, pool_id):
+            if synced is None and await asyncio.to_thread(
+                partial(self.get_seeded_assets, pool_id, fresh=True)
+            ):
                 raise ValueError(
                     "Pool valuation could not be confirmed; withdraw refused. "
                     "Retry shortly."
@@ -869,7 +912,7 @@ class VaultService:
 
         gross = external + idle
         pool = self.get_pool(pool_id)
-        seeded = await asyncio.to_thread(self.get_seeded_assets, pool_id)
+        seeded = await asyncio.to_thread(partial(self.get_seeded_assets, pool_id, fresh=True))
 
         if seeded > 0 and pool["total_shares"] == 0:
             # Nobody holds a claim yet, so everything the pool holds is still

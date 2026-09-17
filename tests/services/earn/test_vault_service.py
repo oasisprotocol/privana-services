@@ -1710,3 +1710,79 @@ class TestSeededAssetsRead:
 
         with pytest.raises(ConnectionError):
             service.get_seeded_assets(b"\x11" * 32)
+
+
+class TestStaleLeashRetry:
+    @staticmethod
+    def _rpc_error():
+        from web3.exceptions import Web3RPCError
+
+        return Web3RPCError(
+            "{'code': -32000, 'message': 'invalid signed simulate call query: "
+            "base block not found'}"
+        )
+
+    def test_a_stale_leash_is_retried(self, test_db):
+        service, contract, _, _ = _make_service()
+        contract.functions.getSeededAssets.return_value.call.side_effect = [
+            self._rpc_error(), 100_000,
+        ]
+
+        with patch("src.services.earn.vault_service.time.sleep"):
+            assert service.get_seeded_assets(b"\x11" * 32) == 100_000
+
+    def test_it_gives_up_rather_than_retrying_forever(self, test_db):
+        from web3.exceptions import Web3RPCError
+
+        from src.services.earn.vault_service import READ_RETRY_ATTEMPTS
+
+        service, contract, _, _ = _make_service()
+        contract.functions.getSeededAssets.return_value.call.side_effect = [
+            self._rpc_error() for _ in range(READ_RETRY_ATTEMPTS)
+        ]
+
+        with patch("src.services.earn.vault_service.time.sleep"):
+            with pytest.raises(Web3RPCError):
+                service.get_seeded_assets(b"\x11" * 32)
+
+    def test_other_rpc_errors_are_not_retried(self, test_db):
+        from web3.exceptions import Web3RPCError
+
+        service, contract, _, _ = _make_service()
+        call = contract.functions.getSeededAssets.return_value.call
+        call.side_effect = Web3RPCError("{'code': -32000, 'message': 'out of gas'}")
+
+        with pytest.raises(Web3RPCError):
+            service.get_seeded_assets(b"\x11" * 32)
+        assert call.call_count == 1
+
+
+class TestSeedCache:
+    def test_repeated_reads_hit_the_contract_once(self, test_db):
+        service, contract, _, _ = _make_service()
+        call = contract.functions.getSeededAssets.return_value.call
+        call.return_value = 100_000
+
+        assert service.get_seeded_assets(b"\x11" * 32) == 100_000
+        assert service.get_seeded_assets(b"\x11" * 32) == 100_000
+
+        # Every extra signed query is another chance at a stale leash.
+        assert call.call_count == 1
+
+    def test_each_pool_is_cached_separately(self, test_db):
+        service, contract, _, _ = _make_service()
+        call = contract.functions.getSeededAssets.return_value.call
+        call.side_effect = [100_000, 250_000]
+
+        assert service.get_seeded_assets(b"\x11" * 32) == 100_000
+        assert service.get_seeded_assets(b"\x22" * 32) == 250_000
+
+    def test_the_money_paths_read_through(self, test_db):
+        service, contract, _, _ = _make_service()
+        call = contract.functions.getSeededAssets.return_value.call
+        call.side_effect = [100_000, 0]
+
+        service.get_seeded_assets(b"\x11" * 32)
+        # An operator can drop the seed at any moment, so anything that moves
+        # funds asks the chain rather than trusting a cached figure.
+        assert service.get_seeded_assets(b"\x11" * 32, fresh=True) == 0

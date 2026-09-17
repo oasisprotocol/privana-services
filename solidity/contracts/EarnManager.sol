@@ -38,7 +38,7 @@ contract EarnManager is
     /// -----------------------------------------------------------------------
 
     /// @notice Contract version, bumped on each upgrade for tracking/verification.
-    uint64 public constant VERSION = 1;
+    uint64 public constant VERSION = 2;
     
     /// @dev EIP-712 typehash for the user's withdraw consent message.
     /// The signer is recovered from the signature, so `user` is intentionally

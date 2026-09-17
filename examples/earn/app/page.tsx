@@ -2,7 +2,7 @@
 
 import { Component, useCallback, useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
-import { PrivanaButton, usePrivanaContext } from "@oasisprotocol/privana-sdk";
+import { WalletModal, usePrivanaContext } from "@oasisprotocol/privana-sdk";
 import { toast } from "sonner";
 import { useAccount, useConnect, useDisconnect } from "wagmi";
 
@@ -1048,15 +1048,18 @@ function WalletConnect() {
 }
 
 function PrivanaLauncher() {
+  const [open, setOpen] = useState(false);
   return (
-    <PrivanaButton
-      variant="default"
-      size="sm"
-      hideWhenDisconnected={false}
-      onDepositSuccess={() => toast.success("Deposit success", { description: "Funds en route" })}
-    >
-      Privana wallet
-    </PrivanaButton>
+    <>
+      <Button size="sm" onClick={() => setOpen(true)}>
+        Privana wallet
+      </Button>
+      <WalletModal
+        open={open}
+        onClose={() => setOpen(false)}
+        onDepositSuccess={() => toast.success("Deposit success", { description: "Funds en route" })}
+      />
+    </>
   );
 }
 

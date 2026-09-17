@@ -101,7 +101,7 @@ class TestQuoteRoute:
 
 
 class TestSwapRoute:
-    def _mock_swap(self, status="completed", tx_hash="0x" + "ff" * 32, error=None):
+    def _mock_swap(self, status="scheduled", tx_hash=None, error=None):
         return SwapRecord(
             id="swap-123",
             quote_id="quote-123",
@@ -117,10 +117,10 @@ class TestSwapRoute:
             updated_at=1000,
         )
 
-    async def test_returns_200_on_success(self, api_client):
+    async def test_returns_200_when_scheduled(self, api_client):
         with patch("src.api.swap.get_swap_executor") as mock_exec:
             executor = MagicMock()
-            executor.execute_swap = AsyncMock(return_value=self._mock_swap())
+            executor.schedule_swap = AsyncMock(return_value=self._mock_swap())
             mock_exec.return_value = executor
 
             r = await api_client.post("/v1/swap", json={
@@ -132,13 +132,14 @@ class TestSwapRoute:
             assert r.status_code == 200
             data = r.json()
             assert data["swap_id"] == "swap-123"
-            assert data["status"] == "completed"
-            assert data["tx_hash"].startswith("0x")
+            assert data["status"] == "scheduled"
+            assert data["tx_hash"] is None
+            assert data["message"] == "Swap scheduled"
 
     async def test_returns_400_on_expired_quote(self, api_client):
         with patch("src.api.swap.get_swap_executor") as mock_exec:
             executor = MagicMock()
-            executor.execute_swap = AsyncMock(side_effect=ValueError("Quote has expired"))
+            executor.schedule_swap = AsyncMock(side_effect=ValueError("Quote has expired"))
             mock_exec.return_value = executor
 
             r = await api_client.post("/v1/swap", json={
@@ -152,7 +153,7 @@ class TestSwapRoute:
     async def test_returns_500_on_unexpected_error(self, api_client):
         with patch("src.api.swap.get_swap_executor") as mock_exec:
             executor = MagicMock()
-            executor.execute_swap = AsyncMock(side_effect=RuntimeError("Sapphire unreachable"))
+            executor.schedule_swap = AsyncMock(side_effect=RuntimeError("Sapphire unreachable"))
             mock_exec.return_value = executor
 
             r = await api_client.post("/v1/swap", json={
@@ -166,7 +167,7 @@ class TestSwapRoute:
     async def test_message_reflects_status(self, api_client):
         with patch("src.api.swap.get_swap_executor") as mock_exec:
             executor = MagicMock()
-            executor.execute_swap = AsyncMock(
+            executor.schedule_swap = AsyncMock(
                 return_value=self._mock_swap(status="failed", tx_hash=None, error="reverted")
             )
             mock_exec.return_value = executor

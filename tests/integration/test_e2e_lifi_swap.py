@@ -1,6 +1,6 @@
 import asyncio
 from dataclasses import replace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 from eth_account import Account
 
@@ -85,7 +85,7 @@ def _stub_pipeline(settings, lifi_status="DONE"):
     from src.services.swap.lifi_pipeline import LifiSwapPipeline
 
     accounting = MagicMock()
-    accounting.get_transfer_nonce = AsyncMock(side_effect=[6, 70, 70, 70])
+    accounting.get_transfer_nonce = AsyncMock(side_effect=[6, 70, 71, 71])
     accounting.get_token_info = AsyncMock(side_effect=[FROM_INFO, TO_INFO, FROM_INFO])
     lifi = MagicMock()
     lifi.get_execution_quote = AsyncMock(return_value=EXEC_QUOTE)
@@ -118,18 +118,21 @@ def _stub_pipeline(settings, lifi_status="DONE"):
 
 def _stub_executor(settings):
     import src.services.swap.executor as se_mod
+    from src.services.swap.executor import SwapExecutor
 
-    with patch("src.services.swap.executor.get_accounting_client") as mock_acct, \
-         patch("src.services.swap.executor.get_sapphire_client"), \
-         patch("src.services.swap.executor.load_settings", return_value=settings):
-        mock_acct.return_value = MagicMock()
-        from src.services.swap.executor import SwapExecutor
-        executor = SwapExecutor()
+    executor = SwapExecutor()
+    executor.settings = replace(settings, lifi_execution_enabled=True)
     se_mod._executor_instance = executor
     return executor
 
 
 async def _drain_background(pipeline):
+    from src.services.swap.worker import SwapWorker
+
+    worker = SwapWorker()
+    worker.settings = replace(pipeline.settings, lifi_execution_enabled=True)
+    worker._pipeline = pipeline
+    await worker.run_lifi_once()
     while pipeline._tasks:
         await asyncio.gather(*list(pipeline._tasks), return_exceptions=True)
 
@@ -170,7 +173,7 @@ class TestLifiSwapEndToEnd:
         })
         assert swap_resp.status_code == 200
         body = swap_resp.json()
-        assert body["status"] == "executing"
+        assert body["status"] == "scheduled"
 
         await _drain_background(pipeline)
 
@@ -195,7 +198,8 @@ class TestLifiSwapEndToEnd:
             "quote_id": quote_id,
             "input_nonce": 5, "input_signature": _sign_input(settings),
         })
-        assert swap_resp.json()["status"] == "executing"
+        assert swap_resp.status_code == 200
+        assert swap_resp.json()["status"] == "scheduled"
 
         await _drain_background(pipeline)
 

@@ -1,3 +1,4 @@
+import asyncio
 import os
 
 import httpx
@@ -50,14 +51,32 @@ async def api_client():
 
     from src.main import app
     transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, timeout=120, base_url="http://test") as c:
-        yield c
+    from src.services.swap.worker import SwapWorker
+
+    worker = SwapWorker()
+    await worker.start()
+    try:
+        async with httpx.AsyncClient(transport=transport, timeout=120, base_url="http://test") as c:
+            yield c
+    finally:
+        await worker.stop()
 
     acct_mod._client_instance = None
     lifi_mod._client_instance = None
     saph_mod._client_instance = None
     qs_mod._service_instance = None
     se_mod._executor_instance = None
+
+
+async def _await_swap(api_client, swap_id):
+    for _ in range(120):
+        response = await api_client.get(f"/v1/swap/{swap_id}/status")
+        assert response.status_code == 200
+        status = response.json()
+        if status["status"] not in {"scheduled", "executing", "refunding"}:
+            return status
+        await asyncio.sleep(1)
+    pytest.fail("Swap did not settle in time")
 
 
 class TestHealthCheck:
@@ -154,12 +173,13 @@ class TestSwapEndpoint:
             "input_nonce": quote["transfer_nonce"],
             "input_signature": sig,
         })
-        assert r.status_code == 200
-        result = r.json()
+        assert r.status_code == 202
+        assert r.json()["status"] == "scheduled"
+        result = await _await_swap(api_client, r.json()["swap_id"])
         assert result["status"] == "completed"
-        assert result["tx_hash"] is not None
-        assert result["tx_hash"].startswith("0x")
-        print(f"\n  USDC→WETH swap tx: {result['tx_hash']}")
+        assert result["swap_tx_hash"] is not None
+        assert result["swap_tx_hash"].startswith("0x")
+        print(f"\n  USDC→WETH swap tx: {result['swap_tx_hash']}")
 
     @pytest.mark.skip(reason=_TOKENS_NOT_REGISTERED_REASON)
     async def test_swap_weth_to_usdc(self, api_client):
@@ -189,11 +209,12 @@ class TestSwapEndpoint:
             "input_nonce": quote["transfer_nonce"],
             "input_signature": sig,
         })
-        assert r.status_code == 200
-        result = r.json()
+        assert r.status_code == 202
+        assert r.json()["status"] == "scheduled"
+        result = await _await_swap(api_client, r.json()["swap_id"])
         assert result["status"] == "completed"
-        assert result["tx_hash"] is not None
-        print(f"\n  WETH→USDC swap tx: {result['tx_hash']}")
+        assert result["swap_tx_hash"] is not None
+        print(f"\n  WETH→USDC swap tx: {result['swap_tx_hash']}")
 
     async def test_expired_quote_returns_400(self, api_client):
         r = await api_client.post("/v1/swap", json={
@@ -249,11 +270,10 @@ class TestSwapStatus:
             "input_nonce": quote["transfer_nonce"],
             "input_signature": sig,
         })
+        assert r.status_code == 202
         swap = r.json()
-
-        r = await api_client.get(f"/v1/swap/{swap['swap_id']}/status")
-        assert r.status_code == 200
-        status = r.json()
+        assert swap["status"] == "scheduled"
+        status = await _await_swap(api_client, swap["swap_id"])
         assert status["swap_id"] == swap["swap_id"]
         assert status["status"] == "completed"
         assert status["swap_tx_hash"] is not None

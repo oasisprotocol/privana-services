@@ -72,9 +72,9 @@ cp .env.localnet .env
 
 | Contract | Address |
 |----------|---------|
-| SwapManager | `0x6a0a11Aa78c575e6C9CFD295104F36b3964991BC` |
-| EarnManager | `0x96e8fFdb9432f2A56CDeF0F9834E10A47ea029F9` |
-| Accounting (proxy) | `0xad3C76e4E621C0cfF7540479Ee9B0A945723A642` |
+| SwapManager | `0x032A3d6CaA0DAB4a877117fDFAaD3082e6F555C0` |
+| EarnManager | `0xE0CCdcC058d0534bFeA9cFb94f8c19F351B73988` |
+| Accounting (proxy) | `0x910CFfe4e8B27bc367F6E34D6D8e3C31DED68B6f` |
 
 ### Earn Pools
 

@@ -99,10 +99,9 @@ task('earn:pool:show')
       console.log('  totalShares:  ', pool.totalShares.toString());
       console.log('  totalAssets:  ', pool.totalAssets.toString());
       console.log('  active:       ', pool.active);
-      // Gated to the pool admin, so anyone else just does not see the line.
-      try {
-          console.log('  seededAssets: ', (await em.getSeededAssets(args.poolId)).toString());
-      } catch {}
+      // seededAssets is deliberately not here. It is gated to the pool admin,
+      // and reaching a gated view needs a signed query, which this client
+      // cannot make. The backend reads it as the admin.
       console.log('Accounting:     ', await em.accounting());
       console.log('Pool admin:     ', await em.poolAdmin());
       console.log('Owner:          ', await em.owner());
@@ -173,14 +172,13 @@ task('earn:pool:seed')
       }
 
       // The pool can only be seeded with principal it actually holds, and
-      // what it holds is totalAssets plus whatever is already recorded as
-      // seed. Deposit first, let the backend pick it up, then record.
-      const seeded = await em.getSeededAssets(args.poolId);
+      // totalAssets is what it holds that is not already recorded as seed.
+      // Deposit first, let the backend pick it up, then record.
       if (amount > pool.totalAssets) {
           throw new Error(
-              `pool holds ${(pool.totalAssets + seeded).toString()} (${pool.totalAssets.toString()} ` +
-              `unseeded), cannot record ${amount.toString()} more as seed. Pay the principal in ` +
-              `first and wait for the backend to pick it up.`,
+              `pool holds ${pool.totalAssets.toString()} that is not already seed, cannot record ` +
+              `${amount.toString()} more. Pay the principal in first and wait for the backend ` +
+              `to pick it up.`,
           );
       }
 
@@ -192,7 +190,6 @@ task('earn:pool:seed')
           console.log('                ', await describeToken(hre.network.name, pool.tokenId));
       } catch {}
       console.log('  totalAssets:  ', pool.totalAssets.toString());
-      console.log('  seededAssets: ', seeded.toString());
       console.log('Recording:      ', amount.toString());
 
       const tx = await em.seedLiquidity(args.poolId, amount);
@@ -200,7 +197,6 @@ task('earn:pool:seed')
       await tx.wait();
 
       const after = await em.pools(args.poolId);
-      console.log('  seededAssets: ', (await em.getSeededAssets(args.poolId)).toString());
       console.log('  totalShares:  ', after.totalShares.toString(), '(unchanged: seed mints none)');
       console.log('  totalAssets:  ', after.totalAssets.toString());
   });
@@ -221,22 +217,17 @@ task('earn:pool:unseed')
           throw new Error(`Pool ${args.poolId} does not exist on this EarnManager`);
       }
 
-      const seeded = await em.getSeededAssets(args.poolId);
-      if (amount > seeded) {
-          throw new Error(`pool records ${seeded.toString()} of seed, cannot drop ${amount.toString()}`);
-      }
-
       console.log('EarnManager:    ', args.earnManagerAddress);
       console.log('Pool ID:        ', args.poolId);
       console.log('  poolAddress:  ', pool.poolAddress);
-      console.log('  seededAssets: ', seeded.toString());
       console.log('Dropping:       ', amount.toString());
+      // How much is on record is not readable from here, so dropping more
+      // than there is reverts as SeedBelowZero rather than failing early.
 
       const tx = await em.unseedLiquidity(args.poolId, amount);
       console.log('unseedLiquidity tx:', tx.hash);
       await tx.wait();
 
-      console.log('  seededAssets: ', (await em.getSeededAssets(args.poolId)).toString());
       console.log();
       console.log('Now withdraw the principal from the pool account with the Earn pool key.');
   });

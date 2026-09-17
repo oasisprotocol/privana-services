@@ -656,6 +656,47 @@ class VaultService:
                 "error": None,
             }
 
+    async def deploy_idle(self, pool_id_hex: str) -> int:
+        """Move whatever is sitting in the pool's accounting balance into the
+        pool's strategy, and return how much moved.
+
+        Seed principal is paid into the pool account from outside and then
+        recorded, so it arrives idle and earns nothing until it is deployed.
+        The same is true of a deposit whose routing failed and of a reclaim
+        left over from a withdrawal that reverted, so this deploys the whole
+        idle balance rather than tracking which part is which.
+
+        Net assets do not change: the funds move from one side of the backing
+        figure to the other. The lock is what makes that safe, since it holds
+        across the whole bridge, so no deposit or withdrawal can read the
+        balance while the funds are in flight and no withdrawal can have its
+        reclaim deployed out from under it.
+        """
+        strategy = self._registry.get(pool_id_hex)
+        if strategy.name == "manual":
+            return 0
+
+        async with self._pools_tx_lock:
+            idle = await strategy.idle_assets()
+            minimum = await strategy.min_deploy_amount()
+            if idle <= 0 or idle < minimum:
+                return 0
+            if not await strategy.is_healthy():
+                logger.info(
+                    "Idle deploy pool=%s: %d idle but the strategy is unhealthy; leaving it",
+                    pool_id_hex, idle,
+                )
+                return 0
+
+            logger.info("Idle deploy pool=%s: routing %d into %s",
+                        pool_id_hex, idle, strategy.name)
+            await self._route_to_strategy(pool_id_hex, idle)
+            # Backing is unchanged, but totalAssets is written from a reading
+            # taken before the move, so refresh it while the lock still
+            # guarantees nothing else is mid-flight.
+            await self.sync_total_assets(pool_id_hex)
+            return idle
+
     async def effective_total_assets(self, pool_id_hex: str, on_chain_total: int) -> int:
         """Live AUM for a pool, derived from the strategy when available.
 

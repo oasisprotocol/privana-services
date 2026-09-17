@@ -703,3 +703,19 @@ async def test_bridge_raises_after_max_poll_attempts(midas_client, privana) -> N
         await strategy.deposit_to_earn(1_000_000)
 
     midas_client.deposit_instant.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_min_deploy_amount_rounds_the_vault_floor_up(strategy, midas_client) -> None:
+    # The issuance vault states its floor in Midas base-18; rounding down
+    # would hand it an amount just under its own minimum.
+    midas_client.get_issuance_min_amount.return_value = 1_500_000_000_000_000_000
+
+    assert await strategy.min_deploy_amount() == 1_500_000
+
+
+@pytest.mark.asyncio
+async def test_min_deploy_amount_never_rounds_to_below_the_floor(strategy, midas_client) -> None:
+    midas_client.get_issuance_min_amount.return_value = 1_000_000_000_001
+
+    assert await strategy.min_deploy_amount() == 2

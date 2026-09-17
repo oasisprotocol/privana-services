@@ -406,6 +406,14 @@ class MidasStrategy(BaseStrategy):
             self._pool_address, self._token_id, realized_usdc,
         )
 
+    async def min_deploy_amount(self) -> int:
+        """The issuance vault's own minimum, converted from Midas base-18 to
+        token units and rounded up so the converted figure never lands just
+        under the vault's floor.
+        """
+        base18 = await asyncio.to_thread(self._client.get_issuance_min_amount)
+        return -(-base18 // _BASE18_SCALE)
+
     async def total_assets(self) -> int:
         """Live AUM held by the pool address, in USDC base units. mTBILL
         balance times the oracle price. Returns 0 when the pool holds no

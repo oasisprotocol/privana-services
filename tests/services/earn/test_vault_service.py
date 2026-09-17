@@ -1608,3 +1608,76 @@ class TestSeedAwareQuotesAndExits:
         # Users must always be able to leave a pool with no senior claim on it.
         assert result["status"] == "completed"
         strategy.withdraw_from_earn.assert_awaited_once_with(10)
+
+
+class TestDeployIdle:
+    @staticmethod
+    def _service(*, idle, minimum=0, healthy=True, name="midas-mtbill"):
+        from src.services.earn.registry import StrategyRegistry
+
+        registry = StrategyRegistry()
+        strategy = MagicMock()
+        strategy.name = name
+        strategy.idle_assets = AsyncMock(return_value=idle)
+        strategy.min_deploy_amount = AsyncMock(return_value=minimum)
+        strategy.is_healthy = AsyncMock(return_value=healthy)
+        strategy.total_assets = AsyncMock(return_value=1000)
+        strategy.deposit_to_earn = AsyncMock()
+        registry.register(POOL_ID_HEX, strategy)
+
+        service, contract, sapphire, _ = _make_service(registry=registry)
+        contract.functions.pools.return_value.call.return_value = (
+            bytes.fromhex(USDC_TOKEN_ID[2:]),
+            POOL_ADDRESS,
+            1000, 1000, True,
+        )
+        contract.functions.getSeededAssets.return_value.call.return_value = 0
+        return service, strategy
+
+    async def test_routes_the_whole_idle_balance(self, test_db):
+        service, strategy = self._service(idle=100_000)
+
+        assert await service.deploy_idle(POOL_ID_HEX) == 100_000
+
+        strategy.deposit_to_earn.assert_awaited_once_with(100_000)
+
+    async def test_holds_the_pool_lock_across_the_bridge(self, test_db):
+        service, strategy = self._service(idle=100_000)
+        held = []
+        strategy.deposit_to_earn = AsyncMock(
+            side_effect=lambda _a: held.append(service._pools_tx_lock.locked())
+        )
+
+        await service.deploy_idle(POOL_ID_HEX)
+
+        # A withdrawal's reclaim must not be deployed out from under it.
+        assert held == [True]
+        assert not service._pools_tx_lock.locked()
+
+    async def test_does_nothing_when_there_is_nothing_idle(self, test_db):
+        service, strategy = self._service(idle=0)
+
+        assert await service.deploy_idle(POOL_ID_HEX) == 0
+
+        strategy.deposit_to_earn.assert_not_awaited()
+
+    async def test_leaves_amounts_below_the_protocol_minimum(self, test_db):
+        service, strategy = self._service(idle=500_000, minimum=1_000_000)
+
+        assert await service.deploy_idle(POOL_ID_HEX) == 0
+
+        strategy.deposit_to_earn.assert_not_awaited()
+
+    async def test_leaves_the_funds_when_the_strategy_is_unhealthy(self, test_db):
+        service, strategy = self._service(idle=100_000, healthy=False)
+
+        assert await service.deploy_idle(POOL_ID_HEX) == 0
+
+        strategy.deposit_to_earn.assert_not_awaited()
+
+    async def test_manual_pools_have_nothing_to_deploy_into(self, test_db):
+        service, strategy = self._service(idle=100_000, name="manual")
+
+        assert await service.deploy_idle(POOL_ID_HEX) == 0
+
+        strategy.deposit_to_earn.assert_not_awaited()

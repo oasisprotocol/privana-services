@@ -31,8 +31,10 @@ class Settings:
     lifi_token_map: str
 
     base_rpc_url: str
+    ethereum_rpc_url: str
     aave_pool_address: str
     aave_pool_assets: str
+    midas_chain_id: int
     midas_issuance_vault_address: str
     midas_redemption_vault_address: str
     midas_mtbill_token_address: str

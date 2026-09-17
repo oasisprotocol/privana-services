@@ -31,14 +31,16 @@ cp .env.localnet .env
 | `SAPPHIRE_RPC_URL`               | Sapphire RPC endpoint                                                                                     |
 | `SAPPHIRE_RPC_HEADERS`           | Optional JSON object of extra headers sent to `SAPPHIRE_RPC_URL` (e.g. '{"Authorization": "Bearer xyz"}') |
 | `BASE_RPC_URL`                   | RPC for the Base chain this deployment runs on. Used by Earn                                              |
+| `ETHEREUM_RPC_URL`               | RPC for Ethereum mainnet. Used by Earn strategies configured for chain 1                                  |
 | `LIQUIDITY_PROVIDER_SECRET_KEY`  | LP wallet secret key used for Swap pools.                                                                 |
 | `EARN_POOL_SECRET_KEY`           | Secret key for moving assets to/from Earn providers. Must be differ from `LIQUIDITY_PROVIDER_SECRET_KEY`  |
 | `AAVE_POOL_ADDRESS`              | Aave V3 `Pool` on the chain `BASE_RPC_URL` points at                                                      |
 | `AAVE_POOL_ASSETS`               | JSON map of `pool_id -> {token_id, asset_address}` registering Aave strategies at startup                 |
-| `MIDAS_ISSUANCE_VAULT_ADDRESS`   | Midas Issuance Vault proxy on Base mainnet (defaults to the canonical deployment)                         |
-| `MIDAS_REDEMPTION_VAULT_ADDRESS` | Midas Instant Redemption Vault proxy on Base mainnet                                                      |
-| `MIDAS_MTBILL_TOKEN_ADDRESS`     | mTBILL ERC20 on Base mainnet                                                                              |
-| `MIDAS_ORACLE_ADDRESS`           | Chronicle MTBILL/USD price oracle on Base mainnet                                                         |
+| `MIDAS_CHAIN_ID`                 | Chain the Midas vaults are read from: `1` Ethereum (default) or `8453` Base. Picks which RPC is dialed    |
+| `MIDAS_ISSUANCE_VAULT_ADDRESS`   | Midas Issuance Vault proxy on `MIDAS_CHAIN_ID` (defaults to the canonical deployment)                     |
+| `MIDAS_REDEMPTION_VAULT_ADDRESS` | Midas Instant Redemption Vault proxy on `MIDAS_CHAIN_ID`                                                  |
+| `MIDAS_MTBILL_TOKEN_ADDRESS`     | mTBILL ERC20 on `MIDAS_CHAIN_ID`                                                                          |
+| `MIDAS_ORACLE_ADDRESS`           | Chronicle MTBILL/USD price oracle on `MIDAS_CHAIN_ID`                                                     |
 | `MIDAS_DEFAULT_SLIPPAGE_BPS`     | Slippage tolerance on `depositInstant` / `redeemInstant` (default 50 = 0.5%)                              |
 | `MIDAS_ORACLE_HEARTBEAT_SEC`     | Max oracle staleness before `is_healthy()` refuses routing (default 86400 = 24h; checked against 2× this) |
 | `MIDAS_APY_BPS`                  | Admin-managed display APY for Midas pools (default 350 = 3.5%); display only, not routing                 |
@@ -175,9 +177,28 @@ bun install
 bun run test
 ```
 
-Pool registration script (one-shot, calls `EarnManager.createPool` against the deployed manager — already executed on Sapphire testnet):
+Deployment and management are exposed as Hardhat tasks (run `bun run hardhat` for the full list). Common ones:
 
 ```bash
 cd solidity
-bun run hardhat run scripts/create-aave-usdc-pool.ts --network sapphire-localnet
+
+# Deploy both managers
+bun run hardhat deploy  --accounting-address <addr> --pool-admin-address <addr> --lp-address <addr> --network sapphire-testnet
+
+# Upgrade both managers (skips the upgrade when the on-chain VERSION already matches)
+# Add --output-safe <file> to any upgrade task to write a Safe Transaction Builder JSON instead of submitting the tx
+bun run hardhat upgrade:earn --earn-manager-address <addr> --network sapphire-testnet
+bun run hardhat upgrade:swap --swap-manager-address <addr> --network sapphire-testnet
+
+# Register a pool (calls EarnManager.createPool; poolId accepts a <strategy>-<asset>-<chain> name or a 32-byte hex id)
+bun run hardhat earn:pool:create --earn-manager-address <addr> --pool-id aave-usdc-base-sepolia --token-id <tokenId> --lp-address <addr> --network sapphire-testnet
+
+# Inspect a deployed proxy (implementation, owner, pool list, LP) or a single pool's state
+bun run hardhat show <proxyAddress> --network sapphire-testnet
+bun run hardhat earn:pool:show aave-usdc-base-sepolia --earn-manager-address <addr> --network sapphire-testnet
+
+# Admin setters
+bun run hardhat earn:setPoolAdmin  --earn-manager-address <addr> --pool-admin-address <addr> --network sapphire-testnet
+bun run hardhat earn:setAccounting --earn-manager-address <addr> --accounting-address <addr> --network sapphire-testnet
+bun run hardhat swap:setLpAddress  --swap-manager-address <addr> --lp-address <addr> --network sapphire-testnet
 ```

@@ -6,6 +6,7 @@ import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@oasisprotocol/sapphire-contracts/contracts/UPUPSUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/utils/cryptography/EIP712Upgradeable.sol";
 import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+import "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
 import "./interfaces/IAccounting.sol";
 
 /// @title EarnManager (UPUPS upgradeable)
@@ -148,6 +149,68 @@ contract EarnManager is
         __EIP712_init("EarnManager", "1");
         accounting = IAccounting(_accounting);
         poolAdmin = _poolAdmin;
+    }
+
+    /// @notice EIP-712 domain typehash carrying the chain in `salt` instead of `chainId`.
+    /// Wallets refuse eth_signTypedData_v4 when domain.chainId differs from
+    /// their connected network; they do not validate `salt`, so consents can
+    /// be signed from any network while the domain separator still differs
+    /// per chain and signatures cannot replay across deployments.
+    bytes32 private constant SALTED_DOMAIN_TYPEHASH =
+        keccak256("EIP712Domain(string name,string version,address verifyingContract,bytes32 salt)");
+
+    /// @notice keccak256 of the domain name; must stay in sync with __EIP712_init above
+    bytes32 private constant DOMAIN_NAME_HASH = keccak256(bytes("EarnManager"));
+
+    /// @notice keccak256 of the domain version; must stay in sync with __EIP712_init above
+    bytes32 private constant DOMAIN_VERSION_HASH = keccak256(bytes("1"));
+
+    function _saltedDomainSeparator() private view returns (bytes32) {
+        return keccak256(
+            abi.encode(
+                SALTED_DOMAIN_TYPEHASH,
+                DOMAIN_NAME_HASH,
+                DOMAIN_VERSION_HASH,
+                address(this),
+                bytes32(block.chainid)
+            )
+        );
+    }
+
+    /// @dev Replaces OZ's domain separator, which puts `block.chainid` in the
+    /// `chainId` field wallets validate; ours carries it in `salt`, which
+    /// they do not.
+    function _hashTypedDataV4(bytes32 structHash) internal view override returns (bytes32) {
+        return MessageHashUtils.toTypedDataHash(_saltedDomainSeparator(), structHash);
+    }
+
+    /// @notice ERC-5267 domain introspection, reporting the salted domain.
+    /// @dev Fields bitmap 0x1b: name (0x01), version (0x02), verifyingContract
+    /// (0x08) and salt (0x10), no chainId (0x04) — must describe exactly what
+    /// `_hashTypedDataV4` verifies.
+    function eip712Domain()
+        public
+        view
+        override
+        returns (
+            bytes1 fields,
+            string memory name,
+            string memory version,
+            uint256 chainId,
+            address verifyingContract,
+            bytes32 salt,
+            uint256[] memory extensions
+        )
+    {
+        return (
+            hex"1b",
+            "EarnManager",
+            "1",
+            0,
+            address(this),
+            bytes32(block.chainid),
+            new uint256[](0)
+        );
     }
 
     /// -----------------------------------------------------------------------

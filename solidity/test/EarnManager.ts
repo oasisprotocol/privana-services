@@ -57,7 +57,14 @@ describe('EarnManager', function () {
   ): Promise<string> {
     const verifyingContract = await earnManager.getAddress();
     const { chainId } = await ethers.provider.getNetwork();
-    const domain = { name: 'EarnManager', version: '1', chainId, verifyingContract };
+    // Salted domain: the chain binding rides in `salt` (bytes32 of the chain
+    // id), which wallets do not validate against the connected network.
+    const domain = {
+      name: 'EarnManager',
+      version: '1',
+      verifyingContract,
+      salt: ethers.zeroPadValue(ethers.toBeHex(chainId), 32),
+    };
     const value = { poolId, amount, nonce };
     return signer.signTypedData(domain, WITHDRAW_TYPES, value);
   }

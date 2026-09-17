@@ -220,65 +220,46 @@ contract EarnManager is
         pool.totalAssets = newTotalAssets;
     }
 
-    /// @notice Move protocol-owned principal into a pool without minting any
-    /// shares against it.
+    /// @notice Record protocol-owned principal that has been paid into the
+    /// pool's account.
     ///
-    /// The funds land in the pool's accounting balance like any deposit, so
-    /// they back redemptions and earn in the pool's strategy. They are
-    /// recorded in `seededAssets` rather than `totalAssets`, which is what
-    /// keeps them out of every share's claim: the off-chain valuation writes
+    /// Bookkeeping only: the funds are moved separately, by whoever holds the
+    /// pool account's key, through the ordinary accounting deposit flow. This
+    /// call just says how much of the pool's balance is the protocol's rather
+    /// than its users'. The off-chain valuation writes
     /// `totalAssets = backing - seededAssets`, so the yield this principal
     /// earns raises the share price while the principal itself never does.
-    /// @param poolId Earn pool receiving the seed.
-    /// @param amount Principal to move in.
-    /// @param nonce Accounting transfer nonce for the seeder recovered from
-    /// `signature`.
-    /// @param signature Seeder's EIP-712 ``Transfer(seeder, pool, ...)`` in
-    /// the accounting domain. Accounting recovers the payer from it, so the
-    /// funds come from whoever signed, never from an account this call names.
-    function seedLiquidity(
-        bytes32 poolId,
-        uint256 amount,
-        uint256 nonce,
-        bytes calldata signature
-    ) external onlyPoolAdmin {
-        Pool storage pool = pools[poolId];
-        if (pool.poolAddress == address(0)) revert PoolNotFound();
+    ///
+    /// Record it after the deposit has landed. Recording principal the pool
+    /// does not hold understates what backs the shares until it arrives.
+    /// @param poolId Earn pool the principal was paid into.
+    /// @param amount Principal to add to the record.
+    function seedLiquidity(bytes32 poolId, uint256 amount) external onlyPoolAdmin {
+        if (pools[poolId].poolAddress == address(0)) revert PoolNotFound();
         if (amount == 0) revert ZeroAmount();
 
-        accounting.transferBalance(pool.poolAddress, pool.tokenId, amount, nonce, signature);
         _seedStorage().seededAssets[poolId] += amount;
     }
 
-    /// @notice Return protocol-owned principal from a pool to `toAddress`.
+    /// @notice Drop protocol-owned principal from the record, before taking
+    /// it back out of the pool's account.
     ///
-    /// Reverts rather than dipping into user-backed assets: a pool can only
-    /// give back what it was seeded. Note this does not verify the funds are
-    /// liquid right now. The caller reclaims from the strategy first, and
-    /// only calls this once the pool's accounting balance actually holds the
-    /// amount, otherwise the accounting transfer reverts on its own.
-    /// @param poolId Earn pool to unseed.
-    /// @param toAddress Account receiving the principal.
-    /// @param amount Principal to move out.
-    /// @param nonce Accounting transfer nonce for the pool's outbound transfer.
-    /// @param signature Pool's EIP-712 ``Transfer(pool, toAddress, ...)``.
-    function unseedLiquidity(
-        bytes32 poolId,
-        address toAddress,
-        uint256 amount,
-        uint256 nonce,
-        bytes calldata signature
-    ) external onlyPoolAdmin {
-        Pool storage pool = pools[poolId];
-        if (pool.poolAddress == address(0)) revert PoolNotFound();
+    /// The mirror of `seedLiquidity`, and bookkeeping only for the same
+    /// reason. Reverts rather than dipping into user-backed assets: a pool
+    /// can only give back what it was seeded.
+    ///
+    /// Drop the record before withdrawing, not after. Between the two the
+    /// pool holds principal it no longer counts as the protocol's, which
+    /// reads as user assets; the other order reads as a loss.
+    /// @param poolId Earn pool the principal is leaving.
+    /// @param amount Principal to remove from the record.
+    function unseedLiquidity(bytes32 poolId, uint256 amount) external onlyPoolAdmin {
+        if (pools[poolId].poolAddress == address(0)) revert PoolNotFound();
         if (amount == 0) revert ZeroAmount();
-        if (toAddress == address(0)) revert ZeroAddress();
 
         SeedStorage storage $ = _seedStorage();
         if ($.seededAssets[poolId] < amount) revert SeedBelowZero();
         $.seededAssets[poolId] -= amount;
-
-        accounting.transferBalance(toAddress, pool.tokenId, amount, nonce, signature);
     }
 
     /// @notice Overwrite the recorded protocol-owned principal without

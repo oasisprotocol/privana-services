@@ -1,4 +1,5 @@
 import { privateKeyToAccount } from "viem/accounts";
+import { pad, toHex } from "viem";
 import type { Address, Hex } from "viem";
 
 import { env } from "./env";
@@ -34,8 +35,8 @@ export const signTransfer = async (params: {
     domain: {
       name: "AccountingModule",
       version: "1",
-      chainId: env.accountingChainId,
-      verifyingContract: env.accountingContract
+      verifyingContract: env.accountingContract,
+      salt: pad(toHex(env.accountingChainId), { size: 32 })
     },
     types: TRANSFER_TYPES,
     primaryType: "Transfer",
@@ -64,8 +65,8 @@ export const signWithdrawConsent = async (params: {
     domain: {
       name: "EarnManager",
       version: "1",
-      chainId: env.accountingChainId,
-      verifyingContract: env.earnManagerContract
+      verifyingContract: env.earnManagerContract,
+      salt: pad(toHex(env.accountingChainId), { size: 32 })
     },
     types: WITHDRAW_TYPES,
     primaryType: "Withdraw",

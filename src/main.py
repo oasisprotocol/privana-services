@@ -1,4 +1,3 @@
-import asyncio
 import logging
 from contextlib import asynccontextmanager
 
@@ -91,10 +90,10 @@ async def lifespan(_app: FastAPI):
     except Exception:
         logger.exception("Midas strategy registration failed; affected pools fall back to manual")
 
-    if settings.lifi_execution_enabled:
-        from src.services.swap.lifi_pipeline import recover_inflight_lifi_swaps
+    from src.services.swap.worker import get_swap_worker
 
-        asyncio.create_task(recover_inflight_lifi_swaps())
+    swap_worker = get_swap_worker()
+    await swap_worker.start()
 
     try:
         await get_price_sampler().start()
@@ -106,7 +105,10 @@ async def lifespan(_app: FastAPI):
     except Exception:
         logger.exception("Pool rate sampler failed to start; no earn rate history will be recorded")
 
-    yield
+    try:
+        yield
+    finally:
+        await swap_worker.stop()
 
     try:
         await get_price_sampler().stop()

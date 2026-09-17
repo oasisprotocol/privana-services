@@ -1,7 +1,6 @@
 import asyncio
 import logging
 import time
-import uuid
 from typing import Any, Awaitable, Callable, Optional
 
 from privana.types import TransferFundsRequest
@@ -17,20 +16,19 @@ from src.core.fees import calculate_fee
 from src.core.validation import sanitize_error
 from src.models.swap import LifiSwapStep, SwapRecord, SwapStatus, SwapVenue
 from src.services.swap.bridge import AccountingBridge
+from src.services.swap.worker import lp_transfer_lock
 
 logger = logging.getLogger(__name__)
 
 ACCEPTED_SUBMISSION_STATUSES = {"submitted", "pending", "accepted"}
 LIFI_STATUS_DONE = "DONE"
 LIFI_STATUS_FAILED = "FAILED"
-STATUS_POLL_INTERVAL_SEC = 10.0
+STATUS_POLL_INTERVAL_SEC = 6.0
 MAX_STATUS_POLLS = 720
 MAX_INPUT_CONFIRM_POLLS = 60
 CREDIT_MAX_RETRIES = 20
 DEPOSIT_MAX_RETRIES = 10
 REFUND_BALANCE_POLLS = 30
-
-lp_transfer_lock = asyncio.Lock()
 
 
 class LifiSwapPipeline:
@@ -55,12 +53,12 @@ class LifiSwapPipeline:
         self._tasks: set[asyncio.Task] = set()
 
     async def launch(
-        self, quote: dict, user_address: str, input_nonce: int, input_signature: str
+        self, quote: dict, user_address: str, input_nonce: int, input_signature: str,
+        swap_id: str,
     ) -> SwapRecord:
-        swap_id = self._insert_swap(quote, user_address)
         try:
             await self._submit_input(quote, input_nonce, input_signature)
-        except ValueError as exc:
+        except Exception as exc:
             self._update_swap(
                 swap_id, status=SwapStatus.FAILED.value, error=sanitize_error(str(exc))
             )
@@ -287,54 +285,57 @@ class LifiSwapPipeline:
 
     async def _lp_transfer(self, to_address: str, token_id: str, amount: int) -> None:
         client = await self._privana_factory()
+        # Waiting for internal settlement does not consume payout retries.
+        while True:
+            async with lp_transfer_lock:
+                # A receipt timeout leaves internal transactions executing.
+                # Do not reuse their reserved ledger nonces after their worker
+                # has released the lock to retry receipt lookup later.
+                unresolved = get_db().execute(
+                    "SELECT 1 FROM swaps WHERE venue = 'internal' "
+                    "AND status = 'executing' AND output_signature IS NOT NULL LIMIT 1"
+                ).fetchone()
+                if not unresolved:
+                    return await self._submit_lp_transfer(client, to_address, token_id, amount)
+            await asyncio.sleep(self._poll_interval_sec)
+
+    async def _submit_lp_transfer(self, client, to_address: str, token_id: str, amount: int) -> None:
+        # Caller owns lp_transfer_lock through acceptance AND confirmation.
         last_detail = None
         for _ in range(self._credit_max_retries):
-            async with lp_transfer_lock:
-                lp_nonce = await self.accounting.get_transfer_nonce(
-                    self.settings.liquidity_provider_address
-                )
-                signature = sign_transfer(
-                    private_key=self.settings.liquidity_provider_secret_key,
-                    chain_id=self.settings.accounting_chain_id,
-                    verifying_contract=self.settings.accounting_contract_address,
+            lp_nonce = await self.accounting.get_transfer_nonce(
+                self.settings.liquidity_provider_address
+            )
+            signature = sign_transfer(
+                private_key=self.settings.liquidity_provider_secret_key,
+                chain_id=self.settings.accounting_chain_id,
+                verifying_contract=self.settings.accounting_contract_address,
+                to_address=to_address,
+                token_id=token_id,
+                amount=amount,
+                nonce=lp_nonce,
+            )
+            submission = await client.transfer_funds(
+                TransferFundsRequest(
                     to_address=to_address,
                     token_id=token_id,
                     amount=amount,
                     nonce=lp_nonce,
+                    signature=signature,
                 )
-                submission = await client.transfer_funds(
-                    TransferFundsRequest(
-                        to_address=to_address,
-                        token_id=token_id,
-                        amount=amount,
-                        nonce=lp_nonce,
-                        signature=signature,
-                    )
-                )
+            )
             if submission.status in ACCEPTED_SUBMISSION_STATUSES:
-                return
+                for _ in range(MAX_INPUT_CONFIRM_POLLS):
+                    current = await self.accounting.get_transfer_nonce(
+                        self.settings.liquidity_provider_address
+                    )
+                    if current > lp_nonce:
+                        return
+                    await asyncio.sleep(self._poll_interval_sec)
+                raise RuntimeError("LP transfer not confirmed on ledger")
             last_detail = submission.detail
             await asyncio.sleep(self._poll_interval_sec)
         raise RuntimeError(f"credit retries exhausted: {last_detail}")
-
-    def _insert_swap(self, quote: dict, user_address: str) -> str:
-        swap_id = str(uuid.uuid4())
-        now = int(time.time())
-        db = get_db()
-        db_write(
-            db,
-            """INSERT INTO swaps
-               (id, quote_id, user_address, from_token_id, to_token_id,
-                from_amount, to_amount_estimate, status, venue, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                swap_id, quote["id"], user_address.lower(),
-                quote["from_token_id"], quote["to_token_id"],
-                quote["from_amount"], quote["to_amount_estimate"],
-                SwapStatus.PENDING.value, SwapVenue.LIFI.value, now, now,
-            ),
-        )
-        return swap_id
 
     def _update_swap(self, swap_id: str, **fields) -> None:
         db = get_db()
@@ -355,10 +356,9 @@ async def recover_inflight_lifi_swaps(pipeline: Optional[LifiSwapPipeline] = Non
     db = get_db()
     rows = db.execute(
         """SELECT * FROM swaps
-           WHERE venue = ? AND status IN (?, ?, ?)""",
+           WHERE venue = ? AND status IN (?, ?)""",
         (
             SwapVenue.LIFI.value,
-            SwapStatus.PENDING.value,
             SwapStatus.EXECUTING.value,
             SwapStatus.REFUNDING.value,
         ),

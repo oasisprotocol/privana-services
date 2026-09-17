@@ -39,7 +39,7 @@ MIGRATIONS = [
         from_amount TEXT NOT NULL,
         to_amount_estimate TEXT NOT NULL,
         to_amount_actual TEXT,
-        status TEXT NOT NULL DEFAULT 'pending',
+        status TEXT NOT NULL DEFAULT 'scheduled',
         swap_tx_hash TEXT,
         error TEXT,
         created_at INTEGER NOT NULL,
@@ -127,6 +127,10 @@ MIGRATIONS = [
     "ON earn_transactions(LOWER(pool_id), user_address);",
     "CREATE INDEX IF NOT EXISTS idx_earn_tx_pool_signer "
     "ON earn_transactions(LOWER(pool_id), consent_signer);",
+    "ALTER TABLE swaps ADD COLUMN input_nonce TEXT;",
+    "ALTER TABLE swaps ADD COLUMN input_signature TEXT;",
+    "UPDATE swaps SET status = 'executing' WHERE status = 'pending';",
+
 ]
 
 

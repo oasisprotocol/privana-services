@@ -7,7 +7,7 @@ from pydantic import BaseModel
 
 
 class SwapStatus(str, Enum):
-    PENDING = "pending"
+    SCHEDULED = "scheduled"
     EXECUTING = "executing"
     COMPLETED = "completed"
     FAILED = "failed"

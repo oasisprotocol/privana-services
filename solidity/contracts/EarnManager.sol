@@ -136,6 +136,7 @@ contract EarnManager is
     error InvalidWithdrawSignature();
     error NotPoolAdmin();
     error SeedBelowZero();
+    error SeedBaselineNotRolled();
 
     /// -----------------------------------------------------------------------
     /// Modifiers
@@ -328,6 +329,18 @@ contract EarnManager is
         Pool storage pool = pools[poolId];
         if (!pool.active) revert PoolNotActive();
         if (amount == 0) revert ZeroAmount();
+
+        /// @dev Yield a seed earns before anyone holds shares belongs to the
+        /// seed, and only the off-chain valuation knows how much that is: it
+        /// rolls the figure into the baseline and leaves `totalAssets` at
+        /// zero. A direct first deposit would skip that and take the accrued
+        /// yield with it, so while a seeded pool has no shares the first
+        /// deposit has to come through the service.
+        if (
+            pool.totalShares == 0 &&
+            _seedStorage().seededAssets[poolId] > 0 &&
+            msg.sender != poolAdmin
+        ) revert SeedBaselineNotRolled();
 
         // Accounting recovers the sender (here: ``toUser``) from the EIP-712
         // Transfer signature. Passing only the destination keeps the

@@ -153,6 +153,11 @@
     },
     {
       "inputs": [],
+      "name": "SeedBaselineNotRolled",
+      "type": "error"
+    },
+    {
+      "inputs": [],
       "name": "SeedBelowZero",
       "type": "error"
     },

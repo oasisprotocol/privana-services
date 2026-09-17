@@ -162,6 +162,8 @@ class TestGetQuote:
             fee_bps=10,
             quote_ttl=30,
             liquidity_provider_address="0x152E6a7125665764a4F1F1df80E8f5D49Bf0239c",
+            # LiFi needs to be disabled for unit tests.
+            lifi_execution_enabled=False,
         )
         service._last_cleanup = 0
         service._token_map = {}

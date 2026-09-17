@@ -215,10 +215,12 @@ class VaultService:
         pool_id = bytes.fromhex(pool_id_hex.removeprefix("0x"))
         amount_int = int(amount)
 
-        pool, shares_estimate, strategy_aum, transfer_nonce = await asyncio.gather(
+        pool, shares_estimate, strategy_aum, idle, seeded, transfer_nonce = await asyncio.gather(
             asyncio.to_thread(self.get_pool, pool_id),
             asyncio.to_thread(self.convert_to_shares, pool_id, amount_int),
             self._strategy_total_assets_safe(pool_id_hex),
+            self._strategy_idle_assets_safe(pool_id_hex),
+            asyncio.to_thread(self.get_seeded_assets, pool_id),
             self.accounting.get_transfer_nonce(user_address),
         )
 
@@ -227,8 +229,14 @@ class VaultService:
         if not pool["active"]:
             raise ValueError("Pool is not active")
 
+        # The rate a deposit actually mints at is the one the sync writes, so
+        # the quote has to net the seed out the same way. Quoting the gross
+        # strategy balance would price every share as if the foundation's
+        # principal backed it.
+        gross = (strategy_aum or 0) + (idle or 0)
         effective_assets = (
-            strategy_aum if strategy_aum is not None and strategy_aum > 0 else pool["total_assets"]
+            self._net_of_seed(gross, seeded, pool["total_shares"])
+            if gross else pool["total_assets"]
         )
         exchange_rate = _exchange_rate(effective_assets, pool["total_shares"])
 
@@ -258,6 +266,22 @@ class VaultService:
         except Exception:
             logger.exception(
                 "_strategy_total_assets_safe failed pool=%s strategy=%s",
+                pool_id_hex, strategy.name,
+            )
+            return None
+
+    async def _strategy_idle_assets_safe(self, pool_id_hex: str) -> Optional[int]:
+        """Best-effort idle read, paired with ``_strategy_total_assets_safe``
+        so a quote values the same balance the sync does.
+        """
+        strategy = self._registry.get(pool_id_hex)
+        if strategy.name == "manual":
+            return None
+        try:
+            return await strategy.idle_assets()
+        except Exception:
+            logger.exception(
+                "_strategy_idle_assets_safe failed pool=%s strategy=%s",
                 pool_id_hex, strategy.name,
             )
             return None
@@ -487,7 +511,17 @@ class VaultService:
             # Sync inside the lock, before moving any strategy assets, so a
             # concurrent deposit can never sync the transient balance this
             # reclaim is about to create.
-            await self.sync_total_assets(pool_id_hex)
+            synced = await self.sync_total_assets(pool_id_hex)
+            # Burning against a stale denominator cannot inflate an unseeded
+            # pool, so those exits stay best-effort. A seeded pool is
+            # different: the seed is senior, so a withdrawal priced on a
+            # denominator that no longer holds would pay the user out of
+            # foundation principal.
+            if synced is None and await asyncio.to_thread(self.get_seeded_assets, pool_id):
+                raise ValueError(
+                    "Pool valuation could not be confirmed; withdraw refused. "
+                    "Retry shortly."
+                )
             reclaim_tx_id = str(uuid.uuid4())
             try:
                 await self._reclaim_from_strategy(pool_id_hex, int(amount))
@@ -646,7 +680,7 @@ class VaultService:
             )
             return on_chain_total
         gross = external + idle
-        if gross <= 0:
+        if gross == 0:
             return on_chain_total
         pool_id = bytes.fromhex(pool_id_hex.removeprefix("0x"))
         try:
@@ -692,7 +726,7 @@ class VaultService:
             )
             return None
         gross = external + idle
-        if gross <= 0:
+        if gross == 0:
             return on_chain_total
         pool_id = bytes.fromhex(pool_id_hex.removeprefix("0x"))
         try:

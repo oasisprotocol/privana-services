@@ -1535,3 +1535,76 @@ class TestGetAllBalancesEarned:
         assert earned_active(
             USER_ADDRESS, POOL_ID_HEX, 100, 105, pool_total_shares=1300
         ).status == "ledger_incomplete"
+
+
+class TestSeedAwareQuotesAndExits:
+    @staticmethod
+    def _service(*, external, idle, seeded, shares, on_chain_assets, sync_fails=False):
+        from src.services.earn.registry import StrategyRegistry
+
+        registry = StrategyRegistry()
+        strategy = MagicMock()
+        strategy.name = "midas-mtbill"
+        strategy.is_healthy = AsyncMock(return_value=True)
+        strategy.total_assets = AsyncMock(return_value=external)
+        strategy.idle_assets = AsyncMock(return_value=idle)
+        strategy.withdraw_from_earn = AsyncMock()
+        strategy.deposit_to_earn = AsyncMock()
+        registry.register(POOL_ID_HEX, strategy)
+
+        service, contract, sapphire, _ = _make_service(registry=registry)
+        contract.functions.pools.return_value.call.return_value = (
+            bytes.fromhex(USDC_TOKEN_ID[2:]),
+            POOL_ADDRESS,
+            shares, on_chain_assets, True,
+        )
+        contract.functions.getSeededAssets.return_value.call.return_value = seeded
+        contract.functions.convertToShares.return_value.call.return_value = 952
+        if sync_fails:
+            sapphire.execute_contract_call.side_effect = RuntimeError("sync tx failed")
+        return service, strategy, sapphire
+
+    async def test_quote_prices_against_user_assets_not_the_seed(self):
+        # 100k seed, 10k of user principal, 400 of yield on the whole balance.
+        service, _, _ = self._service(
+            external=110_400, idle=0, seeded=100_000, shares=10_000, on_chain_assets=10_400,
+        )
+
+        quote = await service.get_deposit_quote(POOL_ID_HEX, "1000", USER_ADDRESS)
+
+        # Gross would read 11.04 per share; only 10,400 backs the shares.
+        assert quote["exchange_rate"] == "1.04"
+
+    async def test_quote_on_an_unseeded_pool_is_unchanged(self):
+        service, _, _ = self._service(
+            external=1_050, idle=0, seeded=0, shares=1_000, on_chain_assets=1_050,
+        )
+
+        quote = await service.get_deposit_quote(POOL_ID_HEX, "1000", USER_ADDRESS)
+
+        assert quote["exchange_rate"] == "1.05"
+
+    async def test_a_seeded_pool_refuses_to_exit_on_an_unconfirmed_valuation(self, test_db):
+        # Backing fell far enough that the drop guard refuses to write it, so
+        # the recorded denominator no longer holds.
+        service, strategy, _ = self._service(
+            external=105, idle=0, seeded=100, shares=10, on_chain_assets=110,
+        )
+
+        with pytest.raises(ValueError, match="could not be confirmed"):
+            await service.withdraw(POOL_ID_HEX, USER_ADDRESS, "10", 0, USER_WITHDRAW_SIG)
+
+        # Nothing was reclaimed, so no user was paid out of seed principal.
+        strategy.withdraw_from_earn.assert_not_awaited()
+
+    async def test_an_unseeded_pool_still_exits_on_an_unconfirmed_valuation(self, test_db):
+        service, strategy, _ = self._service(
+            external=105, idle=0, seeded=0, shares=10, on_chain_assets=110,
+        )
+
+        with patch("src.services.earn.vault_service.sign_transfer", return_value="0x" + "bb" * 65):
+            result = await service.withdraw(POOL_ID_HEX, USER_ADDRESS, "10", 0, USER_WITHDRAW_SIG)
+
+        # Users must always be able to leave a pool with no senior claim on it.
+        assert result["status"] == "completed"
+        strategy.withdraw_from_earn.assert_awaited_once_with(10)

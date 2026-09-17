@@ -352,39 +352,21 @@ describe('EarnManager', function () {
       expect(await earnManager.getUserShares(POOL_ID, authToken(user.address))).to.be.gt(0);
     });
 
-    it('should hold seed at the erc-7201 slot its constant names', async function () {
-      const { earnManager, mockAccounting, owner, poolWallet } = await deployWithPool();
+    it('should keep seed in the reserved gap slot', async function () {
+      const { earnManager, mockAccounting, poolWallet } = await deployWithPool();
       const seed = ethers.parseUnits('100000', 6);
 
       await mockAccounting.setBalance(poolWallet.address, TOKEN_ID, seed);
       await earnManager.seedLiquidity(POOL_ID, seed);
 
-      // Derive the namespace slot independently of the contract, then the
-      // mapping entry inside it, and read raw storage. If the constant and
-      // the assembly accessor ever drift apart, this is what catches it.
-      const ns = ethers.keccak256(ethers.toUtf8Bytes('privana.storage.EarnManagerSeed'));
-      const base = ethers.toBeHex(
-        (BigInt(ethers.keccak256(ethers.AbiCoder.defaultAbiCoder().encode(['uint256'], [BigInt(ns) - 1n]))) >> 8n) << 8n,
-        32,
-      );
+      // seededAssets took the first reserved slot, so its entries hash from
+      // 6. Reading raw storage is how a layout drift shows up here; on
+      // Sapphire the storage is confidential and the getter is the gate.
       const entry = ethers.keccak256(
-        ethers.AbiCoder.defaultAbiCoder().encode(['bytes32', 'uint256'], [POOL_ID, base]),
+        ethers.AbiCoder.defaultAbiCoder().encode(['bytes32', 'uint256'], [POOL_ID, 6]),
       );
-
       const raw = await ethers.provider.getStorage(await earnManager.getAddress(), entry);
       expect(BigInt(raw)).to.equal(seed);
-    });
-
-    it('should not collide with the slot a future append would take', async function () {
-      const { earnManager, mockAccounting, owner, poolWallet } = await deployWithPool();
-      const seed = ethers.parseUnits('100000', 6);
-
-      await mockAccounting.setBalance(poolWallet.address, TOKEN_ID, seed);
-      await earnManager.seedLiquidity(POOL_ID, seed);
-
-      const addr = await earnManager.getAddress();
-      expect(await ethers.provider.getStorage(addr, 6)).to.equal(ethers.ZeroHash);
-      expect(await ethers.provider.getStorage(addr, 7)).to.equal(ethers.ZeroHash);
     });
   });
 

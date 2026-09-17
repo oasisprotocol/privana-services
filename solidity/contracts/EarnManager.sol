@@ -94,34 +94,18 @@ contract EarnManager is
     /// reads go through `getWithdrawNonce(token)`.
     mapping(address => uint256) private withdrawNonces;
 
+    /// @dev Protocol-owned principal per pool: paid into the pool's account
+    /// from outside, recorded here, and deliberately excluded from
+    /// `totalAssets`. Shares are never minted against it, so no user can
+    /// claim it, while the yield it earns lands in `totalAssets` and lifts
+    /// every share. Private, and read through `getSeededAssets`, so how much
+    /// of a pool is protocol capital stays between the pool and its admin.
+    mapping(bytes32 => uint256) private seededAssets;
+
     /// @dev Reserved slots for future state additions without disturbing the
     /// layout of any inheriting contract or proxy. Decrement when adding a
     /// new variable to keep the total occupied storage size constant.
-    uint256[49] private __gap;
-
-    /// @custom:storage-location erc7201:privana.storage.EarnManagerSeed
-    struct SeedStorage {
-        /// @dev Protocol-owned principal per pool, held in the pool's own
-        /// accounting balance but deliberately excluded from `totalAssets`.
-        /// Shares are never minted against it, so no user can ever claim it,
-        /// while the yield it earns lands in `totalAssets` and lifts every
-        /// share.
-        mapping(bytes32 => uint256) seededAssets;
-    }
-
-    /// @dev keccak256(abi.encode(uint256(keccak256("privana.storage.EarnManagerSeed")) - 1)) & ~bytes32(uint256(0xff))
-    /// A namespaced slot rather than the next `__gap` entry: other in-flight
-    /// upgrades also append state, and a hashed location cannot collide with
-    /// whichever of them lands first.
-    bytes32 private constant _SEED_STORAGE =
-        0xd80b2d47965e213ddec022fd452b2066a5b4c950efa4c159148bd77257251500;
-
-    function _seedStorage() private pure returns (SeedStorage storage $) {
-        bytes32 slot = _SEED_STORAGE;
-        assembly {
-            $.slot := slot
-        }
-    }
+    uint256[48] private __gap;
 
     /// -----------------------------------------------------------------------
     /// Errors
@@ -238,7 +222,7 @@ contract EarnManager is
         if (pools[poolId].poolAddress == address(0)) revert PoolNotFound();
         if (amount == 0) revert ZeroAmount();
 
-        _seedStorage().seededAssets[poolId] += amount;
+        seededAssets[poolId] += amount;
     }
 
     /// @notice Drop protocol-owned principal from the record, before taking
@@ -257,9 +241,8 @@ contract EarnManager is
         if (pools[poolId].poolAddress == address(0)) revert PoolNotFound();
         if (amount == 0) revert ZeroAmount();
 
-        SeedStorage storage $ = _seedStorage();
-        if ($.seededAssets[poolId] < amount) revert SeedBelowZero();
-        $.seededAssets[poolId] -= amount;
+        if (seededAssets[poolId] < amount) revert SeedBelowZero();
+        seededAssets[poolId] -= amount;
     }
 
     /// @notice Overwrite the recorded protocol-owned principal without
@@ -273,7 +256,7 @@ contract EarnManager is
     /// user tranche.
     function setSeededAssets(bytes32 poolId, uint256 newSeededAssets) external onlyPoolAdmin {
         if (pools[poolId].poolAddress == address(0)) revert PoolNotFound();
-        _seedStorage().seededAssets[poolId] = newSeededAssets;
+        seededAssets[poolId] = newSeededAssets;
     }
 
     /// @notice Protocol-owned principal recorded against `poolId`.
@@ -288,7 +271,7 @@ contract EarnManager is
     /// pool admin over a signed query, which is what puts a sender on an
     /// `eth_call` at all; an unauthenticated read has no sender and reverts.
     function getSeededAssets(bytes32 poolId) external view onlyPoolAdmin returns (uint256) {
-        return _seedStorage().seededAssets[poolId];
+        return seededAssets[poolId];
     }
 
     /// -----------------------------------------------------------------------
@@ -326,7 +309,7 @@ contract EarnManager is
         /// deposit has to come through the service.
         if (
             pool.totalShares == 0 &&
-            _seedStorage().seededAssets[poolId] > 0 &&
+            seededAssets[poolId] > 0 &&
             msg.sender != poolAdmin
         ) revert SeedBaselineNotRolled();
 

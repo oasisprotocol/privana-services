@@ -55,6 +55,7 @@ def _validate_settings() -> None:
 async def lifespan(_app: FastAPI):
     from src.clients.accounting import get_accounting_client
     from src.clients.lifi import get_lifi_client
+    from src.services.earn.idle_deployer import get_idle_deployer
     from src.services.earn.registry import (
         get_strategy_registry,
         register_aave_strategies_from_config,
@@ -106,6 +107,11 @@ async def lifespan(_app: FastAPI):
         logger.exception("Pool rate sampler failed to start; no earn rate history will be recorded")
 
     try:
+        await get_idle_deployer().start()
+    except Exception:
+        logger.exception("Idle deployer failed to start; seeded funds will sit undeployed")
+
+    try:
         yield
     finally:
         await swap_worker.stop()
@@ -119,6 +125,10 @@ async def lifespan(_app: FastAPI):
         await get_pool_rate_sampler().stop()
     except Exception:
         logger.warning("Error stopping pool rate sampler")
+    try:
+        await get_idle_deployer().stop()
+    except Exception:
+        logger.warning("Error stopping idle deployer")
     try:
         await get_accounting_client().close()
     except Exception:

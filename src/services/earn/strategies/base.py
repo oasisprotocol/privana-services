@@ -47,6 +47,14 @@ class BaseStrategy(ABC):
         """
         return []
 
+    async def min_deploy_amount(self) -> int:
+        """Smallest amount worth moving into the protocol, in token base
+        units. Below it the protocol would reject the deposit or the bridge
+        would cost more than the position earns. Zero where the protocol
+        takes any amount.
+        """
+        return 0
+
     @abstractmethod
     async def deposit_to_earn(self, amount: int) -> None:
         """Move idle pool funds into the external earn protocol."""

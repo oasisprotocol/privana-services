@@ -205,6 +205,178 @@ describe('EarnManager', function () {
     });
   });
 
+  describe('seeded liquidity', function () {
+    it('should record seed principal without minting any shares', async function () {
+      const { earnManager, mockAccounting, poolWallet } = await deployWithPool();
+      const seed = ethers.parseUnits('100000', 6);
+
+      // The principal is paid into the pool account out of band; this only
+      // records how much of that balance is the protocol's.
+      await mockAccounting.setBalance(poolWallet.address, TOKEN_ID, seed);
+      await earnManager.seedLiquidity(POOL_ID, seed);
+
+      const pool = await earnManager.pools(POOL_ID);
+      expect(await earnManager.getSeededAssets(POOL_ID)).to.equal(seed);
+      expect(pool.totalShares).to.equal(0n);
+      expect(pool.totalAssets).to.equal(0n);
+      expect(await mockAccounting.balances(poolWallet.address, TOKEN_ID)).to.equal(seed);
+    });
+
+    it('should move no funds when recording or dropping seed', async function () {
+      const { earnManager, mockAccounting, owner, poolWallet } = await deployWithPool();
+      const seed = ethers.parseUnits('100000', 6);
+
+      await mockAccounting.setBalance(poolWallet.address, TOKEN_ID, seed);
+      await mockAccounting.setBalance(owner.address, TOKEN_ID, 0);
+
+      await earnManager.seedLiquidity(POOL_ID, seed);
+      await earnManager.unseedLiquidity(POOL_ID, seed);
+
+      // Balances are untouched either way: the money moves through the
+      // accounting deposit and withdrawal flows, not through here.
+      expect(await mockAccounting.balances(poolWallet.address, TOKEN_ID)).to.equal(seed);
+      expect(await mockAccounting.balances(owner.address, TOKEN_ID)).to.equal(0n);
+      expect(await earnManager.getSeededAssets(POOL_ID)).to.equal(0n);
+    });
+
+    it('should leave a depositor claiming only their own deposit', async function () {
+      const { earnManager, mockAccounting, owner, user, poolWallet } = await deployWithPool();
+      const seed = ethers.parseUnits('100000', 6);
+      const deposit = ethers.parseUnits('1000', 6);
+
+      await mockAccounting.setBalance(poolWallet.address, TOKEN_ID, seed);
+      await earnManager.seedLiquidity(POOL_ID, seed);
+
+      await mockAccounting.setBalance(user.address, TOKEN_ID, deposit);
+      await earnManager.deposit(POOL_ID, user.address, deposit, 0, mockSig(user.address));
+
+      const shares = await earnManager.getUserShares(POOL_ID, authToken(user.address));
+      const claim = await earnManager.convertToAssets(POOL_ID, shares);
+      expect(claim).to.be.lte(deposit);
+      expect(claim).to.be.gte(deposit - 2n);
+    });
+
+    it('should refuse to unseed more than was seeded', async function () {
+      const { earnManager, mockAccounting, poolWallet } = await deployWithPool();
+      const seed = ethers.parseUnits('100000', 6);
+
+      await mockAccounting.setBalance(poolWallet.address, TOKEN_ID, seed);
+      await earnManager.seedLiquidity(POOL_ID, seed);
+
+      await expect(
+        earnManager.unseedLiquidity(POOL_ID, seed + 1n),
+      ).to.be.revertedWithCustomError(earnManager, 'SeedBelowZero');
+    });
+
+    it('should gate seed, unseed and the baseline setter to poolAdmin', async function () {
+      const { earnManager, user, otherUser, poolWallet } = await deployWithPool();
+
+      await expect(earnManager.connect(user).seedLiquidity(POOL_ID, 1))
+        .to.be.revertedWithCustomError(earnManager, 'NotPoolAdmin');
+      await expect(earnManager.connect(user).unseedLiquidity(POOL_ID, 1))
+        .to.be.revertedWithCustomError(earnManager, 'NotPoolAdmin');
+      await expect(earnManager.connect(user).setSeededAssets(POOL_ID, 1))
+        .to.be.revertedWithCustomError(earnManager, 'NotPoolAdmin');
+    });
+
+    it('should not tell anyone but the pool admin how much was seeded', async function () {
+      const { earnManager, mockAccounting, user, poolWallet } = await deployWithPool();
+      const seed = ethers.parseUnits('100000', 6);
+
+      await mockAccounting.setBalance(poolWallet.address, TOKEN_ID, seed);
+      await earnManager.seedLiquidity(POOL_ID, seed);
+
+      // A pool mostly made of protocol capital reads very differently to one
+      // mostly made of other people's, so depositors do not get to see which.
+      await expect(earnManager.connect(user).getSeededAssets(POOL_ID))
+        .to.be.revertedWithCustomError(earnManager, 'NotPoolAdmin');
+      expect(await earnManager.getSeededAssets(POOL_ID)).to.equal(seed);
+    });
+
+    it('should refuse a direct first deposit into a seeded pool', async function () {
+      const { earnManager, mockAccounting, owner, user, poolWallet } = await deployWithPool();
+      const seed = ethers.parseUnits('100000', 6);
+      const deposit = ethers.parseUnits('1000', 6);
+
+      await mockAccounting.setBalance(poolWallet.address, TOKEN_ID, seed);
+      await earnManager.seedLiquidity(POOL_ID, seed);
+      await mockAccounting.setBalance(user.address, TOKEN_ID, deposit);
+
+      // Yield the seed earned before anyone held shares is the seed's, and
+      // only the off-chain valuation knows how much. A direct deposit would
+      // walk off with it.
+      await expect(
+        earnManager.connect(user).deposit(POOL_ID, user.address, deposit, 0, mockSig(user.address)),
+      ).to.be.revertedWithCustomError(earnManager, 'SeedBaselineNotRolled');
+    });
+
+    it('should let the service make the first deposit into a seeded pool', async function () {
+      const { earnManager, mockAccounting, owner, user, poolWallet } = await deployWithPool();
+      const seed = ethers.parseUnits('100000', 6);
+      const deposit = ethers.parseUnits('1000', 6);
+
+      await mockAccounting.setBalance(poolWallet.address, TOKEN_ID, seed);
+      await earnManager.seedLiquidity(POOL_ID, seed);
+      await mockAccounting.setBalance(user.address, TOKEN_ID, deposit);
+
+      // owner is poolAdmin here, standing in for the service, which rolls the
+      // baseline before it deposits.
+      await earnManager.deposit(POOL_ID, user.address, deposit, 0, mockSig(user.address));
+
+      const claim = await earnManager.convertToAssets(
+        POOL_ID, await earnManager.getUserShares(POOL_ID, authToken(user.address)),
+      );
+      expect(claim).to.be.lte(deposit);
+    });
+
+    it('should not gate deposits once the pool has shares', async function () {
+      const { earnManager, mockAccounting, owner, user, otherUser, poolWallet } = await deployWithPool();
+      const seed = ethers.parseUnits('100000', 6);
+      const deposit = ethers.parseUnits('1000', 6);
+
+      await mockAccounting.setBalance(poolWallet.address, TOKEN_ID, seed);
+      await earnManager.seedLiquidity(POOL_ID, seed);
+      await mockAccounting.setBalance(user.address, TOKEN_ID, deposit);
+      await earnManager.deposit(POOL_ID, user.address, deposit, 0, mockSig(user.address));
+
+      await mockAccounting.setBalance(otherUser.address, TOKEN_ID, deposit);
+      await earnManager
+        .connect(otherUser)
+        .deposit(POOL_ID, otherUser.address, deposit, 0, mockSig(otherUser.address));
+
+      expect(await earnManager.getUserShares(POOL_ID, authToken(otherUser.address))).to.be.gt(0);
+    });
+
+    it('should not gate deposits into a pool with no seed', async function () {
+      const { earnManager, mockAccounting, user, poolWallet } = await deployWithPool();
+      const deposit = ethers.parseUnits('1000', 6);
+
+      await mockAccounting.setBalance(user.address, TOKEN_ID, deposit);
+      await earnManager
+        .connect(user)
+        .deposit(POOL_ID, user.address, deposit, 0, mockSig(user.address));
+
+      expect(await earnManager.getUserShares(POOL_ID, authToken(user.address))).to.be.gt(0);
+    });
+
+    it('should keep seed in the reserved gap slot', async function () {
+      const { earnManager, mockAccounting, poolWallet } = await deployWithPool();
+      const seed = ethers.parseUnits('100000', 6);
+
+      await mockAccounting.setBalance(poolWallet.address, TOKEN_ID, seed);
+      await earnManager.seedLiquidity(POOL_ID, seed);
+
+      // seededAssets took the first reserved slot, so its entries hash from
+      // 6. Reading raw storage is how a layout drift shows up here; on
+      // Sapphire the storage is confidential and the getter is the gate.
+      const entry = ethers.keccak256(
+        ethers.AbiCoder.defaultAbiCoder().encode(['bytes32', 'uint256'], [POOL_ID, 6]),
+      );
+      const raw = await ethers.provider.getStorage(await earnManager.getAddress(), entry);
+      expect(BigInt(raw)).to.equal(seed);
+    });
+  });
+
   describe('deposit', function () {
     it('should mint shares scaled by VIRTUAL_SHARES for first depositor', async function () {
       const { earnManager, mockAccounting, user, poolWallet } = await deployWithPool();

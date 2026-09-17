@@ -47,6 +47,10 @@ def _make_service(registry=None):
         # ``contract.functions.withdrawNonces.return_value.call.return_value``.
         contract.functions.withdrawNonces.return_value.call.return_value = 0
 
+        # No protocol-owned seed by default, so the netting is a no-op and
+        # every pre-seed expectation still reads as the plain backing figure.
+        contract.functions.getSeededAssets.return_value.call.return_value = 0
+
         from src.services.earn.vault_service import VaultService
         service = VaultService(registry=registry)
         service.contract = contract
@@ -910,6 +914,111 @@ class TestStrategyApyBpsSafe:
         assert await service.strategy_apy_bps_safe(POOL_ID_HEX) == 0
 
 
+class TestSeededLiquidity:
+    @staticmethod
+    def _registry_with(total_assets: int, idle: int):
+        from src.services.earn.registry import StrategyRegistry
+
+        registry = StrategyRegistry()
+        strategy = MagicMock()
+        strategy.name = "aave-v3"
+        strategy.is_healthy = AsyncMock(return_value=True)
+        strategy.total_assets = AsyncMock(return_value=total_assets)
+        strategy.idle_assets = AsyncMock(return_value=idle)
+        registry.register(POOL_ID_HEX, strategy)
+        return registry
+
+    def test_seed_comes_off_the_top_leaving_only_user_assets(self):
+        service, _, _, _ = _make_service()
+        # 100k seed, 10k of user principal, 400 of yield on the whole balance.
+        assert service._net_of_seed(110_400, 100_000, total_shares=10_000) == 10_400
+
+    def test_users_absorb_a_shortfall_before_the_seed_does(self):
+        service, _, _, _ = _make_service()
+        # Backing falls 10 below the combined position: the seed stays whole.
+        assert service._net_of_seed(90, 50, total_shares=10) == 40
+
+    def test_user_assets_clamp_at_zero_rather_than_going_negative(self):
+        service, _, _, _ = _make_service()
+        assert service._net_of_seed(30, 50, total_shares=10) == 0
+
+    def test_nothing_is_user_backed_before_the_first_deposit(self):
+        service, _, _, _ = _make_service()
+        # Yield earned while no shares exist stays with the seed.
+        assert service._net_of_seed(100_400, 100_000, total_shares=0) == 0
+
+    def test_an_unseeded_pool_is_left_exactly_as_it_was(self):
+        service, _, _, _ = _make_service()
+        # No seed, no shares, idle balance present: must stay the plain
+        # backing figure, never be reported as zero and never be recorded as
+        # protocol principal.
+        assert service._net_of_seed(1_500, 0, total_shares=0) == 1_500
+        assert service._net_of_seed(1_500, 0, total_shares=10) == 1_500
+
+    async def test_sync_never_invents_seed_on_a_pool_that_has_none(self):
+        registry = self._registry_with(total_assets=1_400, idle=100)
+        service, contract, sapphire, _ = _make_service(registry=registry)
+        contract.functions.pools.return_value.call.return_value = (
+            bytes.fromhex(USDC_TOKEN_ID[2:]),
+            POOL_ADDRESS,
+            0, 0, True,
+        )
+        contract.functions.getSeededAssets.return_value.call.return_value = 0
+
+        await service.sync_total_assets(POOL_ID_HEX)
+
+        written = [
+            c.kwargs["function_name"] for c in sapphire.execute_contract_call.call_args_list
+        ]
+        assert "setSeededAssets" not in written
+
+    async def test_sync_writes_backing_net_of_seed(self):
+        registry = self._registry_with(total_assets=110_000, idle=400)
+        service, contract, sapphire, _ = _make_service(registry=registry)
+        contract.functions.pools.return_value.call.return_value = (
+            bytes.fromhex(USDC_TOKEN_ID[2:]),
+            POOL_ADDRESS,
+            10_000, 10_000, True,
+        )
+        contract.functions.getSeededAssets.return_value.call.return_value = 100_000
+
+        result = await service.sync_total_assets(POOL_ID_HEX)
+
+        assert result == 10_400
+        assert sapphire.execute_contract_call.call_args.kwargs["args"][1] == 10_400
+
+    async def test_sync_rolls_pre_deposit_yield_into_the_seed_baseline(self):
+        registry = self._registry_with(total_assets=100_400, idle=0)
+        service, contract, sapphire, _ = _make_service(registry=registry)
+        contract.functions.pools.return_value.call.return_value = (
+            bytes.fromhex(USDC_TOKEN_ID[2:]),
+            POOL_ADDRESS,
+            0, 0, True,
+        )
+        contract.functions.getSeededAssets.return_value.call.return_value = 100_000
+
+        result = await service.sync_total_assets(POOL_ID_HEX)
+
+        # The 400 of yield becomes seed, not assets the first depositor finds
+        # already on the books.
+        assert result == 0
+        call = sapphire.execute_contract_call.call_args
+        assert call.kwargs["function_name"] == "setSeededAssets"
+        assert call.kwargs["args"][1] == 100_400
+
+    async def test_live_aum_reports_user_assets_not_the_whole_balance(self):
+        registry = self._registry_with(total_assets=110_000, idle=400)
+        service, contract, _, _ = _make_service(registry=registry)
+        contract.functions.pools.return_value.call.return_value = (
+            bytes.fromhex(USDC_TOKEN_ID[2:]),
+            POOL_ADDRESS,
+            10_000, 10_000, True,
+        )
+        contract.functions.getSeededAssets.return_value.call.return_value = 100_000
+
+        assert await service.effective_total_assets(POOL_ID_HEX, 10_000) == 10_400
+
+
 class TestSyncTotalAssets:
     async def test_manual_strategy_returns_on_chain_authoritative(self):
         service, contract, sapphire, _ = _make_service()
@@ -1426,3 +1535,254 @@ class TestGetAllBalancesEarned:
         assert earned_active(
             USER_ADDRESS, POOL_ID_HEX, 100, 105, pool_total_shares=1300
         ).status == "ledger_incomplete"
+
+
+class TestSeedAwareQuotesAndExits:
+    @staticmethod
+    def _service(*, external, idle, seeded, shares, on_chain_assets, sync_fails=False):
+        from src.services.earn.registry import StrategyRegistry
+
+        registry = StrategyRegistry()
+        strategy = MagicMock()
+        strategy.name = "midas-mtbill"
+        strategy.is_healthy = AsyncMock(return_value=True)
+        strategy.total_assets = AsyncMock(return_value=external)
+        strategy.idle_assets = AsyncMock(return_value=idle)
+        strategy.withdraw_from_earn = AsyncMock()
+        strategy.deposit_to_earn = AsyncMock()
+        registry.register(POOL_ID_HEX, strategy)
+
+        service, contract, sapphire, _ = _make_service(registry=registry)
+        contract.functions.pools.return_value.call.return_value = (
+            bytes.fromhex(USDC_TOKEN_ID[2:]),
+            POOL_ADDRESS,
+            shares, on_chain_assets, True,
+        )
+        contract.functions.getSeededAssets.return_value.call.return_value = seeded
+        contract.functions.convertToShares.return_value.call.return_value = 952
+        if sync_fails:
+            sapphire.execute_contract_call.side_effect = RuntimeError("sync tx failed")
+        return service, strategy, sapphire
+
+    async def test_quote_prices_against_user_assets_not_the_seed(self):
+        # 100k seed, 10k of user principal, 400 of yield on the whole balance.
+        service, _, _ = self._service(
+            external=110_400, idle=0, seeded=100_000, shares=10_000, on_chain_assets=10_400,
+        )
+
+        quote = await service.get_deposit_quote(POOL_ID_HEX, "1000", USER_ADDRESS)
+
+        # Gross would read 11.04 per share; only 10,400 backs the shares.
+        assert quote["exchange_rate"] == "1.04"
+
+    async def test_quote_on_an_unseeded_pool_is_unchanged(self):
+        service, _, _ = self._service(
+            external=1_050, idle=0, seeded=0, shares=1_000, on_chain_assets=1_050,
+        )
+
+        quote = await service.get_deposit_quote(POOL_ID_HEX, "1000", USER_ADDRESS)
+
+        assert quote["exchange_rate"] == "1.05"
+
+    async def test_a_seeded_pool_refuses_to_exit_on_an_unconfirmed_valuation(self, test_db):
+        # Backing fell far enough that the drop guard refuses to write it, so
+        # the recorded denominator no longer holds.
+        service, strategy, _ = self._service(
+            external=105, idle=0, seeded=100, shares=10, on_chain_assets=110,
+        )
+
+        with pytest.raises(ValueError, match="could not be confirmed"):
+            await service.withdraw(POOL_ID_HEX, USER_ADDRESS, "10", 0, USER_WITHDRAW_SIG)
+
+        # Nothing was reclaimed, so no user was paid out of seed principal.
+        strategy.withdraw_from_earn.assert_not_awaited()
+
+    async def test_an_unseeded_pool_still_exits_on_an_unconfirmed_valuation(self, test_db):
+        service, strategy, _ = self._service(
+            external=105, idle=0, seeded=0, shares=10, on_chain_assets=110,
+        )
+
+        with patch("src.services.earn.vault_service.sign_transfer", return_value="0x" + "bb" * 65):
+            result = await service.withdraw(POOL_ID_HEX, USER_ADDRESS, "10", 0, USER_WITHDRAW_SIG)
+
+        # Users must always be able to leave a pool with no senior claim on it.
+        assert result["status"] == "completed"
+        strategy.withdraw_from_earn.assert_awaited_once_with(10)
+
+
+class TestDeployIdle:
+    @staticmethod
+    def _service(*, idle, minimum=0, healthy=True, name="midas-mtbill"):
+        from src.services.earn.registry import StrategyRegistry
+
+        registry = StrategyRegistry()
+        strategy = MagicMock()
+        strategy.name = name
+        strategy.idle_assets = AsyncMock(return_value=idle)
+        strategy.min_deploy_amount = AsyncMock(return_value=minimum)
+        strategy.is_healthy = AsyncMock(return_value=healthy)
+        strategy.total_assets = AsyncMock(return_value=1000)
+        strategy.deposit_to_earn = AsyncMock()
+        registry.register(POOL_ID_HEX, strategy)
+
+        service, contract, sapphire, _ = _make_service(registry=registry)
+        contract.functions.pools.return_value.call.return_value = (
+            bytes.fromhex(USDC_TOKEN_ID[2:]),
+            POOL_ADDRESS,
+            1000, 1000, True,
+        )
+        contract.functions.getSeededAssets.return_value.call.return_value = 0
+        return service, strategy
+
+    async def test_routes_the_whole_idle_balance(self, test_db):
+        service, strategy = self._service(idle=100_000)
+
+        assert await service.deploy_idle(POOL_ID_HEX) == 100_000
+
+        strategy.deposit_to_earn.assert_awaited_once_with(100_000)
+
+    async def test_holds_the_pool_lock_across_the_bridge(self, test_db):
+        service, strategy = self._service(idle=100_000)
+        held = []
+        strategy.deposit_to_earn = AsyncMock(
+            side_effect=lambda _a: held.append(service._pools_tx_lock.locked())
+        )
+
+        await service.deploy_idle(POOL_ID_HEX)
+
+        # A withdrawal's reclaim must not be deployed out from under it.
+        assert held == [True]
+        assert not service._pools_tx_lock.locked()
+
+    async def test_does_nothing_when_there_is_nothing_idle(self, test_db):
+        service, strategy = self._service(idle=0)
+
+        assert await service.deploy_idle(POOL_ID_HEX) == 0
+
+        strategy.deposit_to_earn.assert_not_awaited()
+
+    async def test_leaves_amounts_below_the_protocol_minimum(self, test_db):
+        service, strategy = self._service(idle=500_000, minimum=1_000_000)
+
+        assert await service.deploy_idle(POOL_ID_HEX) == 0
+
+        strategy.deposit_to_earn.assert_not_awaited()
+
+    async def test_leaves_the_funds_when_the_strategy_is_unhealthy(self, test_db):
+        service, strategy = self._service(idle=100_000, healthy=False)
+
+        assert await service.deploy_idle(POOL_ID_HEX) == 0
+
+        strategy.deposit_to_earn.assert_not_awaited()
+
+    async def test_manual_pools_have_nothing_to_deploy_into(self, test_db):
+        service, strategy = self._service(idle=100_000, name="manual")
+
+        assert await service.deploy_idle(POOL_ID_HEX) == 0
+
+        strategy.deposit_to_earn.assert_not_awaited()
+
+
+class TestSeededAssetsRead:
+    def test_an_upgraded_contract_returns_the_figure(self):
+        service, contract, _, _ = _make_service()
+        contract.functions.getSeededAssets.return_value.call.return_value = 100_000
+
+        assert service.get_seeded_assets(b"\x11" * 32) == 100_000
+
+    def test_a_contract_without_the_function_reads_as_unseeded(self):
+        from web3.exceptions import ContractLogicError
+
+        service, contract, _, _ = _make_service()
+        contract.functions.getSeededAssets.return_value.call.side_effect = ContractLogicError(
+            "execution reverted"
+        )
+
+        # The proxy predates the upgrade, so there is no seed to net out and
+        # every quote would otherwise fail until it lands.
+        assert service.get_seeded_assets(b"\x11" * 32) == 0
+
+    def test_a_network_failure_is_not_swallowed(self):
+        service, contract, _, _ = _make_service()
+        contract.functions.getSeededAssets.return_value.call.side_effect = ConnectionError(
+            "rpc down"
+        )
+
+        with pytest.raises(ConnectionError):
+            service.get_seeded_assets(b"\x11" * 32)
+
+
+class TestStaleLeashRetry:
+    @staticmethod
+    def _rpc_error():
+        from web3.exceptions import Web3RPCError
+
+        return Web3RPCError(
+            "{'code': -32000, 'message': 'invalid signed simulate call query: "
+            "base block not found'}"
+        )
+
+    def test_a_stale_leash_is_retried(self, test_db):
+        service, contract, _, _ = _make_service()
+        contract.functions.getSeededAssets.return_value.call.side_effect = [
+            self._rpc_error(), 100_000,
+        ]
+
+        with patch("src.services.earn.vault_service.time.sleep"):
+            assert service.get_seeded_assets(b"\x11" * 32) == 100_000
+
+    def test_it_gives_up_rather_than_retrying_forever(self, test_db):
+        from web3.exceptions import Web3RPCError
+
+        from src.services.earn.vault_service import READ_RETRY_ATTEMPTS
+
+        service, contract, _, _ = _make_service()
+        contract.functions.getSeededAssets.return_value.call.side_effect = [
+            self._rpc_error() for _ in range(READ_RETRY_ATTEMPTS)
+        ]
+
+        with patch("src.services.earn.vault_service.time.sleep"):
+            with pytest.raises(Web3RPCError):
+                service.get_seeded_assets(b"\x11" * 32)
+
+    def test_other_rpc_errors_are_not_retried(self, test_db):
+        from web3.exceptions import Web3RPCError
+
+        service, contract, _, _ = _make_service()
+        call = contract.functions.getSeededAssets.return_value.call
+        call.side_effect = Web3RPCError("{'code': -32000, 'message': 'out of gas'}")
+
+        with pytest.raises(Web3RPCError):
+            service.get_seeded_assets(b"\x11" * 32)
+        assert call.call_count == 1
+
+
+class TestSeedCache:
+    def test_repeated_reads_hit_the_contract_once(self, test_db):
+        service, contract, _, _ = _make_service()
+        call = contract.functions.getSeededAssets.return_value.call
+        call.return_value = 100_000
+
+        assert service.get_seeded_assets(b"\x11" * 32) == 100_000
+        assert service.get_seeded_assets(b"\x11" * 32) == 100_000
+
+        # Every extra signed query is another chance at a stale leash.
+        assert call.call_count == 1
+
+    def test_each_pool_is_cached_separately(self, test_db):
+        service, contract, _, _ = _make_service()
+        call = contract.functions.getSeededAssets.return_value.call
+        call.side_effect = [100_000, 250_000]
+
+        assert service.get_seeded_assets(b"\x11" * 32) == 100_000
+        assert service.get_seeded_assets(b"\x22" * 32) == 250_000
+
+    def test_the_money_paths_read_through(self, test_db):
+        service, contract, _, _ = _make_service()
+        call = contract.functions.getSeededAssets.return_value.call
+        call.side_effect = [100_000, 0]
+
+        service.get_seeded_assets(b"\x11" * 32)
+        # An operator can drop the seed at any moment, so anything that moves
+        # funds asks the chain rather than trusting a cached figure.
+        assert service.get_seeded_assets(b"\x11" * 32, fresh=True) == 0

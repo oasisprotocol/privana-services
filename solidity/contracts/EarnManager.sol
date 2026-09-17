@@ -95,10 +95,18 @@ contract EarnManager is
     /// reads go through `getWithdrawNonce(token)`.
     mapping(address => uint256) private withdrawNonces;
 
+    /// @dev Protocol-owned principal per pool: paid into the pool's account
+    /// from outside, recorded here, and deliberately excluded from
+    /// `totalAssets`. Shares are never minted against it, so no user can
+    /// claim it, while the yield it earns lands in `totalAssets` and lifts
+    /// every share. Private, and read through `getSeededAssets`, so how much
+    /// of a pool is protocol capital stays between the pool and its admin.
+    mapping(bytes32 => uint256) private seededAssets;
+
     /// @dev Reserved slots for future state additions without disturbing the
     /// layout of any inheriting contract or proxy. Decrement when adding a
     /// new variable to keep the total occupied storage size constant.
-    uint256[49] private __gap;
+    uint256[48] private __gap;
 
     /// -----------------------------------------------------------------------
     /// Errors
@@ -112,6 +120,8 @@ contract EarnManager is
     error InsufficientShares();
     error InvalidWithdrawSignature();
     error NotPoolAdmin();
+    error SeedBelowZero();
+    error SeedBaselineNotRolled();
 
     /// -----------------------------------------------------------------------
     /// Modifiers
@@ -257,6 +267,76 @@ contract EarnManager is
         pool.totalAssets = newTotalAssets;
     }
 
+    /// @notice Record protocol-owned principal that has been paid into the
+    /// pool's account.
+    ///
+    /// Bookkeeping only: the funds are moved separately, by whoever holds the
+    /// pool account's key, through the ordinary accounting deposit flow. This
+    /// call just says how much of the pool's balance is the protocol's rather
+    /// than its users'. The off-chain valuation writes
+    /// `totalAssets = backing - seededAssets`, so the yield this principal
+    /// earns raises the share price while the principal itself never does.
+    ///
+    /// Record it after the deposit has landed. Recording principal the pool
+    /// does not hold understates what backs the shares until it arrives.
+    /// @param poolId Earn pool the principal was paid into.
+    /// @param amount Principal to add to the record.
+    function seedLiquidity(bytes32 poolId, uint256 amount) external onlyPoolAdmin {
+        if (pools[poolId].poolAddress == address(0)) revert PoolNotFound();
+        if (amount == 0) revert ZeroAmount();
+
+        seededAssets[poolId] += amount;
+    }
+
+    /// @notice Drop protocol-owned principal from the record, before taking
+    /// it back out of the pool's account.
+    ///
+    /// The mirror of `seedLiquidity`, and bookkeeping only for the same
+    /// reason. Reverts rather than dipping into user-backed assets: a pool
+    /// can only give back what it was seeded.
+    ///
+    /// Drop the record before withdrawing, not after. Between the two the
+    /// pool holds principal it no longer counts as the protocol's, which
+    /// reads as user assets; the other order reads as a loss.
+    /// @param poolId Earn pool the principal is leaving.
+    /// @param amount Principal to remove from the record.
+    function unseedLiquidity(bytes32 poolId, uint256 amount) external onlyPoolAdmin {
+        if (pools[poolId].poolAddress == address(0)) revert PoolNotFound();
+        if (amount == 0) revert ZeroAmount();
+
+        if (seededAssets[poolId] < amount) revert SeedBelowZero();
+        seededAssets[poolId] -= amount;
+    }
+
+    /// @notice Overwrite the recorded protocol-owned principal without
+    /// moving any funds.
+    ///
+    /// Two jobs. While a pool has no shares there is nobody to earn, so the
+    /// off-chain valuation rolls the seed's accrued yield into the baseline
+    /// here rather than letting it sit as user assets that the first
+    /// depositor would find already on the books. It is also the operator
+    /// lever for marking the seed down after a realised loss deeper than the
+    /// user tranche.
+    function setSeededAssets(bytes32 poolId, uint256 newSeededAssets) external onlyPoolAdmin {
+        if (pools[poolId].poolAddress == address(0)) revert PoolNotFound();
+        seededAssets[poolId] = newSeededAssets;
+    }
+
+    /// @notice Protocol-owned principal recorded against `poolId`.
+    ///
+    /// Gated to `poolAdmin`. How much of a pool's balance the protocol put up
+    /// itself is not something a depositor should be able to read off the
+    /// chain: a pool that is mostly protocol capital reads very differently
+    /// to one that is mostly other people's. Sapphire keeps the storage
+    /// confidential, so gating the getter is what closes it.
+    ///
+    /// The off-chain valuation needs it on every sync and reads it as the
+    /// pool admin over a signed query, which is what puts a sender on an
+    /// `eth_call` at all; an unauthenticated read has no sender and reverts.
+    function getSeededAssets(bytes32 poolId) external view onlyPoolAdmin returns (uint256) {
+        return seededAssets[poolId];
+    }
+
     /// -----------------------------------------------------------------------
     /// External: user flows
     /// -----------------------------------------------------------------------
@@ -283,6 +363,18 @@ contract EarnManager is
         Pool storage pool = pools[poolId];
         if (!pool.active) revert PoolNotActive();
         if (amount == 0) revert ZeroAmount();
+
+        /// @dev Yield a seed earns before anyone holds shares belongs to the
+        /// seed, and only the off-chain valuation knows how much that is: it
+        /// rolls the figure into the baseline and leaves `totalAssets` at
+        /// zero. A direct first deposit would skip that and take the accrued
+        /// yield with it, so while a seeded pool has no shares the first
+        /// deposit has to come through the service.
+        if (
+            pool.totalShares == 0 &&
+            seededAssets[poolId] > 0 &&
+            msg.sender != poolAdmin
+        ) revert SeedBaselineNotRolled();
 
         // Accounting recovers the sender (here: ``toUser``) from the EIP-712
         // Transfer signature. Passing only the destination keeps the

@@ -11,6 +11,13 @@ import * as readline from 'node:readline/promises';
 
 import { describeToken } from './utils/tokens';
 
+// Pool ids are keccak of a <strategy>-<asset>-<chain> label, so every task
+// takes either the label or the hash.
+function resolvePoolId(hre: any, poolId: string): string {
+  if (/^0x[0-9a-fA-F]{64}$/.test(poolId)) return poolId;
+  return hre.ethers.keccak256(hre.ethers.toUtf8Bytes(poolId));
+}
+
 task('earn:setPoolAdmin')
   .setDescription('Sets the pool admin address on the EarnManager contract')
   .addParam('earnManagerAddress', 'Address of the EarnManager contract proxy')
@@ -76,10 +83,7 @@ task('earn:pool:show')
       const factory = await ethers.getContractFactory('EarnManager');
       const em = factory.attach(args.earnManagerAddress);
 
-      // Check if poolid is not a 32-byte hex value and convert it if needed
-      if (!/^0x[0-9a-fA-F]{64}$/.test(args.poolId)) {
-          args.poolId = ethers.keccak256(ethers.toUtf8Bytes(args.poolId));
-      }
+      args.poolId = resolvePoolId(hre, args.poolId);
 
       const pool = await em.pools(args.poolId);
       console.log('EarnManager:    ', args.earnManagerAddress);
@@ -95,6 +99,9 @@ task('earn:pool:show')
       console.log('  totalShares:  ', pool.totalShares.toString());
       console.log('  totalAssets:  ', pool.totalAssets.toString());
       console.log('  active:       ', pool.active);
+      // seededAssets is deliberately not here. It is gated to the pool admin,
+      // and reaching a gated view needs a signed query, which this client
+      // cannot make. The backend reads it as the admin.
       console.log('Accounting:     ', await em.accounting());
       console.log('Pool admin:     ', await em.poolAdmin());
       console.log('Owner:          ', await em.owner());
@@ -111,10 +118,7 @@ task('earn:pool:create')
   .setAction(async (args, hre) => {
       const { ethers } = hre;
 
-      // Check if poolid is not a 32-byte hex value and convert it if needed
-      if (!/^0x[0-9a-fA-F]{64}$/.test(args.poolId)) {
-          args.poolId = ethers.keccak256(ethers.toUtf8Bytes(args.poolId));
-      }
+      args.poolId = resolvePoolId(hre, args.poolId);
 
       // Use unencrypted tx.
       const deployer = await getUwDeployer(hre);
@@ -147,4 +151,83 @@ task('earn:pool:create')
           totalAssets: pool.totalAssets.toString(),
           active: pool.active,
       });
+  });
+
+task('earn:pool:seed')
+  .setDescription("Records protocol-owned principal paid into an Earn pool's account")
+  .addParam('earnManagerAddress', 'Address of the EarnManager contract proxy')
+  .addParam('poolId', 'ID or <strategy>-<asset>-<chain> name of the pool (e.g. midas-usdc-eth)')
+  .addParam('amount', 'Principal to record, in the pool token base units (e.g. 1000000 = 1 USDC)')
+  .setAction(async (args, hre) => {
+      const { ethers } = hre;
+      args.poolId = resolvePoolId(hre, args.poolId);
+      const amount = BigInt(args.amount);
+
+      // Encrypted tx: how much of a pool is protocol capital should not be
+      // readable off the chain, and the calldata would say it outright.
+      const em = await ethers.getContractAt('EarnManager', args.earnManagerAddress);
+      const pool = await em.pools(args.poolId);
+      if (pool.poolAddress === ethers.ZeroAddress) {
+          throw new Error(`Pool ${args.poolId} does not exist on this EarnManager`);
+      }
+
+      // The pool can only be seeded with principal it actually holds, and
+      // totalAssets is what it holds that is not already recorded as seed.
+      // Deposit first, let the backend pick it up, then record.
+      if (amount > pool.totalAssets) {
+          throw new Error(
+              `pool holds ${pool.totalAssets.toString()} that is not already seed, cannot record ` +
+              `${amount.toString()} more. Pay the principal in first and wait for the backend ` +
+              `to pick it up.`,
+          );
+      }
+
+      console.log('EarnManager:    ', args.earnManagerAddress);
+      console.log('Pool ID:        ', args.poolId);
+      console.log('  poolAddress:  ', pool.poolAddress);
+      console.log('  tokenId:      ', pool.tokenId);
+      try {
+          console.log('                ', await describeToken(hre.network.name, pool.tokenId));
+      } catch {}
+      console.log('  totalAssets:  ', pool.totalAssets.toString());
+      console.log('Recording:      ', amount.toString());
+
+      const tx = await em.seedLiquidity(args.poolId, amount);
+      console.log('seedLiquidity tx:', tx.hash);
+      await tx.wait();
+
+      const after = await em.pools(args.poolId);
+      console.log('  totalShares:  ', after.totalShares.toString(), '(unchanged: seed mints none)');
+      console.log('  totalAssets:  ', after.totalAssets.toString());
+  });
+
+task('earn:pool:unseed')
+  .setDescription('Drops protocol-owned principal from an Earn pool record before withdrawing it')
+  .addParam('earnManagerAddress', 'Address of the EarnManager contract proxy')
+  .addParam('poolId', 'ID or <strategy>-<asset>-<chain> name of the pool (e.g. midas-usdc-eth)')
+  .addParam('amount', 'Principal to remove from the record, in the pool token base units')
+  .setAction(async (args, hre) => {
+      const { ethers } = hre;
+      args.poolId = resolvePoolId(hre, args.poolId);
+      const amount = BigInt(args.amount);
+
+      const em = await ethers.getContractAt('EarnManager', args.earnManagerAddress);
+      const pool = await em.pools(args.poolId);
+      if (pool.poolAddress === ethers.ZeroAddress) {
+          throw new Error(`Pool ${args.poolId} does not exist on this EarnManager`);
+      }
+
+      console.log('EarnManager:    ', args.earnManagerAddress);
+      console.log('Pool ID:        ', args.poolId);
+      console.log('  poolAddress:  ', pool.poolAddress);
+      console.log('Dropping:       ', amount.toString());
+      // How much is on record is not readable from here, so dropping more
+      // than there is reverts as SeedBelowZero rather than failing early.
+
+      const tx = await em.unseedLiquidity(args.poolId, amount);
+      console.log('unseedLiquidity tx:', tx.hash);
+      await tx.wait();
+
+      console.log();
+      console.log('Now withdraw the principal from the pool account with the Earn pool key.');
   });

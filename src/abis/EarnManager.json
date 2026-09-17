@@ -66,6 +66,16 @@
     },
     {
       "inputs": [],
+      "name": "ImplementationDoesNotMatch",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "ImplementationHashDoesNotMatch",
+      "type": "error"
+    },
+    {
+      "inputs": [],
       "name": "InsufficientShares",
       "type": "error"
     },
@@ -77,6 +87,21 @@
     {
       "inputs": [],
       "name": "InvalidWithdrawSignature",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "MinBlockNumberInPast",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "MinBlockNumberNotReached",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "NewImplementationNotAContract",
       "type": "error"
     },
     {
@@ -124,6 +149,16 @@
     {
       "inputs": [],
       "name": "PoolNotFound",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "SeedBaselineNotRolled",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "SeedBelowZero",
       "type": "error"
     },
     {
@@ -196,6 +231,56 @@
         {
           "indexed": true,
           "internalType": "address",
+          "name": "newImplementation",
+          "type": "address"
+        },
+        {
+          "indexed": true,
+          "internalType": "bytes32",
+          "name": "newImplementationHash",
+          "type": "bytes32"
+        },
+        {
+          "indexed": true,
+          "internalType": "uint256",
+          "name": "minBlockNumber",
+          "type": "uint256"
+        }
+      ],
+      "name": "UpgradeAccepted",
+      "type": "event"
+    },
+    {
+      "anonymous": false,
+      "inputs": [
+        {
+          "indexed": true,
+          "internalType": "address",
+          "name": "newImplementation",
+          "type": "address"
+        },
+        {
+          "indexed": true,
+          "internalType": "bytes32",
+          "name": "newImplementationHash",
+          "type": "bytes32"
+        },
+        {
+          "indexed": true,
+          "internalType": "uint256",
+          "name": "minBlockNumber",
+          "type": "uint256"
+        }
+      ],
+      "name": "UpgradeProposed",
+      "type": "event"
+    },
+    {
+      "anonymous": false,
+      "inputs": [
+        {
+          "indexed": true,
+          "internalType": "address",
           "name": "implementation",
           "type": "address"
         }
@@ -211,6 +296,45 @@
           "internalType": "string",
           "name": "",
           "type": "string"
+        }
+      ],
+      "stateMutability": "view",
+      "type": "function"
+    },
+    {
+      "inputs": [],
+      "name": "VERSION",
+      "outputs": [
+        {
+          "internalType": "uint64",
+          "name": "",
+          "type": "uint64"
+        }
+      ],
+      "stateMutability": "view",
+      "type": "function"
+    },
+    {
+      "inputs": [],
+      "name": "VIRTUAL_ASSETS",
+      "outputs": [
+        {
+          "internalType": "uint256",
+          "name": "",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "view",
+      "type": "function"
+    },
+    {
+      "inputs": [],
+      "name": "VIRTUAL_SHARES",
+      "outputs": [
+        {
+          "internalType": "uint256",
+          "name": "",
+          "type": "uint256"
         }
       ],
       "stateMutability": "view",
@@ -408,6 +532,25 @@
           "internalType": "bytes32",
           "name": "poolId",
           "type": "bytes32"
+        }
+      ],
+      "name": "getSeededAssets",
+      "outputs": [
+        {
+          "internalType": "uint256",
+          "name": "",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "view",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "bytes32",
+          "name": "poolId",
+          "type": "bytes32"
         },
         {
           "internalType": "bytes",
@@ -548,6 +691,63 @@
       "type": "function"
     },
     {
+      "inputs": [
+        {
+          "internalType": "address",
+          "name": "newImplementation",
+          "type": "address"
+        },
+        {
+          "internalType": "uint256",
+          "name": "minBlockNumber",
+          "type": "uint256"
+        }
+      ],
+      "name": "proposeUpgrade",
+      "outputs": [],
+      "stateMutability": "nonpayable",
+      "type": "function"
+    },
+    {
+      "inputs": [],
+      "name": "proposedUpgradeImplementation",
+      "outputs": [
+        {
+          "internalType": "address",
+          "name": "",
+          "type": "address"
+        }
+      ],
+      "stateMutability": "view",
+      "type": "function"
+    },
+    {
+      "inputs": [],
+      "name": "proposedUpgradeImplementationHash",
+      "outputs": [
+        {
+          "internalType": "bytes32",
+          "name": "",
+          "type": "bytes32"
+        }
+      ],
+      "stateMutability": "view",
+      "type": "function"
+    },
+    {
+      "inputs": [],
+      "name": "proposedUpgradeMinBlockNumber",
+      "outputs": [
+        {
+          "internalType": "uint256",
+          "name": "",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "view",
+      "type": "function"
+    },
+    {
       "inputs": [],
       "name": "proxiableUUID",
       "outputs": [
@@ -563,6 +763,24 @@
     {
       "inputs": [],
       "name": "renounceOwnership",
+      "outputs": [],
+      "stateMutability": "nonpayable",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "bytes32",
+          "name": "poolId",
+          "type": "bytes32"
+        },
+        {
+          "internalType": "uint256",
+          "name": "amount",
+          "type": "uint256"
+        }
+      ],
+      "name": "seedLiquidity",
       "outputs": [],
       "stateMutability": "nonpayable",
       "type": "function"
@@ -620,6 +838,24 @@
         },
         {
           "internalType": "uint256",
+          "name": "newSeededAssets",
+          "type": "uint256"
+        }
+      ],
+      "name": "setSeededAssets",
+      "outputs": [],
+      "stateMutability": "nonpayable",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "bytes32",
+          "name": "poolId",
+          "type": "bytes32"
+        },
+        {
+          "internalType": "uint256",
           "name": "newTotalAssets",
           "type": "uint256"
         }
@@ -638,6 +874,24 @@
         }
       ],
       "name": "transferOwnership",
+      "outputs": [],
+      "stateMutability": "nonpayable",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "bytes32",
+          "name": "poolId",
+          "type": "bytes32"
+        },
+        {
+          "internalType": "uint256",
+          "name": "amount",
+          "type": "uint256"
+        }
+      ],
+      "name": "unseedLiquidity",
       "outputs": [],
       "stateMutability": "nonpayable",
       "type": "function"

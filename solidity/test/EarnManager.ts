@@ -272,6 +272,20 @@ describe('EarnManager', function () {
         .to.be.revertedWithCustomError(earnManager, 'NotPoolAdmin');
     });
 
+    it('should not tell anyone but the pool admin how much was seeded', async function () {
+      const { earnManager, mockAccounting, user, poolWallet } = await deployWithPool();
+      const seed = ethers.parseUnits('100000', 6);
+
+      await mockAccounting.setBalance(poolWallet.address, TOKEN_ID, seed);
+      await earnManager.seedLiquidity(POOL_ID, seed);
+
+      // A pool mostly made of protocol capital reads very differently to one
+      // mostly made of other people's, so depositors do not get to see which.
+      await expect(earnManager.connect(user).getSeededAssets(POOL_ID))
+        .to.be.revertedWithCustomError(earnManager, 'NotPoolAdmin');
+      expect(await earnManager.getSeededAssets(POOL_ID)).to.equal(seed);
+    });
+
     it('should refuse a direct first deposit into a seeded pool', async function () {
       const { earnManager, mockAccounting, owner, user, poolWallet } = await deployWithPool();
       const seed = ethers.parseUnits('100000', 6);

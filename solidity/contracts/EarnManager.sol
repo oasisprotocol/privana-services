@@ -276,11 +276,18 @@ contract EarnManager is
         _seedStorage().seededAssets[poolId] = newSeededAssets;
     }
 
-    /// @notice Protocol-owned principal recorded against `poolId`. Public
-    /// because it is protocol-level state, not a user position: the amount
-    /// says nothing about any individual and the off-chain valuation needs it
-    /// on every sync.
-    function getSeededAssets(bytes32 poolId) external view returns (uint256) {
+    /// @notice Protocol-owned principal recorded against `poolId`.
+    ///
+    /// Gated to `poolAdmin`. How much of a pool's balance the protocol put up
+    /// itself is not something a depositor should be able to read off the
+    /// chain: a pool that is mostly protocol capital reads very differently
+    /// to one that is mostly other people's. Sapphire keeps the storage
+    /// confidential, so gating the getter is what closes it.
+    ///
+    /// The off-chain valuation needs it on every sync and reads it as the
+    /// pool admin over a signed query, which is what puts a sender on an
+    /// `eth_call` at all; an unauthenticated read has no sender and reverts.
+    function getSeededAssets(bytes32 poolId) external view onlyPoolAdmin returns (uint256) {
         return _seedStorage().seededAssets[poolId];
     }
 

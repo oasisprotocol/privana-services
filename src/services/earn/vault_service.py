@@ -6,6 +6,7 @@ from decimal import Decimal
 from typing import Optional
 
 from web3 import Web3
+from web3.exceptions import ContractLogicError
 
 from src.clients.accounting import get_accounting_client
 from src.clients.sapphire import get_pool_admin_sapphire_client
@@ -61,6 +62,7 @@ class VaultService:
         self.accounting = get_accounting_client()
         self._pools_tx_lock = asyncio.Lock()
         self._registry = registry if registry is not None else get_strategy_registry()
+        self._seed_read_warned = False
         self.contract_address = Web3.to_checksum_address(
             self.settings.earn_manager_contract_address
         )
@@ -154,7 +156,26 @@ class VaultService:
         return self.contract.functions.getWithdrawNonce(token_bytes).call()
 
     def get_seeded_assets(self, pool_id: bytes) -> int:
-        return self.contract.functions.getSeededAssets(pool_id).call()
+        """Protocol-owned principal recorded against the pool.
+
+        Reverts against a contract that predates seeding, which has no such
+        function, and against any caller that is not the pool admin, since
+        how much of a pool is protocol capital is not public. Both say the
+        same thing about valuation: there is no seed to net out. Reading
+        them as zero is what lets the service run against a proxy that has
+        not been upgraded yet, rather than failing every quote until it is.
+        """
+        try:
+            return self.contract.functions.getSeededAssets(pool_id).call()
+        except ContractLogicError:
+            if not self._seed_read_warned:
+                logger.warning(
+                    "getSeededAssets reverted; treating pools as unseeded. Expected "
+                    "before the EarnManager upgrade lands, otherwise check that this "
+                    "service signs as the pool admin."
+                )
+                self._seed_read_warned = True
+            return 0
 
     def _net_of_seed(self, gross: int, seeded: int, total_shares: int) -> int:
         """User-backed assets, given everything the pool holds.

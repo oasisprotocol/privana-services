@@ -1681,3 +1681,32 @@ class TestDeployIdle:
         assert await service.deploy_idle(POOL_ID_HEX) == 0
 
         strategy.deposit_to_earn.assert_not_awaited()
+
+
+class TestSeededAssetsRead:
+    def test_an_upgraded_contract_returns_the_figure(self):
+        service, contract, _, _ = _make_service()
+        contract.functions.getSeededAssets.return_value.call.return_value = 100_000
+
+        assert service.get_seeded_assets(b"\x11" * 32) == 100_000
+
+    def test_a_contract_without_the_function_reads_as_unseeded(self):
+        from web3.exceptions import ContractLogicError
+
+        service, contract, _, _ = _make_service()
+        contract.functions.getSeededAssets.return_value.call.side_effect = ContractLogicError(
+            "execution reverted"
+        )
+
+        # The proxy predates the upgrade, so there is no seed to net out and
+        # every quote would otherwise fail until it lands.
+        assert service.get_seeded_assets(b"\x11" * 32) == 0
+
+    def test_a_network_failure_is_not_swallowed(self):
+        service, contract, _, _ = _make_service()
+        contract.functions.getSeededAssets.return_value.call.side_effect = ConnectionError(
+            "rpc down"
+        )
+
+        with pytest.raises(ConnectionError):
+            service.get_seeded_assets(b"\x11" * 32)

@@ -20,6 +20,9 @@ def _make_service(registry=None):
         earn_manager_contract_address="0x1111111111111111111111111111111111111111",
         liquidity_provider_secret_key="0x4c0883a69102937d6231471b5dbb6204fe512961708279f69e0f0fcbf24b5830",
         liquidity_provider_address=POOL_ADDRESS,
+        # A correctly configured deployment signs for the account its pools
+        # are created against.
+        earn_pool_address=POOL_ADDRESS,
         accounting_contract_address="0xad3C76e4E621C0cfF7540479Ee9B0A945723A642",
         accounting_chain_id=23295,
     )
@@ -1786,3 +1789,59 @@ class TestSeedCache:
         # An operator can drop the seed at any moment, so anything that moves
         # funds asks the chain rather than trusting a cached figure.
         assert service.get_seeded_assets(b"\x11" * 32, fresh=True) == 0
+
+
+class TestPoolCustody:
+    @staticmethod
+    def _service_with_foreign_pool():
+        service, contract, sapphire, _ = _make_service()
+        contract.functions.pools.return_value.call.return_value = (
+            bytes.fromhex(USDC_TOKEN_ID[2:]),
+            "0x" + "99" * 20,   # created against some other account
+            1000, 1050, True,
+        )
+        return service, sapphire
+
+    async def test_deposit_refuses_a_pool_this_service_cannot_pay_out(self, test_db):
+        service, sapphire = self._service_with_foreign_pool()
+
+        with pytest.raises(ValueError, match="not served by this deployment"):
+            await service.deposit(POOL_ID_HEX, USER_ADDRESS, "1000", 0, "0x" + "cc" * 65)
+
+        # The whole point is that no shares exist against funds the service
+        # could never redeem.
+        sapphire.execute_contract_call.assert_not_called()
+
+    async def test_withdraw_refuses_before_reclaiming_anything(self, test_db):
+        from src.services.earn.registry import StrategyRegistry
+
+        registry = StrategyRegistry()
+        strategy = MagicMock()
+        strategy.name = "aave-v3"
+        strategy.withdraw_from_earn = AsyncMock()
+        registry.register(POOL_ID_HEX, strategy)
+        service, contract, sapphire, _ = _make_service(registry=registry)
+        contract.functions.pools.return_value.call.return_value = (
+            bytes.fromhex(USDC_TOKEN_ID[2:]), "0x" + "99" * 20, 1000, 1050, True,
+        )
+
+        with pytest.raises(ValueError, match="not served by this deployment"):
+            await service.withdraw(POOL_ID_HEX, USER_ADDRESS, "500", 0, USER_WITHDRAW_SIG)
+
+        # Failing after the reclaim would leave funds mid-flight for a payout
+        # that was always going to revert.
+        strategy.withdraw_from_earn.assert_not_awaited()
+        sapphire.execute_contract_call.assert_not_called()
+
+    async def test_a_matching_pool_is_allowed_through(self, test_db):
+        service, _, _, _ = _make_service()
+        service._assert_pool_custody({"pool_address": POOL_ADDRESS})
+
+    async def test_an_unset_earn_account_is_refused(self, test_db):
+        from dataclasses import replace
+
+        service, _, _, _ = _make_service()
+        service.settings = replace(service.settings, earn_pool_address="")
+
+        with pytest.raises(ValueError, match="not served by this deployment"):
+            service._assert_pool_custody({"pool_address": POOL_ADDRESS})

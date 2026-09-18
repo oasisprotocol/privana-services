@@ -129,6 +129,27 @@ class VaultService:
                 tx_id, amount,
             )
 
+    def _assert_pool_custody(self, pool: dict) -> None:
+        """Refuse to touch a pool whose account is not the one this service
+        signs for.
+
+        Deposits land in `pool.poolAddress`, while a withdrawal is debited
+        from whoever signs the pool's accounting transfer, which is always
+        this service's earn account. When the two differ the money goes into
+        one account and the payout is attempted from another, so shares get
+        minted that can never be redeemed. `createPool` has no setter for the
+        address, so the only repair is a new pool; refusing here keeps funds
+        out of the old one until that happens.
+        """
+        expected = (self.settings.earn_pool_address or "").lower()
+        actual = (pool.get("pool_address") or "").lower()
+        if not expected or actual != expected:
+            raise ValueError(
+                "Pool is not served by this deployment: its account is "
+                f"{pool.get('pool_address')} but this service signs for "
+                f"{self.settings.earn_pool_address}"
+            )
+
     def get_pool(self, pool_id: bytes) -> dict:
         pool = self._read_with_retry(self.contract.functions.pools(pool_id).call, "pools")
         return {
@@ -412,6 +433,7 @@ class VaultService:
             raise ValueError("Pool not found")
         if not pool["active"]:
             raise ValueError("Pool is not active")
+        self._assert_pool_custody(pool)
 
         # Probe before minting anything: a paused vault or stale oracle means
         # the routing step is guaranteed to fail, and refusing here keeps the
@@ -568,6 +590,10 @@ class VaultService:
         if pool["pool_address"] == "0x0000000000000000000000000000000000000000":
             raise ValueError("Pool not found")
         # No active check — users must always be able to exit paused pools.
+        # Custody still has to line up: the payout is debited from the account
+        # this service signs for, so a mismatch would revert on accounting
+        # after the reclaim had already moved funds.
+        self._assert_pool_custody(pool)
 
         async with self._pools_tx_lock:
             # Sync inside the lock, before moving any strategy assets, so a

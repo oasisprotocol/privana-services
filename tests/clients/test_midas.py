@@ -79,12 +79,15 @@ def _wire_write_chain(w3, tx_hash_byte: int = 0xAB, status: int = 1) -> None:
     w3.eth.wait_for_transaction_receipt.return_value = {"status": status}
 
 
-def test_get_oracle_answer_returns_latestAnswer():
+def test_get_oracle_answer_reads_the_answer_from_latestRoundData():
     client, c = _make_client()
-    c["oracle"].functions.latestAnswer.return_value.call.return_value = 1_002_345_678_901
+    c["oracle"].functions.latestRoundData.return_value.call.return_value = (
+        12345, 1_002_345_678_901, 1_700_000_000, 1_700_086_400, 12345,
+    )
 
     assert client.get_oracle_answer() == 1_002_345_678_901
-    c["oracle"].functions.latestAnswer.assert_called_once_with()
+    # The Ethereum feed reverts on latestAnswer for every caller.
+    c["oracle"].functions.latestAnswer.assert_not_called()
 
 
 def test_get_oracle_decimals_returns_uint8():

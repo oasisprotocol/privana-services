@@ -24,6 +24,14 @@ ESTIMATE_REVERT_BACKOFF_SEC = 2.0
 GAS_HEADROOM_NUM, GAS_HEADROOM_DEN = 13, 10
 RECEIPT_RETRY_ATTEMPTS = 3
 RECEIPT_RETRY_BACKOFF_SEC = 2.0
+
+# Ethereum's base fee can rise sharply between building a transaction and
+# mining it. A legacy gasPrice fixed at build time then drops out of the
+# mempool and the transaction is simply never mined. Send EIP-1559 instead,
+# with a cap several base fees high: the cap is a ceiling, not what gets
+# paid, so it costs nothing in the normal case and survives a spike.
+FEE_CAP_BASE_MULTIPLIER = 4
+MIN_PRIORITY_FEE_WEI = 100_000
 ZERO_REFERRER_ID = b"\x00" * 32
 
 ETHEREUM_CHAIN_ID = 1
@@ -281,6 +289,24 @@ class MidasClient:
                     time.sleep(RECEIPT_RETRY_BACKOFF_SEC * attempt)
         raise last_exc
 
+    def _fee_params(self) -> dict:
+        """Fee fields for a write, EIP-1559 where the chain supports it.
+
+        Falls back to the node's legacy gasPrice on a chain that reports no
+        base fee, so this stays correct if the client is ever pointed at one.
+        """
+        base = self.w3.eth.get_block("latest").get("baseFeePerGas")
+        if base is None:
+            return {"gasPrice": self.w3.eth.gas_price}
+        try:
+            tip = max(self.w3.eth.max_priority_fee, MIN_PRIORITY_FEE_WEI)
+        except Exception:
+            tip = MIN_PRIORITY_FEE_WEI
+        return {
+            "maxFeePerGas": base * FEE_CAP_BASE_MULTIPLIER + tip,
+            "maxPriorityFeePerGas": tip,
+        }
+
     def _send_write_tx(self, to_address: str, contract, function_name: str, args: list) -> str:
         if self._account is None:
             raise RuntimeError("MidasClient has no signer configured")
@@ -291,8 +317,8 @@ class MidasClient:
             "from": self._account.address,
             "nonce": nonce,
             "gas": gas_limit,
-            "gasPrice": self.w3.eth.gas_price,
             "chainId": self.w3.eth.chain_id,
+            **self._fee_params(),
         })
         signed = self._account.sign_transaction(tx)
         tx_hash = self.w3.eth.send_raw_transaction(signed.raw_transaction)

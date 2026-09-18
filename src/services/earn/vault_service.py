@@ -161,10 +161,14 @@ class VaultService:
         }
 
     def list_pools(self) -> list[dict]:
-        count = self.contract.functions.getPoolCount().call()
+        count = self._read_with_retry(
+            self.contract.functions.getPoolCount().call, "getPoolCount"
+        )
         pools = []
         for i in range(count):
-            pool_id = self.contract.functions.poolIds(i).call()
+            pool_id = self._read_with_retry(
+                self.contract.functions.poolIds(i).call, "poolIds"
+            )
             pool = self.get_pool(pool_id)
             pool["pool_id"] = "0x" + pool_id.hex()
             pools.append(pool)
@@ -179,7 +183,10 @@ class VaultService:
         balance and no one else's.
         """
         token_bytes = bytes.fromhex(token_hex.removeprefix("0x"))
-        return self.contract.functions.getUserShares(pool_id, token_bytes).call()
+        return self._read_with_retry(
+            self.contract.functions.getUserShares(pool_id, token_bytes).call,
+            "getUserShares",
+        )
 
     def get_withdraw_nonce_via_token(self, token_hex: str) -> int:
         """Read the caller's withdraw nonce via the SIWE auth-gated view.
@@ -188,7 +195,10 @@ class VaultService:
         supplied nonce matches storage at submission time.
         """
         token_bytes = bytes.fromhex(token_hex.removeprefix("0x"))
-        return self.contract.functions.getWithdrawNonce(token_bytes).call()
+        return self._read_with_retry(
+            self.contract.functions.getWithdrawNonce(token_bytes).call,
+            "getWithdrawNonce",
+        )
 
     @staticmethod
     def _read_with_retry(call, label: str):
@@ -261,10 +271,16 @@ class VaultService:
         return max(gross - seeded, 0)
 
     def convert_to_shares(self, pool_id: bytes, assets: int) -> int:
-        return self.contract.functions.convertToShares(pool_id, assets).call()
+        return self._read_with_retry(
+            self.contract.functions.convertToShares(pool_id, assets).call,
+            "convertToShares",
+        )
 
     def convert_to_assets(self, pool_id: bytes, shares: int) -> int:
-        return self.contract.functions.convertToAssets(pool_id, shares).call()
+        return self._read_with_retry(
+            self.contract.functions.convertToAssets(pool_id, shares).call,
+            "convertToAssets",
+        )
 
     def get_user_balance_via_token(self, pool_id: bytes, token_hex: str) -> dict:
         shares = self.get_user_shares_via_token(pool_id, token_hex)

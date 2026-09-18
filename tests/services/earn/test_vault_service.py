@@ -1748,6 +1748,33 @@ class TestStaleLeashRetry:
             with pytest.raises(Web3RPCError):
                 service.get_seeded_assets(b"\x11" * 32)
 
+    def test_the_pool_listing_reads_are_retried(self, test_db):
+        service, contract, _, _ = _make_service()
+        contract.functions.getPoolCount.return_value.call.side_effect = [
+            self._rpc_error(), 0,
+        ]
+
+        with patch("src.services.earn.vault_service.time.sleep"):
+            assert service.list_pools() == []
+
+    def test_the_user_share_read_is_retried(self, test_db):
+        service, contract, _, _ = _make_service()
+        contract.functions.getUserShares.return_value.call.side_effect = [
+            self._rpc_error(), 7,
+        ]
+
+        with patch("src.services.earn.vault_service.time.sleep"):
+            assert service.get_user_shares_via_token(b"\x11" * 32, "0xab") == 7
+
+    def test_the_share_conversion_reads_are_retried(self, test_db):
+        service, contract, _, _ = _make_service()
+        contract.functions.convertToAssets.return_value.call.side_effect = [
+            self._rpc_error(), 42,
+        ]
+
+        with patch("src.services.earn.vault_service.time.sleep"):
+            assert service.convert_to_assets(b"\x11" * 32, 1) == 42
+
     def test_other_rpc_errors_are_not_retried(self, test_db):
         from web3.exceptions import Web3RPCError
 

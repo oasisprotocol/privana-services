@@ -325,8 +325,20 @@ class MidasStrategy(BaseStrategy):
 
         price, decimals = await asyncio.to_thread(self._read_oracle_price)
         fee_bps = await asyncio.to_thread(self._client.get_redemption_instant_fee_bps)
-        baseline_mtbill = self.convert_usdc_to_mtbill_amount(amount, price, decimals)
-        mtbill_to_redeem = baseline_mtbill * (10_000 + fee_bps) // 10_000
+        if fee_bps >= 10_000:
+            raise MidasInstantUnavailableError(
+                f"Midas redemption instant fee is {fee_bps} bps; refusing to redeem"
+            )
+        # The instant fee comes out of the USDC the vault pays, so the redeem
+        # has to be sized by dividing by (1 - fee), not multiplying by
+        # (1 + fee). The two agree to about a part in a million, which is
+        # enough to leave the payout a few base units short of the amount the
+        # pool then has to transfer, and that transfer reverts. Round up; the
+        # excess is a rounding unit that stays in the pool and redeploys.
+        gross_usdc = -(-amount * 10_000 // (10_000 - fee_bps))
+        mtbill_to_redeem = (
+            self.convert_usdc_to_mtbill_amount(gross_usdc, price, decimals) + 1
+        )
         min_receive_usdc = (
             amount * (10_000 - self._slippage_bps) // 10_000 * _BASE18_SCALE
         )

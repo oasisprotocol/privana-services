@@ -76,12 +76,15 @@ class InternalSwapPipeline:
         except Exception as exc:
             # A timeout is not a revert. Keep the hash and reconcile it next
             # iteration/restart; never rebroadcast an uncertain transaction.
+            logger.warning("internal swap %s tx_hash %s waiting for receipt failed: %s", swap["id"], swap["swap_tx_hash"], exc)
             self._update(swap["id"], error=sanitize_error(str(exc)))
             return
         if receipt["status"] == 1:
+            logger.info("internal swap %s settled", swap["id"])
             self._update(swap["id"], status="completed", error=None,
                          to_amount_actual=swap["to_amount_estimate"])
         else:
+            logger.warning("internal swap %s tx hash %s failed", swap["id"], swap['swap_tx_hash'])
             self._update(swap["id"], status="failed",
                          error=f"Transaction reverted: {swap['swap_tx_hash']}")
 
@@ -94,9 +97,10 @@ class InternalSwapPipeline:
             "SELECT * FROM swaps WHERE venue = 'internal' AND status = 'executing'"
         ).fetchall()
         queued = get_db().execute(
-            "SELECT 1 FROM swaps WHERE venue = 'internal' AND status = 'scheduled' LIMIT 1"
-        ).fetchone()
-        if not active and not queued:
+            "SELECT COUNT(*) FROM swaps WHERE venue = 'internal' AND status = 'scheduled'"
+        ).fetchone()[0]
+        logger.info("internal swap: %d active, %d queued", len(active), queued)
+        if not active and queued == 0:
             return
         sapphire = await asyncio.to_thread(get_sapphire_client)
         async with lp_transfer_lock:
@@ -106,9 +110,15 @@ class InternalSwapPipeline:
                     if swap["swap_tx_hash"]:
                         await self._settle(sapphire, swap)
                     elif swap["output_signature"]:
+                        logger.warning(
+                            "internal swap %s submission outcome unknown; "
+                            "manual recovery required",
+                            swap["id"],
+                        )
                         self._update(swap["id"],
                                      error="Submission outcome unknown; manual recovery required")
                     else:
+                        logger.warning("internal swap %s changing status from 'executing' to 'scheduled'", swap["id"])
                         self._update(swap["id"], status="scheduled")
                 # Wait until a subsequent iteration before submitting more.
                 return

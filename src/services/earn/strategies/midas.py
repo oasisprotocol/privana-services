@@ -325,11 +325,30 @@ class MidasStrategy(BaseStrategy):
 
         price, decimals = await asyncio.to_thread(self._read_oracle_price)
         fee_bps = await asyncio.to_thread(self._client.get_redemption_instant_fee_bps)
-        baseline_mtbill = self.convert_usdc_to_mtbill_amount(amount, price, decimals)
-        mtbill_to_redeem = baseline_mtbill * (10_000 + fee_bps) // 10_000
-        min_receive_usdc = (
-            amount * (10_000 - self._slippage_bps) // 10_000 * _BASE18_SCALE
+        if fee_bps >= 10_000:
+            raise MidasInstantUnavailableError(
+                f"Midas redemption instant fee is {fee_bps} bps; refusing to redeem"
+            )
+        # The instant fee comes out of the USDC the vault pays, so the redeem
+        # has to be sized by dividing by (1 - fee), not multiplying by
+        # (1 + fee). The two agree to about a part in a million, which is
+        # enough to leave the payout a few base units short of the amount the
+        # pool then has to transfer, and that transfer reverts. Round up; the
+        # excess is a rounding unit that stays in the pool and redeploys.
+        gross_usdc = -(-amount * 10_000 // (10_000 - fee_bps))
+        # Both conversions round up, so the redeem covers `amount` without ever
+        # asking for a base unit more than it needs. Adding a flat unit instead
+        # would overshoot whenever the division came out exact, and a pool being
+        # emptied has no spare unit to give.
+        mtbill_to_redeem = -(
+            -gross_usdc * (10 ** (decimals + _DECIMAL_BALANCE)) // price
         )
+        # The pool has to hand `amount` on to the user straight after this, so
+        # anything less is unusable. Floor the redeem at the target rather than
+        # at a slippage band below it: reverting here is recoverable, whereas a
+        # short fill leaves the payout to revert with the funds already out of
+        # the protocol.
+        min_receive_usdc = amount * _BASE18_SCALE
 
         mtbill_allowance = await asyncio.to_thread(
             self._client.get_allowance,

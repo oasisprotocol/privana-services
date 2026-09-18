@@ -639,13 +639,33 @@ async def test_withdraw_from_earn_raises_when_no_usdc_realized(
     privana.get_balance.return_value = _Balance(
         user_address=POOL_ADDRESS, token_id=TOKEN_ID, balance=0,
     )
-    midas_client.get_erc20_balance.side_effect = [500_000, 500_000]
+    midas_client.get_erc20_balance.return_value = 500_000
 
-    with pytest.raises(MidasInstantUnavailableError, match="produced no USDC"):
-        await strategy.withdraw_from_earn(1_000_000)
+    with patch("src.services.earn.strategies.midas.asyncio.sleep", new=AsyncMock()):
+        with pytest.raises(MidasInstantUnavailableError, match="produced no USDC"):
+            await strategy.withdraw_from_earn(1_000_000)
 
     midas_client.transfer_erc20.assert_not_called()
     privana.check_deposit.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_withdraw_from_earn_rereads_a_lagging_balance(
+    strategy, midas_client, privana,
+) -> None:
+    privana.get_balance.side_effect = [
+        _Balance(user_address=POOL_ADDRESS, token_id=TOKEN_ID, balance=0),
+        _Balance(user_address=POOL_ADDRESS, token_id=TOKEN_ID, balance=1_000_000),
+    ]
+    midas_client.get_erc20_balance.side_effect = [0, 0, 0, 1_000_000]
+    privana.check_deposit.return_value = _DepositCheckResponse(
+        status="credited", deposit_id="0xdep",
+    )
+
+    with patch("src.services.earn.strategies.midas.asyncio.sleep", new=AsyncMock()):
+        await strategy.withdraw_from_earn(1_000_000)
+
+    midas_client.transfer_erc20.assert_called_once()
 
 
 @pytest.mark.asyncio

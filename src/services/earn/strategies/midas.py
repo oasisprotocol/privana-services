@@ -40,6 +40,13 @@ _NETWORK_BY_CHAIN_ID: dict[int, Network] = {
 DEFAULT_POLL_INTERVAL_SEC = 3.0
 DEFAULT_MAX_BRIDGE_POLL_ATTEMPTS = 200
 
+# A confirmed redeem receipt does not guarantee the next balanceOf sees it:
+# a load-balanced RPC can serve the read from a node still a block behind,
+# reporting the pre-redeem balance. Re-read a few times before concluding
+# the redeem produced nothing.
+REDEEM_BALANCE_POLL_ATTEMPTS = 10
+REDEEM_BALANCE_POLL_INTERVAL_SEC = 3.0
+
 _ACCEPTED_SUBMISSION_STATUSES = frozenset({"success", "pending", "accepted", "ok", "submitted"})
 
 _USDC_DECIMALS = 6
@@ -359,9 +366,21 @@ class MidasStrategy(BaseStrategy):
                 f"mtbill_in={mtbill_to_redeem}): {exc}"
             ) from exc
 
-        lp_usdc_after = await asyncio.to_thread(
-            self._client.get_erc20_balance, self._asset_address,
-        )
+        lp_usdc_after = lp_usdc_before
+        for attempt in range(1, REDEEM_BALANCE_POLL_ATTEMPTS + 1):
+            lp_usdc_after = await asyncio.to_thread(
+                self._client.get_erc20_balance, self._asset_address,
+            )
+            if lp_usdc_after > lp_usdc_before:
+                break
+            if attempt < REDEEM_BALANCE_POLL_ATTEMPTS:
+                logger.warning(
+                    "MidasStrategy.withdraw_from_earn: redeem tx=%s confirmed but the "
+                    "USDC balance still reads %d (attempt %d/%d); re-reading",
+                    redeem_tx, lp_usdc_after, attempt, REDEEM_BALANCE_POLL_ATTEMPTS,
+                )
+                await asyncio.sleep(REDEEM_BALANCE_POLL_INTERVAL_SEC)
+
         realized_usdc = lp_usdc_after - lp_usdc_before
         if realized_usdc <= 0:
             raise MidasInstantUnavailableError(

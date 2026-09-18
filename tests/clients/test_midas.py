@@ -75,8 +75,33 @@ def _wire_write_chain(w3, tx_hash_byte: int = 0xAB, status: int = 1) -> None:
     w3.eth.get_transaction_count.return_value = 7
     w3.eth.gas_price = 10**9
     w3.eth.chain_id = 8453
+    w3.eth.get_block.return_value = {"baseFeePerGas": 10**9}
+    w3.eth.max_priority_fee = 10**6
     w3.eth.send_raw_transaction.return_value = bytes([tx_hash_byte] * 32)
     w3.eth.wait_for_transaction_receipt.return_value = {"status": status}
+
+
+def test_writes_are_priced_with_a_cap_above_the_base_fee():
+    from src.clients.midas import FEE_CAP_BASE_MULTIPLIER, MIN_PRIORITY_FEE_WEI
+
+    client, c = _make_client()
+    _attach_signer(client)
+    _wire_write_chain(client.w3)
+
+    params = client._fee_params()
+
+    assert params["maxPriorityFeePerGas"] == max(10**6, MIN_PRIORITY_FEE_WEI)
+    assert params["maxFeePerGas"] == 10**9 * FEE_CAP_BASE_MULTIPLIER + params["maxPriorityFeePerGas"]
+    assert "gasPrice" not in params
+
+
+def test_writes_fall_back_to_legacy_pricing_without_a_base_fee():
+    client, c = _make_client()
+    _attach_signer(client)
+    _wire_write_chain(client.w3)
+    client.w3.eth.get_block.return_value = {}
+
+    assert client._fee_params() == {"gasPrice": 10**9}
 
 
 def test_get_oracle_answer_reads_the_answer_from_latestRoundData():

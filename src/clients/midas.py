@@ -106,11 +106,14 @@ class MidasClient:
         return self._account.address
 
     def get_oracle_answer(self) -> int:
-        """Raw `latestAnswer` from Chronicle MTBILL/USD. Caller must normalize
-        with `get_oracle_decimals()` because Chronicle feeds on Base are not
-        guaranteed 18-decimal.
+        """Raw MTBILL/USD answer from the feed's `latestRoundData`. Caller
+        must normalize with `get_oracle_decimals()`, since the feeds are not
+        guaranteed 18-decimal. `latestRoundData` rather than `latestAnswer`:
+        the Ethereum feed reverts on the latter for every caller, and the
+        health probe already reads the former.
         """
-        return self.oracle.functions.latestAnswer().call()
+        answer, _ = self.get_oracle_round()
+        return answer
 
     def get_oracle_decimals(self) -> int:
         return self.oracle.functions.decimals().call()

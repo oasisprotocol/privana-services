@@ -198,16 +198,22 @@ async def deposit(payload: DepositRequest) -> DepositResponse:
     _pool_id_bytes(payload.pool_id)
     try:
         service = get_vault_service()
-        result = await service.deposit(
+        # Queued, not executed: the strategy leg bridges and supplies on another
+        # chain and routinely outlives the gateway's patience. The client polls
+        # GET /v1/operations/unsettled for the outcome, keyed by deposit_id.
+        scheduled = service.schedule_deposit(
             pool_id_hex=payload.pool_id,
             user_address=payload.user_address,
             amount=payload.amount,
             nonce=payload.nonce,
             signature=payload.signature,
         )
-        # An on-chain revert is a settled outcome, reported as status="failed" on a
-        # 200. Only a request we could not act on at all is an HTTP error.
-        return DepositResponse(**result)
+        return DepositResponse(
+            deposit_id=scheduled["id"],
+            pool_id=payload.pool_id,
+            amount=payload.amount,
+            status=scheduled["status"],
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -217,14 +223,19 @@ async def withdraw(payload: WithdrawRequest) -> WithdrawResponse:
     _pool_id_bytes(payload.pool_id)
     try:
         service = get_vault_service()
-        result = await service.withdraw(
+        scheduled = service.schedule_withdraw(
             pool_id_hex=payload.pool_id,
             user_address=payload.user_address,
             amount=payload.amount,
             nonce=payload.nonce,
             signature=payload.signature,
         )
-        return WithdrawResponse(**result)
+        return WithdrawResponse(
+            withdraw_id=scheduled["id"],
+            pool_id=payload.pool_id,
+            amount=payload.amount,
+            status=scheduled["status"],
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

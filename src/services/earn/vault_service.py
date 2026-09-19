@@ -36,6 +36,8 @@ EARN_MANAGER_ABI = load_abi("EarnManager")
 
 EARN_OP_DEPOSIT = "deposit"
 EARN_OP_WITHDRAW = "withdraw"
+EARN_STATUS_SCHEDULED = "scheduled"
+EARN_STATUS_EXECUTING = "executing"
 EARN_STATUS_PENDING = "pending"
 EARN_STATUS_COMPLETED = "completed"
 EARN_STATUS_FAILED = "failed"
@@ -422,6 +424,66 @@ class VaultService:
             )
             return 0
 
+    def _schedule(
+        self,
+        *,
+        operation: str,
+        pool_id_hex: str,
+        user_address: str,
+        amount: str,
+        nonce: int,
+        signature: str,
+    ) -> dict:
+        """Record a request and hand it to the worker.
+
+        Only the checks that cost nothing run here. Anything that needs a
+        chain read — whether the pool is active, whether this deployment can
+        sign for it, whether the strategy is healthy — is left to execution,
+        because a deposit that waits for those inline is a deposit the
+        gateway hangs up on. A request refused later settles as a failed row
+        with the reason on it, which the unsettled feed already carries.
+        """
+        validate_address(user_address, "user_address")
+        validate_amount(amount, "amount")
+        validate_signature(signature, "signature")
+        bytes.fromhex(pool_id_hex.removeprefix("0x"))
+
+        tx_id = str(uuid.uuid4())
+        now = int(time.time())
+        db_write(
+            get_db(),
+            """INSERT INTO earn_transactions
+               (id, operation, pool_id, user_address, token_id, amount,
+                signer_address, nonce, signature, status, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                tx_id, operation, pool_id_hex, user_address.lower(), "", amount,
+                user_address.lower(), nonce, signature,
+                EARN_STATUS_SCHEDULED, now, now,
+            ),
+        )
+        logger.info(
+            "earn %s %s scheduled: user=%s pool=%s amount=%s nonce=%s",
+            operation, tx_id, user_address, pool_id_hex, amount, nonce,
+        )
+        return {"id": tx_id, "status": EARN_STATUS_SCHEDULED}
+
+    def schedule_deposit(
+        self, *, pool_id_hex: str, user_address: str, amount: str, nonce: int, signature: str
+    ) -> dict:
+        return self._schedule(
+            operation=EARN_OP_DEPOSIT, pool_id_hex=pool_id_hex,
+            user_address=user_address, amount=amount, nonce=nonce, signature=signature,
+        )
+
+    def schedule_withdraw(
+        self, *, pool_id_hex: str, user_address: str, amount: str, nonce: int, signature: str
+    ) -> dict:
+        return self._schedule(
+            operation=EARN_OP_WITHDRAW, pool_id_hex=pool_id_hex,
+            user_address=user_address, amount=amount, nonce=nonce, signature=signature,
+        )
+
     async def deposit(
         self,
         pool_id_hex: str,
@@ -429,6 +491,7 @@ class VaultService:
         amount: str,
         nonce: int,
         signature: str,
+        scheduled_id: Optional[str] = None,
     ) -> dict:
         """Deposit user funds into an earn pool and mint shares.
 
@@ -481,6 +544,7 @@ class VaultService:
                 )
 
             tx_id = self._record_transaction(
+                existing_id=scheduled_id,
                 operation=EARN_OP_DEPOSIT,
                 pool_id_hex=pool_id_hex,
                 user_address=user_address,
@@ -578,6 +642,7 @@ class VaultService:
         amount: str,
         nonce: int,
         signature: str,
+        scheduled_id: Optional[str] = None,
     ) -> dict:
         """Burn user shares and return the underlying assets.
 
@@ -677,6 +742,7 @@ class VaultService:
                 consent_signer = None
 
             tx_id = self._record_transaction(
+                existing_id=scheduled_id,
                 operation=EARN_OP_WITHDRAW,
                 pool_id_hex=pool_id_hex,
                 user_address=user_address,
@@ -1033,7 +1099,26 @@ class VaultService:
         nonce: int,
         signature: str,
         consent_signer: Optional[str] = None,
+        existing_id: Optional[str] = None,
     ) -> str:
+        if existing_id is not None:
+            # Queued path: the row was written when the request came in. Fill in
+            # what execution settled on — a withdraw signs with the pool's key,
+            # not the caller's — and move it out of the queue.
+            self._update_transaction(
+                existing_id,
+                signer_address=signer_address.lower(),
+                nonce=nonce,
+                signature=signature,
+                consent_signer=consent_signer.lower() if consent_signer else None,
+                status=EARN_STATUS_PENDING,
+            )
+            logger.info(
+                "earn %s %s signed: signer=%s to=%s token=%s amount=%s nonce=%s",
+                operation, existing_id, signer_address, user_address, token_id,
+                amount, nonce,
+            )
+            return existing_id
         tx_id = str(uuid.uuid4())
         now = int(time.time())
         db = get_db()

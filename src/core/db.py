@@ -130,6 +130,12 @@ MIGRATIONS = [
     "ALTER TABLE swaps ADD COLUMN input_nonce TEXT;",
     "ALTER TABLE swaps ADD COLUMN input_signature TEXT;",
     "UPDATE swaps SET status = 'executing' WHERE status = 'pending';",
+    # Earn deposits and withdrawals are queued the way swaps are: the request
+    # records the row and returns, a worker executes it. Rows the old inline
+    # path left behind keep their status and settle on their own.
+    "ALTER TABLE earn_transactions ADD COLUMN claimed_at INTEGER;",
+    "CREATE INDEX IF NOT EXISTS idx_earn_tx_scheduled "
+    "ON earn_transactions(status, created_at);",
 
 ]
 

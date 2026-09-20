@@ -130,11 +130,52 @@ async def test_an_error_after_settlement_does_not_overwrite_the_outcome(test_db)
     assert _status(test_db, "t1") == "completed"
 
 
-def test_start_fails_rows_left_executing_by_a_restart(test_db):
-    # Replaying one could pay twice: its accounting transfer may already be on
-    # chain. Surface it instead.
+@pytest.mark.asyncio
+async def test_a_row_that_never_reached_the_contract_goes_back_on_the_queue(test_db):
     _row(test_db, "t1", status="executing")
+    service = MagicMock()
 
-    EarnWorker._fail_orphans()
+    with patch("src.services.earn.worker.get_vault_service", return_value=service):
+        assert await EarnWorker()._recover() is True
 
-    assert _status(test_db, "t1") == "failed"
+    service._update_transaction.assert_called_once_with("t1", status="scheduled")
+
+
+@pytest.mark.asyncio
+async def test_a_row_with_a_hash_is_settled_from_its_receipt(test_db):
+    _row(test_db, "t1", status="executing")
+    db_write(test_db, "UPDATE earn_transactions SET tx_hash = ? WHERE id = ?", ("0xabc", "t1"))
+    service = MagicMock()
+    service.sapphire.wait_for_receipt = MagicMock(return_value={"status": 1})
+
+    with patch("src.services.earn.worker.get_vault_service", return_value=service):
+        await EarnWorker()._recover()
+
+    assert service._update_transaction.call_args.kwargs["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_a_submitted_row_without_a_hash_is_never_replayed(test_db):
+    """Its accounting transfer may already be on chain, so replaying it could
+    pay twice. Surface it for manual recovery instead."""
+    _row(test_db, "t1", status="pending")
+    service = MagicMock()
+
+    with patch("src.services.earn.worker.get_vault_service", return_value=service):
+        await EarnWorker()._recover()
+
+    assert service._update_transaction.call_args.kwargs["status"] == "failed"
+    assert "manual recovery" in service._update_transaction.call_args.kwargs["error"]
+
+
+@pytest.mark.asyncio
+async def test_nothing_new_is_claimed_while_a_row_is_still_in_flight(test_db):
+    _row(test_db, "inflight", user=USER_B, status="executing")
+    _row(test_db, "queued", user=USER_A)
+    service = MagicMock()
+
+    with patch("src.services.earn.worker.get_vault_service", return_value=service):
+        await EarnWorker().run_once()
+
+    assert _status(test_db, "queued") == "scheduled"
+    service.deposit.assert_not_called()

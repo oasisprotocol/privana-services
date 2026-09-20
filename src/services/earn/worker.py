@@ -9,11 +9,14 @@ from src.core.db import db_write, get_db
 from src.core.validation import sanitize_error
 from src.services.earn.vault_service import (
     EARN_OP_DEPOSIT,
+    EARN_STATUS_COMPLETED,
     EARN_STATUS_EXECUTING,
     EARN_STATUS_FAILED,
+    EARN_STATUS_PENDING,
     EARN_STATUS_SCHEDULED,
     get_vault_service,
 )
+from src.services.user_queue import users_with_inflight_work
 
 logger = logging.getLogger(__name__)
 
@@ -45,10 +48,6 @@ class EarnWorker:
         if self._task is not None:
             return
         self._stop.clear()
-        # A row left executing by a restart is not safe to replay: its
-        # accounting transfer may already be on chain. Surface it as failed so
-        # the operator sees it rather than paying twice.
-        self._fail_orphans()
         self._task = asyncio.create_task(self._loop())
         logger.info("Earn worker started (every %.0fs)", POLL_INTERVAL)
 
@@ -60,23 +59,65 @@ class EarnWorker:
         self._task = None
         logger.info("Earn worker stopped")
 
+    async def _recover(self) -> bool:
+        """Reconcile rows a restart left mid-flight, the way the internal swap
+        pipeline does it.
+
+        Three outcomes, and which one applies turns on how far the row got:
+        a recorded hash can be settled from its receipt; a row that reached
+        the contract call without recording one has an unknown outcome and
+        must never be replayed, because its accounting transfer may already
+        be on chain; anything before that never left, so it is safe to queue
+        again. Returns whether anything is still in flight, so a recovery
+        pass never runs alongside a fresh claim.
+        """
+        rows = get_db().execute(
+            "SELECT * FROM earn_transactions WHERE status IN (?, ?)",
+            (EARN_STATUS_EXECUTING, EARN_STATUS_PENDING),
+        ).fetchall()
+        if not rows:
+            return False
+        service = get_vault_service()
+        for raw in rows:
+            row = dict(raw)
+            if row["tx_hash"]:
+                await self._settle(service, row)
+            elif row["status"] == EARN_STATUS_PENDING:
+                logger.warning(
+                    "Earn %s %s submission outcome unknown; manual recovery required",
+                    row["operation"], row["id"],
+                )
+                service._update_transaction(
+                    row["id"], status=EARN_STATUS_FAILED,
+                    error="Submission outcome unknown; manual recovery required",
+                )
+            else:
+                logger.warning(
+                    "Earn %s %s never reached the contract; returning it to the queue",
+                    row["operation"], row["id"],
+                )
+                service._update_transaction(row["id"], status=EARN_STATUS_SCHEDULED)
+        return True
+
     @staticmethod
-    def _fail_orphans() -> None:
-        changed = db_write(
-            get_db(),
-            "UPDATE earn_transactions SET status = ?, error = ?, updated_at = ? "
-            "WHERE status = ?",
-            (
-                EARN_STATUS_FAILED,
-                "Interrupted while executing; needs manual reconciliation",
-                int(time.time()),
-                EARN_STATUS_EXECUTING,
-            ),
-        ).rowcount
-        if changed:
-            logger.warning(
-                "Earn worker: %d operation(s) were executing at shutdown and "
-                "need manual reconciliation", changed,
+    async def _settle(service, row: dict) -> None:
+        try:
+            receipt = await asyncio.to_thread(service.sapphire.wait_for_receipt, row["tx_hash"])
+        except Exception as exc:
+            # A timeout is not a revert. Keep the hash and reconcile it on the
+            # next pass; never rebroadcast an uncertain transaction.
+            logger.warning("Earn %s receipt still unknown: %s", row["id"], exc)
+            service._update_transaction(row["id"], error=sanitize_error(str(exc)))
+            return
+        if receipt["status"] == 1:
+            logger.info("Earn %s %s recovered as completed", row["operation"], row["id"])
+            service._update_transaction(
+                row["id"], status=EARN_STATUS_COMPLETED, error=None,
+            )
+        else:
+            service._update_transaction(
+                row["id"], status=EARN_STATUS_FAILED,
+                error=f"Transaction reverted: {row['tx_hash']}",
             )
 
     @staticmethod
@@ -87,7 +128,9 @@ class EarnWorker:
             (EARN_STATUS_SCHEDULED, limit),
         ).fetchall()
         claimed: list[dict] = []
-        seen: set[str] = set()
+        # Anything this user already has off the queue, in either pipeline, may
+        # have spent the nonce this row was signed against.
+        seen: set[str] = users_with_inflight_work()
         for row in rows:
             # One in flight per user: both legs consume that user's accounting
             # transfer nonce, so a second request has to wait for the first to
@@ -103,10 +146,14 @@ class EarnWorker:
             ).rowcount
             if changed:
                 claimed.append(dict(row))
-                seen.add(row["user_address"])
+                seen.add(row["user_address"].lower())
         return claimed
 
     async def run_once(self) -> None:
+        # Reconcile before claiming: no new work is submitted while anything is
+        # still in flight, which is the rule the internal swap pipeline keeps.
+        if await self._recover():
+            return
         # One row per pass. Claiming a batch would mark rows executing that this
         # pass never reaches, and a crash then reports them failed without
         # having attempted them.

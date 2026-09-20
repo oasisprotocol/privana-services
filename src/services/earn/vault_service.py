@@ -1107,6 +1107,10 @@ class VaultService:
             # not the caller's — and move it out of the queue.
             self._update_transaction(
                 existing_id,
+                # token_id is only knowable from the pool, which scheduling does
+                # not read. Fill it here or the row stays blank for every
+                # consumer that keys on it, the unsettled feed included.
+                token_id=token_id,
                 signer_address=signer_address.lower(),
                 nonce=nonce,
                 signature=signature,

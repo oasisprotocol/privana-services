@@ -1943,6 +1943,10 @@ class TestScheduling:
 
         assert adopted == scheduled["id"]
         assert test_db.execute("SELECT COUNT(*) c FROM earn_transactions").fetchone()["c"] == 1
-        assert test_db.execute(
-            "SELECT status FROM earn_transactions WHERE id = ?", (adopted,)
-        ).fetchone()["status"] == "pending"
+        row = test_db.execute(
+            "SELECT status, token_id FROM earn_transactions WHERE id = ?", (adopted,)
+        ).fetchone()
+        assert row["status"] == "pending"
+        # Scheduling cannot know the token without reading the pool, so
+        # execution has to fill it or every consumer keyed on it sees a blank.
+        assert row["token_id"] == USDC_TOKEN_ID

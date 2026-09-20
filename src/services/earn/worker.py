@@ -105,14 +105,25 @@ class EarnWorker:
                     scheduled_id=row["id"],
                 )
             except Exception as exc:
-                # deposit/withdraw already mark their own row on an on-chain
-                # outcome. Reaching here means it never got that far, so the
-                # row is still executing and this is the only thing that will
-                # settle it.
+                # deposit/withdraw settle their own row once they have an
+                # on-chain outcome, so only claim the ones that never got that
+                # far. Writing unconditionally would report a deposit that
+                # succeeded as failed because some read after it threw.
                 logger.exception("Earn %s %s failed", row["operation"], row["id"])
-                service._update_transaction(
-                    row["id"], status=EARN_STATUS_FAILED, error=sanitize_error(str(exc)),
-                )
+                self._fail_if_unsettled(row["id"], sanitize_error(str(exc)))
+
+    @staticmethod
+    def _fail_if_unsettled(tx_id: str, error: str) -> None:
+        changed = db_write(
+            get_db(),
+            "UPDATE earn_transactions SET status = ?, error = ?, updated_at = ? "
+            "WHERE id = ? AND status = ?",
+            (EARN_STATUS_FAILED, error, int(time.time()), tx_id, EARN_STATUS_EXECUTING),
+        ).rowcount
+        if not changed:
+            logger.info(
+                "Earn %s already settled before the error was recorded; left as is", tx_id,
+            )
 
     async def _loop(self) -> None:
         while not self._stop.is_set():

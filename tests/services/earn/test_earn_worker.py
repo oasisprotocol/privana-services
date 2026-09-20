@@ -96,14 +96,38 @@ async def test_a_raising_operation_settles_its_row_as_failed(test_db):
     _row(test_db, "t1")
     service = MagicMock()
     service.deposit = AsyncMock(side_effect=ValueError("Pool is not active"))
-    service._update_transaction = MagicMock()
 
     with patch("src.services.earn.worker.get_vault_service", return_value=service):
         await EarnWorker().run_once()
 
-    service._update_transaction.assert_called_once()
-    assert service._update_transaction.call_args.args[0] == "t1"
-    assert service._update_transaction.call_args.kwargs["status"] == "failed"
+    row = test_db.execute(
+        "SELECT status, error FROM earn_transactions WHERE id = ?", ("t1",)
+    ).fetchone()
+    assert row["status"] == "failed"
+    assert "Pool is not active" in row["error"]
+
+
+@pytest.mark.asyncio
+async def test_an_error_after_settlement_does_not_overwrite_the_outcome(test_db):
+    """deposit/withdraw settle their own row. If something throws after that —
+    a read taken once the transaction already landed — the worker must not
+    report a deposit that succeeded as failed."""
+    _row(test_db, "t1")
+
+    async def settle_then_raise(**kwargs):
+        db_write(
+            test_db,
+            "UPDATE earn_transactions SET status = 'completed' WHERE id = ?", ("t1",),
+        )
+        raise RuntimeError("post-settlement read failed")
+
+    service = MagicMock()
+    service.deposit = AsyncMock(side_effect=settle_then_raise)
+
+    with patch("src.services.earn.worker.get_vault_service", return_value=service):
+        await EarnWorker().run_once()
+
+    assert _status(test_db, "t1") == "completed"
 
 
 def test_start_fails_rows_left_executing_by_a_restart(test_db):

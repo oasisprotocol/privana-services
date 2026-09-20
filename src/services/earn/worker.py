@@ -17,8 +17,23 @@ from src.services.earn.vault_service import (
 
 logger = logging.getLogger(__name__)
 
+
+def _public_error(exc: Exception) -> str:
+    """What a caller is allowed to see.
+
+    sanitize_error only scrubs hosts out of revert messages; a provider or
+    connection error carries its endpoint verbatim, and this string is served
+    from /v1/operations/unsettled. Anything that is not the chain's own answer
+    gets a fixed message instead.
+    """
+    if isinstance(exc, ValueError):
+        return sanitize_error(str(exc))
+    text = str(exc)
+    if "revert" in text.lower():
+        return sanitize_error(text)
+    return "Operation could not be completed; please retry"
+
 POLL_INTERVAL = 1.0
-BATCH_SIZE = 5
 
 
 class EarnWorker:
@@ -92,7 +107,10 @@ class EarnWorker:
         return claimed
 
     async def run_once(self) -> None:
-        for row in self._claim(BATCH_SIZE):
+        # One row per pass. Claiming a batch would mark rows executing that this
+        # pass never reaches, and a crash then reports them failed without
+        # having attempted them.
+        for row in self._claim(1):
             service = get_vault_service()
             call = service.deposit if row["operation"] == EARN_OP_DEPOSIT else service.withdraw
             try:
@@ -110,7 +128,7 @@ class EarnWorker:
                 # far. Writing unconditionally would report a deposit that
                 # succeeded as failed because some read after it threw.
                 logger.exception("Earn %s %s failed", row["operation"], row["id"])
-                self._fail_if_unsettled(row["id"], sanitize_error(str(exc)))
+                self._fail_if_unsettled(row["id"], _public_error(exc))
 
     @staticmethod
     def _fail_if_unsettled(tx_id: str, error: str) -> None:

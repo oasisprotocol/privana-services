@@ -448,17 +448,34 @@ class VaultService:
         validate_signature(signature, "signature")
         bytes.fromhex(pool_id_hex.removeprefix("0x"))
 
+        if operation == EARN_OP_WITHDRAW:
+            # A withdraw reclaims from the strategy before the contract ever
+            # checks consent, so an unverified one is a way to make the pool
+            # redeem and roll back on demand. The consent recovers without
+            # touching the chain, so bind it here rather than at execution.
+            recovered = recover_withdraw_signer(
+                chain_id=self.settings.accounting_chain_id,
+                earn_manager_address=self.settings.earn_manager_contract_address,
+                pool_id=pool_id_hex,
+                amount=int(amount),
+                nonce=nonce,
+                signature=signature,
+            )
+            if recovered.lower() != user_address.lower():
+                raise ValueError("Withdraw consent was not signed by user_address")
+
         tx_id = str(uuid.uuid4())
         now = int(time.time())
         db_write(
             get_db(),
             """INSERT INTO earn_transactions
                (id, operation, pool_id, user_address, token_id, amount,
-                signer_address, nonce, signature, status, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                signer_address, nonce, signature, input_nonce, input_signature,
+                status, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 tx_id, operation, pool_id_hex, user_address.lower(), "", amount,
-                user_address.lower(), nonce, signature,
+                user_address.lower(), nonce, signature, nonce, signature,
                 EARN_STATUS_SCHEDULED, now, now,
             ),
         )

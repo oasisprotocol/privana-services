@@ -1897,12 +1897,26 @@ class TestScheduling:
         # No pool read: scheduling must not touch the chain.
         contract.functions.pools.assert_not_called()
 
+    @staticmethod
+    def _consent(key: str, amount: int, nonce: int) -> str:
+        from src.core.eip712 import sign_withdraw_consent
+
+        return sign_withdraw_consent(
+            private_key=key, chain_id=23295,
+            earn_manager_address="0x1111111111111111111111111111111111111111",
+            pool_id=POOL_ID_HEX, amount=amount, nonce=nonce,
+        )
+
     def test_a_scheduled_withdraw_is_recorded_as_a_withdraw(self, test_db):
+        from eth_account import Account
+
         service, _, _, _ = _make_service()
+        key = "0x" + "11" * 32
+        user = Account.from_key(key).address
 
         result = service.schedule_withdraw(
-            pool_id_hex=POOL_ID_HEX, user_address=USER_ADDRESS,
-            amount="500", nonce=1, signature="0x" + "bb" * 65,
+            pool_id_hex=POOL_ID_HEX, user_address=user,
+            amount="500", nonce=1, signature=self._consent(key, 500, 1),
         )
 
         row = test_db.execute(
@@ -1910,6 +1924,44 @@ class TestScheduling:
         ).fetchone()
         assert row["operation"] == "withdraw"
         assert row["status"] == "scheduled"
+
+    def test_a_withdraw_signed_by_someone_else_is_refused_before_it_queues(self, test_db):
+        """A withdraw reclaims from the strategy before the contract checks
+        consent, so an unverified one is a way to make the pool redeem and roll
+        back on demand. The consent recovers without a chain read, so it is
+        bound here rather than at execution."""
+        from eth_account import Account
+
+        service, _, _, _ = _make_service()
+        attacker_key = "0x" + "22" * 32
+        victim = Account.from_key("0x" + "11" * 32).address
+
+        with pytest.raises(ValueError, match="not signed by user_address"):
+            service.schedule_withdraw(
+                pool_id_hex=POOL_ID_HEX, user_address=victim,
+                amount="500", nonce=1, signature=self._consent(attacker_key, 500, 1),
+            )
+
+        assert test_db.execute("SELECT COUNT(*) c FROM earn_transactions").fetchone()["c"] == 0
+
+    def test_a_scheduled_row_keeps_the_callers_own_nonce_and_signature(self, test_db):
+        """Execution overwrites nonce/signature with what it settled on — a
+        withdraw signs the payout with the pool's key — so the caller's own
+        consent is kept in its own columns for reconstruction after a crash."""
+        service, _, _, _ = _make_service()
+        sig = "0x" + "aa" * 65
+
+        result = service.schedule_deposit(
+            pool_id_hex=POOL_ID_HEX, user_address=USER_ADDRESS,
+            amount="1000", nonce=7, signature=sig,
+        )
+
+        row = test_db.execute(
+            "SELECT input_nonce, input_signature FROM earn_transactions WHERE id = ?",
+            (result["id"],),
+        ).fetchone()
+        assert row["input_nonce"] == 7
+        assert row["input_signature"] == sig
 
     @pytest.mark.parametrize(
         "field,value",

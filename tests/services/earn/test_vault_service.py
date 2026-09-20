@@ -1872,3 +1872,77 @@ class TestPoolCustody:
 
         with pytest.raises(ValueError, match="not served by this deployment"):
             service._assert_pool_custody({"pool_address": POOL_ADDRESS})
+
+class TestScheduling:
+    """The request path records and returns. Everything that needs a chain
+    read happens in the worker, because a deposit that waits for those inline
+    is a deposit the gateway hangs up on."""
+
+    def test_a_scheduled_deposit_is_queued_not_executed(self, test_db):
+        service, contract, _, _ = _make_service()
+
+        result = service.schedule_deposit(
+            pool_id_hex=POOL_ID_HEX, user_address=USER_ADDRESS,
+            amount="1000", nonce=3, signature="0x" + "aa" * 65,
+        )
+
+        assert result["status"] == "scheduled"
+        row = test_db.execute(
+            "SELECT * FROM earn_transactions WHERE id = ?", (result["id"],)
+        ).fetchone()
+        assert row["operation"] == "deposit"
+        assert row["status"] == "scheduled"
+        assert row["amount"] == "1000"
+        assert row["nonce"] == 3
+        # No pool read: scheduling must not touch the chain.
+        contract.functions.pools.assert_not_called()
+
+    def test_a_scheduled_withdraw_is_recorded_as_a_withdraw(self, test_db):
+        service, _, _, _ = _make_service()
+
+        result = service.schedule_withdraw(
+            pool_id_hex=POOL_ID_HEX, user_address=USER_ADDRESS,
+            amount="500", nonce=1, signature="0x" + "bb" * 65,
+        )
+
+        row = test_db.execute(
+            "SELECT operation, status FROM earn_transactions WHERE id = ?", (result["id"],)
+        ).fetchone()
+        assert row["operation"] == "withdraw"
+        assert row["status"] == "scheduled"
+
+    @pytest.mark.parametrize(
+        "field,value",
+        [("user_address", "nope"), ("amount", "-1"), ("signature", "0xzz")],
+    )
+    def test_a_malformed_request_is_refused_without_queueing(self, test_db, field, value):
+        service, _, _, _ = _make_service()
+        kwargs = dict(
+            pool_id_hex=POOL_ID_HEX, user_address=USER_ADDRESS,
+            amount="1000", nonce=0, signature="0x" + "aa" * 65,
+        )
+        kwargs[field] = value
+
+        with pytest.raises(ValueError):
+            service.schedule_deposit(**kwargs)
+
+        assert test_db.execute("SELECT COUNT(*) c FROM earn_transactions").fetchone()["c"] == 0
+
+    def test_executing_a_scheduled_row_updates_it_rather_than_adding_another(self, test_db):
+        service, _, _, _ = _make_service()
+        scheduled = service.schedule_deposit(
+            pool_id_hex=POOL_ID_HEX, user_address=USER_ADDRESS,
+            amount="1000", nonce=0, signature="0x" + "aa" * 65,
+        )
+
+        adopted = service._record_transaction(
+            existing_id=scheduled["id"], operation="deposit", pool_id_hex=POOL_ID_HEX,
+            user_address=USER_ADDRESS, token_id=USDC_TOKEN_ID, amount="1000",
+            signer_address=USER_ADDRESS, nonce=0, signature="0x" + "aa" * 65,
+        )
+
+        assert adopted == scheduled["id"]
+        assert test_db.execute("SELECT COUNT(*) c FROM earn_transactions").fetchone()["c"] == 1
+        assert test_db.execute(
+            "SELECT status FROM earn_transactions WHERE id = ?", (adopted,)
+        ).fetchone()["status"] == "pending"

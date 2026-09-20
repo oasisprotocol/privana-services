@@ -253,19 +253,12 @@ class TestDepositQuoteRoute:
 
 
 class TestDepositRoute:
-    async def test_returns_200_on_success(self, api_client):
+    async def test_queues_the_deposit_and_returns_its_id(self, api_client):
+        """The route records the request and returns; the worker executes it.
+        Callers follow the outcome on /v1/operations/unsettled by deposit_id."""
         with patch("src.api.earn.get_vault_service") as mock_svc:
             svc = MagicMock()
-            svc.deposit = AsyncMock(return_value={
-                "deposit_id": "op-1",
-                "pool_id": POOL_ID,
-                "amount": "1000",
-                "shares_minted": "952",
-                "exchange_rate": "1.05",
-                "tx_hash": "0x" + "ff" * 32,
-                "status": "completed",
-                "error": None,
-            })
+            svc.schedule_deposit = MagicMock(return_value={"id": "op-1", "status": "scheduled"})
             mock_svc.return_value = svc
 
             r = await api_client.post("/v1/earn/deposit", json={
@@ -276,44 +269,16 @@ class TestDepositRoute:
                 "signature": "0x" + "aa" * 65,
             })
             assert r.status_code == 200
-            assert r.json()["shares_minted"] == "952"
             assert r.json()["deposit_id"] == "op-1"
+            assert r.json()["status"] == "scheduled"
+            svc.deposit.assert_not_called()
 
-    async def test_reverted_deposit_returns_200_with_operation_id(self, api_client):
-        """A revert is a settled outcome, not a transport error: the row exists in
-        earn_transactions and is listed by /v1/operations/unsettled, so the response
-        reports it as status="failed" with its id, rather than as an HTTP error."""
+    async def test_a_rejected_request_is_a_400(self, api_client):
+        """Only the cheap checks run on the request path, and those are the
+        ones that mean the operation definitively never happened."""
         with patch("src.api.earn.get_vault_service") as mock_svc:
             svc = MagicMock()
-            svc.deposit = AsyncMock(return_value={
-                "deposit_id": "op-2",
-                "pool_id": POOL_ID,
-                "amount": "1000",
-                "shares_minted": None,
-                "exchange_rate": None,
-                "tx_hash": None,
-                "status": "failed",
-                "error": "Transaction reverted on-chain",
-            })
-            mock_svc.return_value = svc
-
-            r = await api_client.post("/v1/earn/deposit", json={
-                "pool_id": POOL_ID,
-                "user_address": USER_ADDRESS,
-                "amount": "1000",
-                "nonce": 0,
-                "signature": "0x" + "aa" * 65,
-            })
-            assert r.status_code == 200
-            body = r.json()
-            assert body["status"] == "failed"
-            assert body["deposit_id"] == "op-2"
-            assert body["error"] == "Transaction reverted on-chain"
-
-    async def test_returns_400_on_value_error(self, api_client):
-        with patch("src.api.earn.get_vault_service") as mock_svc:
-            svc = MagicMock()
-            svc.deposit = AsyncMock(side_effect=ValueError("Pool is not active"))
+            svc.schedule_deposit = MagicMock(side_effect=ValueError("Invalid amount"))
             mock_svc.return_value = svc
 
             r = await api_client.post("/v1/earn/deposit", json={
@@ -324,22 +289,14 @@ class TestDepositRoute:
                 "signature": "0x" + "aa" * 65,
             })
             assert r.status_code == 400
+            assert "Invalid amount" in r.json()["detail"]
 
 
 class TestWithdrawRoute:
-    async def test_returns_200_on_success(self, api_client):
+    async def test_queues_the_withdraw_and_returns_its_id(self, api_client):
         with patch("src.api.earn.get_vault_service") as mock_svc:
             svc = MagicMock()
-            svc.withdraw = AsyncMock(return_value={
-                "withdraw_id": "op-3",
-                "pool_id": POOL_ID,
-                "amount": "500",
-                "shares_burned": "476",
-                "exchange_rate": "1.05",
-                "tx_hash": "0x" + "ff" * 32,
-                "status": "completed",
-                "error": None,
-            })
+            svc.schedule_withdraw = MagicMock(return_value={"id": "op-3", "status": "scheduled"})
             mock_svc.return_value = svc
 
             r = await api_client.post("/v1/earn/withdraw", json={
@@ -350,8 +307,9 @@ class TestWithdrawRoute:
                 "signature": "0x" + "cc" * 65,
             })
             assert r.status_code == 200
-            assert r.json()["shares_burned"] == "476"
             assert r.json()["withdraw_id"] == "op-3"
+            assert r.json()["status"] == "scheduled"
+            svc.withdraw.assert_not_called()
 
     async def test_returns_400_on_insufficient_shares(self, api_client):
         with patch("src.api.earn.get_vault_service") as mock_svc:

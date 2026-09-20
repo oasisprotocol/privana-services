@@ -38,6 +38,14 @@ def _make_service(registry=None):
         w3.eth.contract.return_value = contract
         saph.w3 = w3
         saph.execute_contract_call = MagicMock(return_value="0x" + "ff" * 32)
+        # The earn flows broadcast and wait separately so a receipt timeout
+        # still leaves a hash behind for the recovery pass to reconcile.
+        # Broadcast delegates to execute_contract_call so a test that makes the
+        # call revert still does, and call_args assertions keep working.
+        saph.submit_contract_call = MagicMock(
+            side_effect=lambda **kwargs: saph.execute_contract_call(**kwargs)
+        )
+        saph.wait_for_receipt = MagicMock(return_value={"status": 1})
         mock_saph.return_value = saph
 
         acct = MagicMock()
@@ -1873,6 +1881,22 @@ class TestPoolCustody:
         with pytest.raises(ValueError, match="not served by this deployment"):
             service._assert_pool_custody({"pool_address": POOL_ADDRESS})
 
+def _transfer_sig(key, amount, nonce):
+    from src.core.eip712 import sign_transfer
+
+    return sign_transfer(
+        private_key=key, chain_id=23295,
+        verifying_contract="0xad3C76e4E621C0cfF7540479Ee9B0A945723A642",
+        to_address=POOL_ADDRESS, token_id=USDC_TOKEN_ID, amount=amount, nonce=nonce,
+    )
+
+
+def _schedulable(contract):
+    contract.functions.pools.return_value.call.return_value = (
+        bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1000, 1050, True,
+    )
+
+
 class TestScheduling:
     """The request path records and returns. Everything that needs a chain
     read happens in the worker, because a deposit that waits for those inline
@@ -1880,10 +1904,15 @@ class TestScheduling:
 
     def test_a_scheduled_deposit_is_queued_not_executed(self, test_db):
         service, contract, _, _ = _make_service()
+        _schedulable(contract)
 
+        from eth_account import Account
+
+        key = "0x" + "33" * 32
+        user = Account.from_key(key).address
         result = service.schedule_deposit(
-            pool_id_hex=POOL_ID_HEX, user_address=USER_ADDRESS,
-            amount="1000", nonce=3, signature="0x" + "aa" * 65,
+            pool_id_hex=POOL_ID_HEX, user_address=user,
+            amount="1000", nonce=3, signature=_transfer_sig(key, 1000, 3),
         )
 
         assert result["status"] == "scheduled"
@@ -1894,8 +1923,9 @@ class TestScheduling:
         assert row["status"] == "scheduled"
         assert row["amount"] == "1000"
         assert row["nonce"] == 3
-        # No pool read: scheduling must not touch the chain.
-        contract.functions.pools.assert_not_called()
+        # The pool is read once, to bind the signature and to answer the checks
+        # that settle a request outright. What is deferred is the strategy leg.
+        assert contract.functions.pools.call_count == 1
 
     @staticmethod
     def _consent(key: str, amount: int, nonce: int) -> str:
@@ -1910,7 +1940,8 @@ class TestScheduling:
     def test_a_scheduled_withdraw_is_recorded_as_a_withdraw(self, test_db):
         from eth_account import Account
 
-        service, _, _, _ = _make_service()
+        service, contract, _, _ = _make_service()
+        _schedulable(contract)
         key = "0x" + "11" * 32
         user = Account.from_key(key).address
 
@@ -1932,7 +1963,8 @@ class TestScheduling:
         bound here rather than at execution."""
         from eth_account import Account
 
-        service, _, _, _ = _make_service()
+        service, contract, _, _ = _make_service()
+        _schedulable(contract)
         attacker_key = "0x" + "22" * 32
         victim = Account.from_key("0x" + "11" * 32).address
 
@@ -1948,11 +1980,16 @@ class TestScheduling:
         """Execution overwrites nonce/signature with what it settled on — a
         withdraw signs the payout with the pool's key — so the caller's own
         consent is kept in its own columns for reconstruction after a crash."""
-        service, _, _, _ = _make_service()
-        sig = "0x" + "aa" * 65
+        from eth_account import Account
+
+        service, contract, _, _ = _make_service()
+        _schedulable(contract)
+        key = "0x" + "44" * 32
+        user = Account.from_key(key).address
+        sig = _transfer_sig(key, 1000, 7)
 
         result = service.schedule_deposit(
-            pool_id_hex=POOL_ID_HEX, user_address=USER_ADDRESS,
+            pool_id_hex=POOL_ID_HEX, user_address=user,
             amount="1000", nonce=7, signature=sig,
         )
 
@@ -1968,7 +2005,8 @@ class TestScheduling:
         [("user_address", "nope"), ("amount", "-1"), ("signature", "0xzz")],
     )
     def test_a_malformed_request_is_refused_without_queueing(self, test_db, field, value):
-        service, _, _, _ = _make_service()
+        service, contract, _, _ = _make_service()
+        _schedulable(contract)
         kwargs = dict(
             pool_id_hex=POOL_ID_HEX, user_address=USER_ADDRESS,
             amount="1000", nonce=0, signature="0x" + "aa" * 65,
@@ -1981,16 +2019,21 @@ class TestScheduling:
         assert test_db.execute("SELECT COUNT(*) c FROM earn_transactions").fetchone()["c"] == 0
 
     def test_executing_a_scheduled_row_updates_it_rather_than_adding_another(self, test_db):
-        service, _, _, _ = _make_service()
+        from eth_account import Account
+
+        service, contract, _, _ = _make_service()
+        _schedulable(contract)
+        key = "0x" + "55" * 32
+        user = Account.from_key(key).address
         scheduled = service.schedule_deposit(
-            pool_id_hex=POOL_ID_HEX, user_address=USER_ADDRESS,
-            amount="1000", nonce=0, signature="0x" + "aa" * 65,
+            pool_id_hex=POOL_ID_HEX, user_address=user,
+            amount="1000", nonce=0, signature=_transfer_sig(key, 1000, 0),
         )
 
         adopted = service._record_transaction(
             existing_id=scheduled["id"], operation="deposit", pool_id_hex=POOL_ID_HEX,
-            user_address=USER_ADDRESS, token_id=USDC_TOKEN_ID, amount="1000",
-            signer_address=USER_ADDRESS, nonce=0, signature="0x" + "aa" * 65,
+            user_address=user, token_id=USDC_TOKEN_ID, amount="1000",
+            signer_address=user, nonce=0, signature=_transfer_sig(key, 1000, 0),
         )
 
         assert adopted == scheduled["id"]

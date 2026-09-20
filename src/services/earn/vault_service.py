@@ -14,7 +14,11 @@ from src.clients.sapphire import get_pool_admin_sapphire_client
 from src.core.abi import load_abi
 from src.core.config import load_settings
 from src.core.db import db_write, get_db
-from src.core.eip712 import recover_withdraw_signer, sign_transfer
+from src.core.eip712 import (
+    recover_transfer_signer,
+    recover_withdraw_signer,
+    sign_transfer,
+)
 from src.core.validation import (
     sanitize_error,
     validate_address,
@@ -424,6 +428,27 @@ class VaultService:
             )
             return 0
 
+    async def _submit_and_settle(self, tx_id: str, *, function_name: str, args: list) -> str:
+        """Broadcast, record the hash, then wait for the receipt.
+
+        Split the way the swap pipeline splits it: a receipt wait that times
+        out must leave a hash behind, or a transaction that later confirms is
+        indistinguishable from one that never went out, and the recovery pass
+        has nothing to reconcile against.
+        """
+        tx_hash = await asyncio.to_thread(
+            self.sapphire.submit_contract_call,
+            contract_address=self.contract_address,
+            abi=EARN_MANAGER_ABI,
+            function_name=function_name,
+            args=args,
+        )
+        self._update_transaction(tx_id, tx_hash=tx_hash)
+        receipt = await asyncio.to_thread(self.sapphire.wait_for_receipt, tx_hash)
+        if receipt["status"] != 1:
+            raise RuntimeError(f"Transaction reverted: {tx_hash}")
+        return tx_hash
+
     def _schedule(
         self,
         *,
@@ -436,23 +461,41 @@ class VaultService:
     ) -> dict:
         """Record a request and hand it to the worker.
 
-        Only the checks that cost nothing run here. Anything that needs a
-        chain read — whether the pool is active, whether this deployment can
-        sign for it, whether the strategy is healthy — is left to execution,
-        because a deposit that waits for those inline is a deposit the
-        gateway hangs up on. A request refused later settles as a failed row
-        with the reason on it, which the unsettled feed already carries.
+        Admission mirrors ``schedule_swap``: an identical signed request
+        returns the operation it already created, the signer is recovered and
+        bound rather than trusted, and the checks that settle a request
+        outright still answer immediately. What is deferred is the part that
+        takes minutes — bridging and supplying on another chain — because a
+        request that waits for that is a request the gateway hangs up on.
         """
         validate_address(user_address, "user_address")
         validate_amount(amount, "amount")
         validate_signature(signature, "signature")
-        bytes.fromhex(pool_id_hex.removeprefix("0x"))
+        pool_id = bytes.fromhex(pool_id_hex.removeprefix("0x"))
+
+        # An HTTP retry returns the original operation rather than queueing a
+        # second one, which is also how a caller learns the outcome of a
+        # request whose response it lost.
+        existing = get_db().execute(
+            "SELECT id, status FROM earn_transactions WHERE operation = ? "
+            "AND LOWER(pool_id) = LOWER(?) AND user_address = ? "
+            "AND input_nonce = ? AND LOWER(input_signature) = LOWER(?)",
+            (operation, pool_id_hex, user_address.lower(), nonce, signature),
+        ).fetchone()
+        if existing is not None:
+            return {"id": existing["id"], "status": existing["status"]}
+
+        pool = self.get_pool(pool_id)
+        if pool["pool_address"] == "0x0000000000000000000000000000000000000000":
+            raise ValueError("Pool not found")
+        if not pool["active"]:
+            raise ValueError("Pool is not active")
+        self._assert_pool_custody(pool)
 
         if operation == EARN_OP_WITHDRAW:
             # A withdraw reclaims from the strategy before the contract ever
             # checks consent, so an unverified one is a way to make the pool
-            # redeem and roll back on demand. The consent recovers without
-            # touching the chain, so bind it here rather than at execution.
+            # redeem and roll back on demand.
             recovered = recover_withdraw_signer(
                 chain_id=self.settings.accounting_chain_id,
                 earn_manager_address=self.settings.earn_manager_contract_address,
@@ -461,8 +504,18 @@ class VaultService:
                 nonce=nonce,
                 signature=signature,
             )
-            if recovered.lower() != user_address.lower():
-                raise ValueError("Withdraw consent was not signed by user_address")
+        else:
+            recovered = recover_transfer_signer(
+                chain_id=self.settings.accounting_chain_id,
+                verifying_contract=self.settings.accounting_contract_address,
+                to_address=pool["pool_address"],
+                token_id=pool["token_id"],
+                amount=int(amount),
+                nonce=nonce,
+                signature=signature,
+            )
+        if recovered.lower() != user_address.lower():
+            raise ValueError(f"{operation} was not signed by user_address")
 
         tx_id = str(uuid.uuid4())
         now = int(time.time())
@@ -474,7 +527,8 @@ class VaultService:
                 status, created_at, updated_at)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
-                tx_id, operation, pool_id_hex, user_address.lower(), "", amount,
+                tx_id, operation, pool_id_hex, user_address.lower(),
+                pool["token_id"], amount,
                 user_address.lower(), nonce, signature, nonce, signature,
                 EARN_STATUS_SCHEDULED, now, now,
             ),
@@ -575,10 +629,8 @@ class VaultService:
             shares_before = await self._total_shares_safe(pool_id)
 
             try:
-                tx_hash = await asyncio.to_thread(
-                    self.sapphire.execute_contract_call,
-                    contract_address=self.contract_address,
-                    abi=EARN_MANAGER_ABI,
+                tx_hash = await self._submit_and_settle(
+                    tx_id,
                     function_name="deposit",
                     args=[
                         pool_id,
@@ -774,10 +826,8 @@ class VaultService:
             shares_before = await self._total_shares_safe(pool_id)
 
             try:
-                tx_hash = await asyncio.to_thread(
-                    self.sapphire.execute_contract_call,
-                    contract_address=self.contract_address,
-                    abi=EARN_MANAGER_ABI,
+                tx_hash = await self._submit_and_settle(
+                    tx_id,
                     function_name="withdraw",
                     args=[
                         pool_id,

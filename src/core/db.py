@@ -134,8 +134,6 @@ MIGRATIONS = [
     # records the row and returns, a worker executes it. Rows the old inline
     # path left behind keep their status and settle on their own.
     "ALTER TABLE earn_transactions ADD COLUMN claimed_at INTEGER;",
-    "CREATE INDEX IF NOT EXISTS idx_earn_tx_scheduled "
-    "ON earn_transactions(status, created_at);",
     # The caller's own nonce and signature, kept apart from the ones execution
     # settles on: a withdraw signs the payout with the pool's key, and
     # overwriting the consent would leave a crashed row unreconstructable.

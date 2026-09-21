@@ -18,6 +18,8 @@ from src.services.swap.worker import lp_transfer_lock
 
 logger = logging.getLogger(__name__)
 BATCH_SIZE = 5
+# Number of seconds after quote expiry to consider an in-flight swap stale.
+STALE_SWAP_TIMEOUT = 13
 SWAP_MANAGER_ABI = load_abi("SwapManager")
 
 
@@ -70,14 +72,27 @@ class InternalSwapPipeline:
         return dict(contract_address=self.settings.swap_manager_contract_address,
                     abi=SWAP_MANAGER_ABI, function_name="swap", args=args)
 
+    async def _is_stale(self, sapphire, swap: dict) -> bool:
+        """True when the quote has expired and there is no sensible way it was completed."""
+        quote = get_db().execute(
+            "SELECT expires_at FROM quotes WHERE id = ?", (swap["quote_id"],)
+        ).fetchone()
+        if quote and int(time.time()) < quote["expires_at"] + STALE_SWAP_TIMEOUT:
+            return False
+        return True
+
     async def _settle(self, sapphire, swap: dict) -> None:
         try:
             receipt = await asyncio.to_thread(sapphire.wait_for_receipt, swap["swap_tx_hash"])
         except Exception as exc:
-            # A timeout is not a revert. Keep the hash and reconcile it next
-            # iteration/restart; never rebroadcast an uncertain transaction.
             logger.warning("internal swap %s tx_hash %s waiting for receipt failed: %s", swap["id"], swap["swap_tx_hash"], exc)
-            self._update(swap["id"], error=sanitize_error(str(exc)))
+            if await self._is_stale(sapphire, swap):
+                logger.warning("internal swap %s tx hash %s is stale",
+                               swap["id"], swap["swap_tx_hash"])
+                self._update(swap["id"], status="failed",
+                             error=f"Transaction does not exist on-chain: {swap['swap_tx_hash']}")
+            else:
+                self._update(swap["id"], error=sanitize_error(str(exc)))
             return
         if receipt["status"] == 1:
             logger.info("internal swap %s settled", swap["id"])

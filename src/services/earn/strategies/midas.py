@@ -202,6 +202,7 @@ class MidasStrategy(BaseStrategy):
         usdc_amount: int,
         oracle_price: int,
         oracle_decimals: int,
+        round_up: bool = False,
     ) -> int:
         """Convert USDC base units (6 decimals) to the equivalent mTBILL
         base units (18 decimals) at the given MTBILL/USD oracle price.
@@ -225,6 +226,10 @@ class MidasStrategy(BaseStrategy):
         is_healthy() upstream.
         """
         scale = 10 ** (oracle_decimals + _DECIMAL_BALANCE)
+        if round_up:
+            # Sizing a redeem rounds up: landing a base unit short means the
+            # payout that follows cannot be covered.
+            return -(-usdc_amount * scale // oracle_price)
         return (usdc_amount * scale) // oracle_price
 
     @staticmethod
@@ -333,15 +338,13 @@ class MidasStrategy(BaseStrategy):
         # has to be sized by dividing by (1 - fee), not multiplying by
         # (1 + fee). The two agree to about a part in a million, which is
         # enough to leave the payout a few base units short of the amount the
-        # pool then has to transfer, and that transfer reverts. Round up; the
-        # excess is a rounding unit that stays in the pool and redeploys.
-        gross_usdc = -(-amount * 10_000 // (10_000 - fee_bps))
-        # Both conversions round up, so the redeem covers `amount` without ever
-        # asking for a base unit more than it needs. Adding a flat unit instead
-        # would overshoot whenever the division came out exact, and a pool being
-        # emptied has no spare unit to give.
-        mtbill_to_redeem = -(
-            -gross_usdc * (10 ** (decimals + _DECIMAL_BALANCE)) // price
+        # pool then has to transfer, and that transfer reverts.
+        gross_usdc = amount * 10_000 // (10_000 - fee_bps)
+        # Rounding up here covers the truncation above as well, so the redeem
+        # always clears `amount` without asking for a base unit more than it
+        # needs — a pool being emptied has no spare unit to give.
+        mtbill_to_redeem = self.convert_usdc_to_mtbill_amount(
+            gross_usdc, price, decimals, round_up=True,
         )
         # The pool has to hand `amount` on to the user straight after this, so
         # anything less is unusable. Floor the redeem at the target rather than

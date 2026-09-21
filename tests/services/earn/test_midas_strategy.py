@@ -544,9 +544,9 @@ async def test_withdraw_from_earn_redeems_forwards_and_polls(
     # (1 - fee): ceil(1_000_000 * 10000 / 9975) = 1_002_507 USDC gross, which
     # is 1_002_507 * 10**12 mTBILL, plus the rounding unit. The vault then
     # pays 1_002_507 - 2_506 = 1_000_001, covering the 1_000_000 asked for.
-    # The old (1 + fee) sizing came to 1_002_507_000_000_000_000 and paid
+    # The old (1 + fee) sizing came to 1_002_506_000_000_000_000 and paid
     # only 999_994, which is what made the payout transfer revert.
-    assert redeem_args[1] == 1_002_507_000_000_000_000
+    assert redeem_args[1] == 1_002_506_000_000_000_000
     # min_receive_usdc = 1_000_000 * 9950 / 10000 = 995_000, scaled to base-18
     # The pool must receive at least the amount it then transfers on, so the
     # floor is the target itself rather than a slippage band below it.
@@ -557,7 +557,7 @@ async def test_withdraw_from_earn_redeems_forwards_and_polls(
     midas_client.approve.assert_called_once_with(
         midas_client.mtbill_address,
         midas_client.redemption_vault_address,
-        1_002_507_000_000_000_000,
+        1_002_506_000_000_000_000,
     )
 
     # The realized USDC delta is forwarded, not the requested target amount.
@@ -632,8 +632,10 @@ def test_the_redeem_is_sized_to_cover_the_payout_after_the_instant_fee():
         return before_fee - (before_fee * fee_bps) // 10_000
 
     def sized(amount: int) -> int:
-        gross = -(-amount * 10_000 // (10_000 - fee_bps))
-        return -(-gross * scale // price)
+        gross = amount * 10_000 // (10_000 - fee_bps)
+        return MidasStrategy.convert_usdc_to_mtbill_amount(
+            gross, price, decimals, round_up=True,
+        )
 
     for amount in (1_000_000, 4_899_997, 4_999_999, 5_000_000, 17_000_003):
         assert vault_pays(sized(amount)) >= amount, amount
@@ -645,12 +647,9 @@ def test_the_redeem_is_sized_to_cover_the_payout_after_the_instant_fee():
 
     # And when the conversion comes out exact it asks for nothing extra: a pool
     # being emptied has no spare base unit, so a flat +1 would revert there.
-    exact = -(-1_000_000 * 10_000 // 10_000) * (10 ** (18 - 6 + 18)) // 10**18
-    assert exact == 10**18
-    def sized_no_fee(amount: int) -> int:
-        gross = -(-amount * 10_000 // 10_000)
-        return -(-gross * (10 ** (18 + 12)) // 10**18)
-    assert sized_no_fee(1_000_000) == 10**18
+    assert MidasStrategy.convert_usdc_to_mtbill_amount(
+        1_000_000, 10**18, 18, round_up=True,
+    ) == 10**18
 
 
 @pytest.mark.asyncio

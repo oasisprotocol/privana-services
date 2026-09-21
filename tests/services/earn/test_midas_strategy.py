@@ -540,18 +540,24 @@ async def test_withdraw_from_earn_redeems_forwards_and_polls(
     midas_client.redeem_instant.assert_called_once()
     redeem_args = midas_client.redeem_instant.call_args.args
     assert redeem_args[0] == ASSET_ADDRESS
-    # baseline_mtbill at price=1.0 is 10**18; with 25bps fee buffer:
-    # mtbill_to_redeem = 10**18 * 10025 / 10000 = 1_002_500_000_000_000_000
-    assert redeem_args[1] == 1_002_500_000_000_000_000
+    # At price=1.0 with a 25bps fee the redeem is sized by dividing by
+    # (1 - fee): ceil(1_000_000 * 10000 / 9975) = 1_002_507 USDC gross, which
+    # is 1_002_507 * 10**12 mTBILL, plus the rounding unit. The vault then
+    # pays 1_002_507 - 2_506 = 1_000_001, covering the 1_000_000 asked for.
+    # The old (1 + fee) sizing came to 1_002_506_000_000_000_000 and paid
+    # only 999_994, which is what made the payout transfer revert.
+    assert redeem_args[1] == 1_002_506_000_000_000_000
     # min_receive_usdc = 1_000_000 * 9950 / 10000 = 995_000, scaled to base-18
-    assert redeem_args[2] == 995_000 * 10**12
+    # The pool must receive at least the amount it then transfers on, so the
+    # floor is the target itself rather than a slippage band below it.
+    assert redeem_args[2] == 1_000_000 * 10**12
 
     # The redemption vault pulls mTBILL via transferFrom, so the allowance
     # (fixture returns 0) must be topped up before redeeming.
     midas_client.approve.assert_called_once_with(
         midas_client.mtbill_address,
         midas_client.redemption_vault_address,
-        1_002_500_000_000_000_000,
+        1_002_506_000_000_000_000,
     )
 
     # The realized USDC delta is forwarded, not the requested target amount.
@@ -610,6 +616,57 @@ async def test_withdraw_from_earn_skips_approve_when_allowance_sufficient(
 
     midas_client.approve.assert_not_called()
     midas_client.redeem_instant.assert_called_once()
+
+
+def test_the_redeem_is_sized_to_cover_the_payout_after_the_instant_fee():
+    """The vault takes its fee out of the USDC it pays, so a redeem sized by
+    multiplying by (1 + fee) lands a few base units short and the transfer
+    that follows cannot be covered."""
+    from src.services.earn.strategies.midas import MidasStrategy
+
+    price, decimals, fee_bps = 107_239_415, 8, 7
+    scale = 10 ** (decimals + 12)
+
+    def vault_pays(mtbill: int) -> int:
+        before_fee = (mtbill * price) // scale
+        return before_fee - (before_fee * fee_bps) // 10_000
+
+    def sized(amount: int) -> int:
+        gross = amount * 10_000 // (10_000 - fee_bps)
+        return MidasStrategy.convert_usdc_to_mtbill_amount(
+            gross, price, decimals, round_up=True,
+        )
+
+    for amount in (1_000_000, 4_899_997, 4_999_999, 5_000_000, 17_000_003):
+        assert vault_pays(sized(amount)) >= amount, amount
+
+    # The old (1 + fee) sizing is what shipped and what fell short.
+    old = MidasStrategy.convert_usdc_to_mtbill_amount(4_999_999, price, decimals)
+    old = old * (10_000 + fee_bps) // 10_000
+    assert vault_pays(old) < 4_999_999
+
+    # And when the conversion comes out exact it asks for nothing extra: a pool
+    # being emptied has no spare base unit, so a flat +1 would revert there.
+    assert MidasStrategy.convert_usdc_to_mtbill_amount(
+        1_000_000, 10**18, 18, round_up=True,
+    ) == 10**18
+
+
+@pytest.mark.asyncio
+async def test_withdraw_from_earn_refuses_an_absurd_instant_fee(
+    strategy, midas_client, privana,
+) -> None:
+    from src.services.earn.strategies.midas import MidasInstantUnavailableError
+
+    privana.get_balance.return_value = _Balance(
+        user_address=POOL_ADDRESS, token_id=TOKEN_ID, balance=0,
+    )
+    midas_client.get_redemption_instant_fee_bps.return_value = 10_000
+
+    with pytest.raises(MidasInstantUnavailableError, match="refusing to redeem"):
+        await strategy.withdraw_from_earn(1_000_000)
+
+    midas_client.redeem_instant.assert_not_called()
 
 
 @pytest.mark.asyncio

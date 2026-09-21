@@ -202,6 +202,7 @@ class MidasStrategy(BaseStrategy):
         usdc_amount: int,
         oracle_price: int,
         oracle_decimals: int,
+        round_up: bool = False,
     ) -> int:
         """Convert USDC base units (6 decimals) to the equivalent mTBILL
         base units (18 decimals) at the given MTBILL/USD oracle price.
@@ -225,6 +226,10 @@ class MidasStrategy(BaseStrategy):
         is_healthy() upstream.
         """
         scale = 10 ** (oracle_decimals + _DECIMAL_BALANCE)
+        if round_up:
+            # Sizing a redeem rounds up: landing a base unit short means the
+            # payout that follows cannot be covered.
+            return -(-usdc_amount * scale // oracle_price)
         return (usdc_amount * scale) // oracle_price
 
     @staticmethod
@@ -325,11 +330,28 @@ class MidasStrategy(BaseStrategy):
 
         price, decimals = await asyncio.to_thread(self._read_oracle_price)
         fee_bps = await asyncio.to_thread(self._client.get_redemption_instant_fee_bps)
-        baseline_mtbill = self.convert_usdc_to_mtbill_amount(amount, price, decimals)
-        mtbill_to_redeem = baseline_mtbill * (10_000 + fee_bps) // 10_000
-        min_receive_usdc = (
-            amount * (10_000 - self._slippage_bps) // 10_000 * _BASE18_SCALE
+        if fee_bps >= 10_000:
+            raise MidasInstantUnavailableError(
+                f"Midas redemption instant fee is {fee_bps} bps; refusing to redeem"
+            )
+        # The instant fee comes out of the USDC the vault pays, so the redeem
+        # has to be sized by dividing by (1 - fee), not multiplying by
+        # (1 + fee). The two agree to about a part in a million, which is
+        # enough to leave the payout a few base units short of the amount the
+        # pool then has to transfer, and that transfer reverts.
+        gross_usdc = amount * 10_000 // (10_000 - fee_bps)
+        # Rounding up here covers the truncation above as well, so the redeem
+        # always clears `amount` without asking for a base unit more than it
+        # needs — a pool being emptied has no spare unit to give.
+        mtbill_to_redeem = self.convert_usdc_to_mtbill_amount(
+            gross_usdc, price, decimals, round_up=True,
         )
+        # The pool has to hand `amount` on to the user straight after this, so
+        # anything less is unusable. Floor the redeem at the target rather than
+        # at a slippage band below it: reverting here is recoverable, whereas a
+        # short fill leaves the payout to revert with the funds already out of
+        # the protocol.
+        min_receive_usdc = amount * _BASE18_SCALE
 
         mtbill_allowance = await asyncio.to_thread(
             self._client.get_allowance,

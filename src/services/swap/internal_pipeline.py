@@ -15,6 +15,7 @@ from src.core.eip712 import sign_transfer
 from src.core.validation import sanitize_error
 from src.services.swap.executor import get_swap_executor
 from src.services.swap.worker import lp_transfer_lock
+from src.services.user_queue import users_with_inflight_work
 
 logger = logging.getLogger(__name__)
 BATCH_SIZE = 5
@@ -37,11 +38,13 @@ class InternalSwapPipeline:
             "ORDER BY created_at, rowid LIMIT ?", (venue, limit),
         ).fetchall()
         claimed = []
-        users = set()
+        # Earn spends the same per-user transfer nonce from its own queue, so
+        # the set starts with whatever either pipeline already has in flight.
+        users = users_with_inflight_work()
         for row in rows:
             # Simulations use the current ledger state. A second swap from the
             # same user must wait for the first to consume its transfer nonce.
-            if row["user_address"] in users:
+            if row["user_address"].lower() in users:
                 continue
             changed = db_write(
                 get_db(), "UPDATE swaps SET status = 'executing', updated_at = ? "
@@ -49,7 +52,7 @@ class InternalSwapPipeline:
             ).rowcount
             if changed:
                 claimed.append(dict(row))
-                users.add(row["user_address"])
+                users.add(row["user_address"].lower())
         return claimed
 
     def _args(self, swap: dict, lp_nonce: int) -> list:

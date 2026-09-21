@@ -14,7 +14,11 @@ from src.clients.sapphire import get_pool_admin_sapphire_client
 from src.core.abi import load_abi
 from src.core.config import load_settings
 from src.core.db import db_write, get_db
-from src.core.eip712 import recover_withdraw_signer, sign_transfer
+from src.core.eip712 import (
+    recover_transfer_signer,
+    recover_withdraw_signer,
+    sign_transfer,
+)
 from src.core.validation import (
     sanitize_error,
     validate_address,
@@ -36,6 +40,8 @@ EARN_MANAGER_ABI = load_abi("EarnManager")
 
 EARN_OP_DEPOSIT = "deposit"
 EARN_OP_WITHDRAW = "withdraw"
+EARN_STATUS_SCHEDULED = "scheduled"
+EARN_STATUS_EXECUTING = "executing"
 EARN_STATUS_PENDING = "pending"
 EARN_STATUS_COMPLETED = "completed"
 EARN_STATUS_FAILED = "failed"
@@ -422,6 +428,133 @@ class VaultService:
             )
             return 0
 
+    async def _submit_and_settle(self, tx_id: str, *, function_name: str, args: list) -> str:
+        """Broadcast, record the hash, then wait for the receipt.
+
+        Split the way the swap pipeline splits it: a receipt wait that times
+        out must leave a hash behind, or a transaction that later confirms is
+        indistinguishable from one that never went out, and the recovery pass
+        has nothing to reconcile against.
+        """
+        tx_hash = await asyncio.to_thread(
+            self.sapphire.submit_contract_call,
+            contract_address=self.contract_address,
+            abi=EARN_MANAGER_ABI,
+            function_name=function_name,
+            args=args,
+        )
+        self._update_transaction(tx_id, tx_hash=tx_hash)
+        receipt = await asyncio.to_thread(self.sapphire.wait_for_receipt, tx_hash)
+        if receipt["status"] != 1:
+            raise RuntimeError(f"Transaction reverted: {tx_hash}")
+        return tx_hash
+
+    def _schedule(
+        self,
+        *,
+        operation: str,
+        pool_id_hex: str,
+        user_address: str,
+        amount: str,
+        nonce: int,
+        signature: str,
+    ) -> dict:
+        """Record a request and hand it to the worker.
+
+        Admission mirrors ``schedule_swap``: an identical signed request
+        returns the operation it already created, the signer is recovered and
+        bound rather than trusted, and the checks that settle a request
+        outright still answer immediately. What is deferred is the part that
+        takes minutes — bridging and supplying on another chain — because a
+        request that waits for that is a request the gateway hangs up on.
+        """
+        validate_address(user_address, "user_address")
+        validate_amount(amount, "amount")
+        validate_signature(signature, "signature")
+        pool_id = bytes.fromhex(pool_id_hex.removeprefix("0x"))
+
+        # An HTTP retry returns the original operation rather than queueing a
+        # second one, which is also how a caller learns the outcome of a
+        # request whose response it lost.
+        existing = get_db().execute(
+            "SELECT id, status FROM earn_transactions WHERE operation = ? "
+            "AND LOWER(pool_id) = LOWER(?) AND user_address = ? "
+            "AND input_nonce = ? AND LOWER(input_signature) = LOWER(?)",
+            (operation, pool_id_hex, user_address.lower(), nonce, signature),
+        ).fetchone()
+        if existing is not None:
+            return {"id": existing["id"], "status": existing["status"]}
+
+        pool = self.get_pool(pool_id)
+        if pool["pool_address"] == "0x0000000000000000000000000000000000000000":
+            raise ValueError("Pool not found")
+        if not pool["active"]:
+            raise ValueError("Pool is not active")
+        self._assert_pool_custody(pool)
+
+        if operation == EARN_OP_WITHDRAW:
+            # A withdraw reclaims from the strategy before the contract ever
+            # checks consent, so an unverified one is a way to make the pool
+            # redeem and roll back on demand.
+            recovered = recover_withdraw_signer(
+                chain_id=self.settings.accounting_chain_id,
+                earn_manager_address=self.settings.earn_manager_contract_address,
+                pool_id=pool_id_hex,
+                amount=int(amount),
+                nonce=nonce,
+                signature=signature,
+            )
+        else:
+            recovered = recover_transfer_signer(
+                chain_id=self.settings.accounting_chain_id,
+                verifying_contract=self.settings.accounting_contract_address,
+                to_address=pool["pool_address"],
+                token_id=pool["token_id"],
+                amount=int(amount),
+                nonce=nonce,
+                signature=signature,
+            )
+        if recovered.lower() != user_address.lower():
+            raise ValueError(f"{operation} was not signed by user_address")
+
+        tx_id = str(uuid.uuid4())
+        now = int(time.time())
+        db_write(
+            get_db(),
+            """INSERT INTO earn_transactions
+               (id, operation, pool_id, user_address, token_id, amount,
+                signer_address, nonce, signature, input_nonce, input_signature,
+                status, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                tx_id, operation, pool_id_hex, user_address.lower(),
+                pool["token_id"], amount,
+                user_address.lower(), nonce, signature, nonce, signature,
+                EARN_STATUS_SCHEDULED, now, now,
+            ),
+        )
+        logger.info(
+            "earn %s %s scheduled: user=%s pool=%s amount=%s nonce=%s",
+            operation, tx_id, user_address, pool_id_hex, amount, nonce,
+        )
+        return {"id": tx_id, "status": EARN_STATUS_SCHEDULED}
+
+    def schedule_deposit(
+        self, *, pool_id_hex: str, user_address: str, amount: str, nonce: int, signature: str
+    ) -> dict:
+        return self._schedule(
+            operation=EARN_OP_DEPOSIT, pool_id_hex=pool_id_hex,
+            user_address=user_address, amount=amount, nonce=nonce, signature=signature,
+        )
+
+    def schedule_withdraw(
+        self, *, pool_id_hex: str, user_address: str, amount: str, nonce: int, signature: str
+    ) -> dict:
+        return self._schedule(
+            operation=EARN_OP_WITHDRAW, pool_id_hex=pool_id_hex,
+            user_address=user_address, amount=amount, nonce=nonce, signature=signature,
+        )
+
     async def deposit(
         self,
         pool_id_hex: str,
@@ -429,6 +562,7 @@ class VaultService:
         amount: str,
         nonce: int,
         signature: str,
+        scheduled_id: Optional[str] = None,
     ) -> dict:
         """Deposit user funds into an earn pool and mint shares.
 
@@ -481,6 +615,7 @@ class VaultService:
                 )
 
             tx_id = self._record_transaction(
+                existing_id=scheduled_id,
                 operation=EARN_OP_DEPOSIT,
                 pool_id_hex=pool_id_hex,
                 user_address=user_address,
@@ -494,10 +629,8 @@ class VaultService:
             shares_before = await self._total_shares_safe(pool_id)
 
             try:
-                tx_hash = await asyncio.to_thread(
-                    self.sapphire.execute_contract_call,
-                    contract_address=self.contract_address,
-                    abi=EARN_MANAGER_ABI,
+                tx_hash = await self._submit_and_settle(
+                    tx_id,
                     function_name="deposit",
                     args=[
                         pool_id,
@@ -578,6 +711,7 @@ class VaultService:
         amount: str,
         nonce: int,
         signature: str,
+        scheduled_id: Optional[str] = None,
     ) -> dict:
         """Burn user shares and return the underlying assets.
 
@@ -677,6 +811,7 @@ class VaultService:
                 consent_signer = None
 
             tx_id = self._record_transaction(
+                existing_id=scheduled_id,
                 operation=EARN_OP_WITHDRAW,
                 pool_id_hex=pool_id_hex,
                 user_address=user_address,
@@ -691,10 +826,8 @@ class VaultService:
             shares_before = await self._total_shares_safe(pool_id)
 
             try:
-                tx_hash = await asyncio.to_thread(
-                    self.sapphire.execute_contract_call,
-                    contract_address=self.contract_address,
-                    abi=EARN_MANAGER_ABI,
+                tx_hash = await self._submit_and_settle(
+                    tx_id,
                     function_name="withdraw",
                     args=[
                         pool_id,
@@ -1033,7 +1166,30 @@ class VaultService:
         nonce: int,
         signature: str,
         consent_signer: Optional[str] = None,
+        existing_id: Optional[str] = None,
     ) -> str:
+        if existing_id is not None:
+            # Queued path: the row was written when the request came in. Fill in
+            # what execution settled on — a withdraw signs with the pool's key,
+            # not the caller's — and move it out of the queue.
+            self._update_transaction(
+                existing_id,
+                # token_id is only knowable from the pool, which scheduling does
+                # not read. Fill it here or the row stays blank for every
+                # consumer that keys on it, the unsettled feed included.
+                token_id=token_id,
+                signer_address=signer_address.lower(),
+                nonce=nonce,
+                signature=signature,
+                consent_signer=consent_signer.lower() if consent_signer else None,
+                status=EARN_STATUS_PENDING,
+            )
+            logger.info(
+                "earn %s %s signed: signer=%s to=%s token=%s amount=%s nonce=%s",
+                operation, existing_id, signer_address, user_address, token_id,
+                amount, nonce,
+            )
+            return existing_id
         tx_id = str(uuid.uuid4())
         now = int(time.time())
         db = get_db()

@@ -130,6 +130,15 @@ MIGRATIONS = [
     "ALTER TABLE swaps ADD COLUMN input_nonce TEXT;",
     "ALTER TABLE swaps ADD COLUMN input_signature TEXT;",
     "UPDATE swaps SET status = 'executing' WHERE status = 'pending';",
+    # Earn deposits and withdrawals are queued the way swaps are: the request
+    # records the row and returns, a worker executes it. Rows the old inline
+    # path left behind keep their status and settle on their own.
+    "ALTER TABLE earn_transactions ADD COLUMN claimed_at INTEGER;",
+    # The caller's own nonce and signature, kept apart from the ones execution
+    # settles on: a withdraw signs the payout with the pool's key, and
+    # overwriting the consent would leave a crashed row unreconstructable.
+    "ALTER TABLE earn_transactions ADD COLUMN input_nonce INTEGER;",
+    "ALTER TABLE earn_transactions ADD COLUMN input_signature TEXT;",
 
 ]
 

@@ -38,6 +38,14 @@ def _make_service(registry=None):
         w3.eth.contract.return_value = contract
         saph.w3 = w3
         saph.execute_contract_call = MagicMock(return_value="0x" + "ff" * 32)
+        # The earn flows broadcast and wait separately so a receipt timeout
+        # still leaves a hash behind for the recovery pass to reconcile.
+        # Broadcast delegates to execute_contract_call so a test that makes the
+        # call revert still does, and call_args assertions keep working.
+        saph.submit_contract_call = MagicMock(
+            side_effect=lambda **kwargs: saph.execute_contract_call(**kwargs)
+        )
+        saph.wait_for_receipt = MagicMock(return_value={"status": 1})
         mock_saph.return_value = saph
 
         acct = MagicMock()
@@ -1872,3 +1880,168 @@ class TestPoolCustody:
 
         with pytest.raises(ValueError, match="not served by this deployment"):
             service._assert_pool_custody({"pool_address": POOL_ADDRESS})
+
+def _transfer_sig(key, amount, nonce):
+    from src.core.eip712 import sign_transfer
+
+    return sign_transfer(
+        private_key=key, chain_id=23295,
+        verifying_contract="0xad3C76e4E621C0cfF7540479Ee9B0A945723A642",
+        to_address=POOL_ADDRESS, token_id=USDC_TOKEN_ID, amount=amount, nonce=nonce,
+    )
+
+
+def _schedulable(contract):
+    contract.functions.pools.return_value.call.return_value = (
+        bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1000, 1050, True,
+    )
+
+
+class TestScheduling:
+    """The request path records and returns. Everything that needs a chain
+    read happens in the worker, because a deposit that waits for those inline
+    is a deposit the gateway hangs up on."""
+
+    def test_a_scheduled_deposit_is_queued_not_executed(self, test_db):
+        service, contract, _, _ = _make_service()
+        _schedulable(contract)
+
+        from eth_account import Account
+
+        key = "0x" + "33" * 32
+        user = Account.from_key(key).address
+        result = service.schedule_deposit(
+            pool_id_hex=POOL_ID_HEX, user_address=user,
+            amount="1000", nonce=3, signature=_transfer_sig(key, 1000, 3),
+        )
+
+        assert result["status"] == "scheduled"
+        row = test_db.execute(
+            "SELECT * FROM earn_transactions WHERE id = ?", (result["id"],)
+        ).fetchone()
+        assert row["operation"] == "deposit"
+        assert row["status"] == "scheduled"
+        assert row["amount"] == "1000"
+        assert row["nonce"] == 3
+        # The pool is read once, to bind the signature and to answer the checks
+        # that settle a request outright. What is deferred is the strategy leg.
+        assert contract.functions.pools.call_count == 1
+
+    @staticmethod
+    def _consent(key: str, amount: int, nonce: int) -> str:
+        from src.core.eip712 import sign_withdraw_consent
+
+        return sign_withdraw_consent(
+            private_key=key, chain_id=23295,
+            earn_manager_address="0x1111111111111111111111111111111111111111",
+            pool_id=POOL_ID_HEX, amount=amount, nonce=nonce,
+        )
+
+    def test_a_scheduled_withdraw_is_recorded_as_a_withdraw(self, test_db):
+        from eth_account import Account
+
+        service, contract, _, _ = _make_service()
+        _schedulable(contract)
+        key = "0x" + "11" * 32
+        user = Account.from_key(key).address
+
+        result = service.schedule_withdraw(
+            pool_id_hex=POOL_ID_HEX, user_address=user,
+            amount="500", nonce=1, signature=self._consent(key, 500, 1),
+        )
+
+        row = test_db.execute(
+            "SELECT operation, status FROM earn_transactions WHERE id = ?", (result["id"],)
+        ).fetchone()
+        assert row["operation"] == "withdraw"
+        assert row["status"] == "scheduled"
+
+    def test_a_withdraw_signed_by_someone_else_is_refused_before_it_queues(self, test_db):
+        """A withdraw reclaims from the strategy before the contract checks
+        consent, so an unverified one is a way to make the pool redeem and roll
+        back on demand. The consent recovers without a chain read, so it is
+        bound here rather than at execution."""
+        from eth_account import Account
+
+        service, contract, _, _ = _make_service()
+        _schedulable(contract)
+        attacker_key = "0x" + "22" * 32
+        victim = Account.from_key("0x" + "11" * 32).address
+
+        with pytest.raises(ValueError, match="not signed by user_address"):
+            service.schedule_withdraw(
+                pool_id_hex=POOL_ID_HEX, user_address=victim,
+                amount="500", nonce=1, signature=self._consent(attacker_key, 500, 1),
+            )
+
+        assert test_db.execute("SELECT COUNT(*) c FROM earn_transactions").fetchone()["c"] == 0
+
+    def test_a_scheduled_row_keeps_the_callers_own_nonce_and_signature(self, test_db):
+        """Execution overwrites nonce/signature with what it settled on — a
+        withdraw signs the payout with the pool's key — so the caller's own
+        consent is kept in its own columns for reconstruction after a crash."""
+        from eth_account import Account
+
+        service, contract, _, _ = _make_service()
+        _schedulable(contract)
+        key = "0x" + "44" * 32
+        user = Account.from_key(key).address
+        sig = _transfer_sig(key, 1000, 7)
+
+        result = service.schedule_deposit(
+            pool_id_hex=POOL_ID_HEX, user_address=user,
+            amount="1000", nonce=7, signature=sig,
+        )
+
+        row = test_db.execute(
+            "SELECT input_nonce, input_signature FROM earn_transactions WHERE id = ?",
+            (result["id"],),
+        ).fetchone()
+        assert row["input_nonce"] == 7
+        assert row["input_signature"] == sig
+
+    @pytest.mark.parametrize(
+        "field,value",
+        [("user_address", "nope"), ("amount", "-1"), ("signature", "0xzz")],
+    )
+    def test_a_malformed_request_is_refused_without_queueing(self, test_db, field, value):
+        service, contract, _, _ = _make_service()
+        _schedulable(contract)
+        kwargs = dict(
+            pool_id_hex=POOL_ID_HEX, user_address=USER_ADDRESS,
+            amount="1000", nonce=0, signature="0x" + "aa" * 65,
+        )
+        kwargs[field] = value
+
+        with pytest.raises(ValueError):
+            service.schedule_deposit(**kwargs)
+
+        assert test_db.execute("SELECT COUNT(*) c FROM earn_transactions").fetchone()["c"] == 0
+
+    def test_executing_a_scheduled_row_updates_it_rather_than_adding_another(self, test_db):
+        from eth_account import Account
+
+        service, contract, _, _ = _make_service()
+        _schedulable(contract)
+        key = "0x" + "55" * 32
+        user = Account.from_key(key).address
+        scheduled = service.schedule_deposit(
+            pool_id_hex=POOL_ID_HEX, user_address=user,
+            amount="1000", nonce=0, signature=_transfer_sig(key, 1000, 0),
+        )
+
+        adopted = service._record_transaction(
+            existing_id=scheduled["id"], operation="deposit", pool_id_hex=POOL_ID_HEX,
+            user_address=user, token_id=USDC_TOKEN_ID, amount="1000",
+            signer_address=user, nonce=0, signature=_transfer_sig(key, 1000, 0),
+        )
+
+        assert adopted == scheduled["id"]
+        assert test_db.execute("SELECT COUNT(*) c FROM earn_transactions").fetchone()["c"] == 1
+        row = test_db.execute(
+            "SELECT status, token_id FROM earn_transactions WHERE id = ?", (adopted,)
+        ).fetchone()
+        assert row["status"] == "pending"
+        # Scheduling cannot know the token without reading the pool, so
+        # execution has to fill it or every consumer keyed on it sees a blank.
+        assert row["token_id"] == USDC_TOKEN_ID

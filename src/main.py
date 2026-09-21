@@ -61,6 +61,7 @@ async def lifespan(_app: FastAPI):
         register_aave_strategies_from_config,
         register_midas_strategies_from_config,
     )
+    from src.services.earn.worker import get_earn_worker
     from src.services.pool_rate_history import get_pool_rate_sampler
     from src.services.price_history import get_price_sampler
 
@@ -107,6 +108,11 @@ async def lifespan(_app: FastAPI):
         logger.exception("Pool rate sampler failed to start; no earn rate history will be recorded")
 
     try:
+        await get_earn_worker().start()
+    except Exception:
+        logger.exception("Earn worker failed to start; queued earn operations will not run")
+
+    try:
         await get_idle_deployer().start()
     except Exception:
         logger.exception("Idle deployer failed to start; seeded funds will sit undeployed")
@@ -129,6 +135,10 @@ async def lifespan(_app: FastAPI):
         await get_idle_deployer().stop()
     except Exception:
         logger.warning("Error stopping idle deployer")
+    try:
+        await get_earn_worker().stop()
+    except Exception:
+        logger.warning("Error stopping earn worker")
     try:
         await get_accounting_client().close()
     except Exception:

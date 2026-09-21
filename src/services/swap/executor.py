@@ -7,6 +7,7 @@ from src.core.db import db_write, get_db
 from src.core.eip712 import recover_transfer_signer
 from src.core.validation import validate_signature
 from src.models.swap import SwapRecord, SwapStatus, SwapVenue
+from src.services.user_queue import assert_nonce_free
 
 
 class SwapExecutor:
@@ -33,6 +34,7 @@ class SwapExecutor:
         user_address = self._recover_signer(quote, input_nonce, input_signature).lower()
         if quote["user_address"] != user_address:
             raise ValueError("Quote was not created for this user")
+        assert_nonce_free(user_address, input_nonce)
         venue = quote.get("venue")
         if venue not in {v.value for v in SwapVenue}:
             raise ValueError("Unsupported swap venue")

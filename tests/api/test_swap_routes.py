@@ -2,6 +2,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from src.models.api import QuoteResponse
 from src.models.swap import SwapRecord
+from src.services.user_queue import OperationPendingError
 
 USDC_TOKEN_ID = "0x330ba47d00c7ce3018deee017b319fd7cc6473a2ddc9e6eba6ebb4207be15279"
 WETH_TOKEN_ID = "0x335b5cccd1e63b2fe79863a0db73fce430e4e66902e2b78424f8662621e29fb7"
@@ -149,6 +150,24 @@ class TestSwapRoute:
             })
 
             assert r.status_code == 400
+
+    async def test_returns_409_with_the_pending_operation_when_the_nonce_is_held(self, api_client):
+        with patch("src.api.swap.get_swap_executor") as mock_exec:
+            executor = MagicMock()
+            executor.schedule_swap = AsyncMock(side_effect=OperationPendingError("swap", "swap-1"))
+            mock_exec.return_value = executor
+
+            r = await api_client.post("/v1/swap", json={
+                "quote_id": "quote-123",
+                "input_nonce": 0,
+                "input_signature": "0x" + "aa" * 65,
+            })
+
+            assert r.status_code == 409
+            body = r.json()
+            assert "still pending" in body["detail"]
+            assert body["pending_operation_type"] == "swap"
+            assert body["pending_operation_id"] == "swap-1"
 
     async def test_returns_500_on_unexpected_error(self, api_client):
         with patch("src.api.swap.get_swap_executor") as mock_exec:

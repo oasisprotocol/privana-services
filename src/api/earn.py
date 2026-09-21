@@ -4,6 +4,7 @@ from typing import Optional
 
 import httpx
 from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi.responses import JSONResponse
 
 from src.api._auth import auth_error, bearer_token, jwt_identity, resolve_via_accounting
 from src.clients.accounting import get_accounting_client
@@ -25,6 +26,7 @@ from src.models.history import EarnHistoryPoint, EarnHistoryResponse, usd_string
 from src.services.earn.registry import get_strategy_registry
 from src.services.earn.vault_service import get_vault_service
 from src.services.portfolio.history_service import MAX_HISTORY_DAYS, earn_history
+from src.services.user_queue import OperationPendingError
 
 logger = logging.getLogger(__name__)
 
@@ -194,7 +196,7 @@ async def get_deposit_quote(
 
 
 @router.post("/deposit", response_model=DepositResponse)
-async def deposit(payload: DepositRequest) -> DepositResponse:
+async def deposit(payload: DepositRequest) -> DepositResponse | JSONResponse:
     _pool_id_bytes(payload.pool_id)
     try:
         service = get_vault_service()
@@ -214,6 +216,8 @@ async def deposit(payload: DepositRequest) -> DepositResponse:
             amount=payload.amount,
             status=scheduled["status"],
         )
+    except OperationPendingError as exc:
+        return JSONResponse(status_code=409, content=exc.payload())
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

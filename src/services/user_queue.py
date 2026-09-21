@@ -26,3 +26,47 @@ def users_with_inflight_work() -> set[str]:
         (*_SWAP_IN_FLIGHT, *_EARN_IN_FLIGHT),
     ).fetchall()
     return {row["user_address"].lower() for row in rows if row["user_address"]}
+
+# A request holds its input nonce from the moment it is queued until it lands.
+_SWAP_HOLDS_NONCE = ("scheduled", *_SWAP_IN_FLIGHT)
+_EARN_HOLDS_NONCE = ("scheduled", *_EARN_IN_FLIGHT)
+
+
+class OperationPendingError(Exception):
+    """Raised when a queued request still holds the submitted nonce."""
+
+    def __init__(self, operation_type: str, operation_id: str) -> None:
+        super().__init__(
+            "A previous operation is still pending; wait for it to finish before submitting another"
+        )
+        self.operation_type = operation_type
+        self.operation_id = operation_id
+
+    def payload(self) -> dict:
+        return {
+            "detail": str(self),
+            "pending_operation_type": self.operation_type,
+            "pending_operation_id": self.operation_id,
+        }
+
+
+def assert_nonce_free(user_address: str, input_nonce: int) -> None:
+    """Refuse a request whose transfer nonce a queued swap or earn deposit already holds."""
+    user = user_address.lower()
+    # Bound as text on both sides: swaps.input_nonce is TEXT, and a uint256 does
+    # not fit SQLite's 64-bit integer binding. earn_transactions.input_nonce is
+    # INTEGER and still matches through SQLite's column affinity conversion.
+    nonce = str(input_nonce)
+    row = get_db().execute(
+        f"SELECT 'swap' AS kind, id FROM swaps "
+        f"WHERE user_address = ? AND input_nonce = ? "
+        f"AND status IN ({', '.join('?' * len(_SWAP_HOLDS_NONCE))}) "
+        f"UNION ALL "
+        f"SELECT 'earn_deposit' AS kind, id FROM earn_transactions "
+        f"WHERE user_address = ? AND operation = 'deposit' AND input_nonce = ? "
+        f"AND status IN ({', '.join('?' * len(_EARN_HOLDS_NONCE))}) "
+        f"LIMIT 1",
+        (user, nonce, *_SWAP_HOLDS_NONCE, user, nonce, *_EARN_HOLDS_NONCE),
+    ).fetchone()
+    if row is not None:
+        raise OperationPendingError(row["kind"], row["id"])

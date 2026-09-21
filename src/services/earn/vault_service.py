@@ -33,6 +33,7 @@ from src.services.earn.earned import (
 )
 from src.services.earn.registry import StrategyRegistry, get_strategy_registry
 from src.services.earn.strategies.base import ApyPoint
+from src.services.user_queue import assert_nonce_free
 
 logger = logging.getLogger(__name__)
 
@@ -516,6 +517,8 @@ class VaultService:
             )
         if recovered.lower() != user_address.lower():
             raise ValueError(f"{operation} was not signed by user_address")
+        if operation == EARN_OP_DEPOSIT:
+            assert_nonce_free(user_address, nonce)
 
         tx_id = str(uuid.uuid4())
         now = int(time.time())

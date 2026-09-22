@@ -171,11 +171,15 @@ def test_is_redemption_paused_reflects_contract(paused_value):
     assert client.is_redemption_paused() is paused_value
 
 
-def test_get_redemption_instant_fee_bps_reads_redemption_vault():
+def test_get_redemption_fee_bps_adds_the_token_fee_to_the_instant_fee():
     client, c = _make_client()
     c["redemption"].functions.instantFee.return_value.call.return_value = 25
+    c["redemption"].functions.tokensConfig.return_value.call.return_value = (
+        "0xfeed", 5, 0, True,
+    )
 
-    assert client.get_redemption_instant_fee_bps() == 25
+    assert client.get_redemption_fee_bps(TEST_USDC) == 30
+    c["redemption"].functions.tokensConfig.assert_called_once_with(TEST_USDC)
 
 
 def test_get_issuance_min_amount_reads_issuance_vault():

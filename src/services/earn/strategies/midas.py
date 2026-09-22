@@ -233,6 +233,38 @@ class MidasStrategy(BaseStrategy):
         return (usdc_amount * scale) // oracle_price
 
     @staticmethod
+    def redemption_payout(
+        mtbill_amount: int, oracle_price: int, oracle_decimals: int, fee_bps: int
+    ) -> int:
+        """USDC base units the redemption vault pays for ``mtbill_amount``.
+
+        Mirrors the contract: the instant fee is taken in mTBILL, and the
+        remainder is converted at the oracle price with the result floored.
+        Reproduces the mainnet vault to the base unit.
+        """
+        net = mtbill_amount - mtbill_amount * fee_bps // 10_000
+        return (net * oracle_price) // (10 ** (oracle_decimals + _DECIMAL_BALANCE))
+
+    @classmethod
+    def size_redeem(
+        cls, usdc_target: int, oracle_price: int, oracle_decimals: int, fee_bps: int
+    ) -> int:
+        """Smallest mTBILL amount whose vault payout covers ``usdc_target``.
+
+        Starts from the fee-grossed estimate and steps up by one USDC base
+        unit of mTBILL until the vault's own payout clears the target, so the
+        redeem never asks for a base unit more than it needs.
+        """
+        gross = usdc_target * 10_000 // (10_000 - fee_bps)
+        mtbill = cls.convert_usdc_to_mtbill_amount(
+            gross, oracle_price, oracle_decimals, round_up=True
+        )
+        unit = cls.convert_usdc_to_mtbill_amount(1, oracle_price, oracle_decimals, round_up=True)
+        while cls.redemption_payout(mtbill, oracle_price, oracle_decimals, fee_bps) < usdc_target:
+            mtbill += unit
+        return mtbill
+
+    @staticmethod
     def convert_mtbill_to_usdc_amount(
         mtbill_amount: int,
         oracle_price: int,
@@ -334,18 +366,12 @@ class MidasStrategy(BaseStrategy):
             raise MidasInstantUnavailableError(
                 f"Midas redemption instant fee is {fee_bps} bps; refusing to redeem"
             )
-        # The instant fee comes out of the USDC the vault pays, so the redeem
-        # has to be sized by dividing by (1 - fee), not multiplying by
-        # (1 + fee). The two agree to about a part in a million, which is
-        # enough to leave the payout a few base units short of the amount the
-        # pool then has to transfer, and that transfer reverts.
-        gross_usdc = amount * 10_000 // (10_000 - fee_bps)
-        # Rounding up here covers the truncation above as well, so the redeem
-        # always clears `amount` without asking for a base unit more than it
-        # needs — a pool being emptied has no spare unit to give.
-        mtbill_to_redeem = self.convert_usdc_to_mtbill_amount(
-            gross_usdc, price, decimals, round_up=True,
-        )
+        # Sized against the vault's own arithmetic rather than an approximation
+        # of it. The redemption vault takes its fee in mTBILL first and then
+        # converts what is left, flooring once more on the way out. Sizing in
+        # USDC and grossing up for the fee lands one base unit under that on
+        # mainnet, and the transfer to the user then cannot be covered.
+        mtbill_to_redeem = self.size_redeem(amount, price, decimals, fee_bps)
         # The pool has to hand `amount` on to the user straight after this, so
         # anything less is unusable. Floor the redeem at the target rather than
         # at a slippage band below it: reverting here is recoverable, whereas a

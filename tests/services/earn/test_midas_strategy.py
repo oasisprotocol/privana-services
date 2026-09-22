@@ -540,13 +540,12 @@ async def test_withdraw_from_earn_redeems_forwards_and_polls(
     midas_client.redeem_instant.assert_called_once()
     redeem_args = midas_client.redeem_instant.call_args.args
     assert redeem_args[0] == ASSET_ADDRESS
-    # At price=1.0 with a 25bps fee the redeem is sized by dividing by
-    # (1 - fee): ceil(1_000_000 * 10000 / 9975) = 1_002_507 USDC gross, which
-    # is 1_002_507 * 10**12 mTBILL, plus the rounding unit. The vault then
-    # pays 1_002_507 - 2_506 = 1_000_001, covering the 1_000_000 asked for.
-    # The old (1 + fee) sizing came to 1_002_506_000_000_000_000 and paid
-    # only 999_994, which is what made the payout transfer revert.
-    assert redeem_args[1] == 1_002_506_000_000_000_000
+    # At price=1.0 with a 25bps fee, sized against the vault's own arithmetic
+    # (fee taken in mTBILL, remainder converted and floored) the smallest
+    # amount that clears 1_000_000 is 1002507000000000000, paying 1000000. The old
+    # (1 + fee) sizing came to 1_002_500_000_000_000_000 and paid only
+    # 999_994, which is what made the payout transfer revert.
+    assert redeem_args[1] == 1002507000000000000
     # min_receive_usdc = 1_000_000 * 9950 / 10000 = 995_000, scaled to base-18
     # The pool must receive at least the amount it then transfers on, so the
     # floor is the target itself rather than a slippage band below it.
@@ -557,7 +556,7 @@ async def test_withdraw_from_earn_redeems_forwards_and_polls(
     midas_client.approve.assert_called_once_with(
         midas_client.mtbill_address,
         midas_client.redemption_vault_address,
-        1_002_506_000_000_000_000,
+        1002507000000000000,
     )
 
     # The realized USDC delta is forwarded, not the requested target amount.
@@ -616,6 +615,40 @@ async def test_withdraw_from_earn_skips_approve_when_allowance_sufficient(
 
     midas_client.approve.assert_not_called()
     midas_client.redeem_instant.assert_called_once()
+
+
+def test_redemption_payout_reproduces_the_mainnet_vault_to_the_unit():
+    """Observed 2026-09-22 on the RedemptionVaultWithUSTB: the fee-grossed
+    sizing asked for 4571502133084924585 mTBILL and the vault paid 4_899_999
+    against a 4_900_000 target. Fee taken in mTBILL first explains the unit."""
+    from src.services.earn.strategies.midas import MidasStrategy
+
+    price, decimals, fee_bps = 107_260_849, 8, 7
+    assert MidasStrategy.redemption_payout(4571502133084924585, price, decimals, fee_bps) == 4_899_999
+
+
+def test_size_redeem_clears_the_target_the_vault_rejected():
+    """The same mainnet case: the corrected sizing is what the vault accepted
+    with the floor set to the full amount, paying exactly the target."""
+    from src.services.earn.strategies.midas import MidasStrategy
+
+    price, decimals, fee_bps = 107_260_849, 8, 7
+    sized = MidasStrategy.size_redeem(4_900_000, price, decimals, fee_bps)
+    assert sized == 4571503065391548412
+    assert MidasStrategy.redemption_payout(sized, price, decimals, fee_bps) == 4_900_000
+
+
+def test_size_redeem_never_falls_short_and_never_overshoots_by_a_unit():
+    from src.services.earn.strategies.midas import MidasStrategy
+
+    for price, decimals in ((107_260_849, 8), (10**18, 18), (99_512_345, 8)):
+        for fee_bps in (0, 7, 25, 100):
+            for target in range(1_000_000, 30_000_001, 271_733):
+                sized = MidasStrategy.size_redeem(target, price, decimals, fee_bps)
+                paid = MidasStrategy.redemption_payout(sized, price, decimals, fee_bps)
+                assert paid >= target, (price, fee_bps, target, paid)
+                unit = MidasStrategy.convert_usdc_to_mtbill_amount(1, price, decimals, round_up=True)
+                assert MidasStrategy.redemption_payout(sized - unit, price, decimals, fee_bps) < target
 
 
 def test_the_redeem_is_sized_to_cover_the_payout_after_the_instant_fee():

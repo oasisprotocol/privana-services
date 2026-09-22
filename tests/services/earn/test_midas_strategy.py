@@ -119,7 +119,7 @@ def midas_client():
     client.get_mtbill_balance.return_value = 0
     client.is_issuance_paused.return_value = False
     client.is_redemption_paused.return_value = False
-    client.get_redemption_instant_fee_bps.return_value = 0
+    client.get_redemption_fee_bps.return_value = 0
     return client
 
 
@@ -533,7 +533,7 @@ async def test_withdraw_from_earn_redeems_forwards_and_polls(
     midas_client.get_erc20_balance.side_effect = [0, 1_002_300]
     midas_client.get_oracle_answer.return_value = 10**18
     midas_client.get_oracle_decimals.return_value = 18
-    midas_client.get_redemption_instant_fee_bps.return_value = 25
+    midas_client.get_redemption_fee_bps.return_value = 25
 
     await strategy.withdraw_from_earn(1_000_000)
 
@@ -590,7 +590,7 @@ async def test_withdraw_from_earn_renudges_check_deposit_until_accepted(
     midas_client.get_erc20_balance.side_effect = [0, 1_002_300]
     midas_client.get_oracle_answer.return_value = 10**18
     midas_client.get_oracle_decimals.return_value = 18
-    midas_client.get_redemption_instant_fee_bps.return_value = 25
+    midas_client.get_redemption_fee_bps.return_value = 25
 
     await strategy.withdraw_from_earn(1_000_000)
 
@@ -608,7 +608,7 @@ async def test_withdraw_from_earn_skips_approve_when_allowance_sufficient(
     midas_client.get_erc20_balance.side_effect = [0, 1_002_300]
     midas_client.get_oracle_answer.return_value = 10**18
     midas_client.get_oracle_decimals.return_value = 18
-    midas_client.get_redemption_instant_fee_bps.return_value = 25
+    midas_client.get_redemption_fee_bps.return_value = 25
     midas_client.get_allowance.return_value = 10**19
 
     await strategy.withdraw_from_earn(1_000_000)
@@ -694,7 +694,7 @@ async def test_withdraw_from_earn_refuses_an_absurd_instant_fee(
     privana.get_balance.return_value = _Balance(
         user_address=POOL_ADDRESS, token_id=TOKEN_ID, balance=0,
     )
-    midas_client.get_redemption_instant_fee_bps.return_value = 10_000
+    midas_client.get_redemption_fee_bps.return_value = 10_000
 
     with pytest.raises(MidasInstantUnavailableError, match="refusing to redeem"):
         await strategy.withdraw_from_earn(1_000_000)

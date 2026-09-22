@@ -341,7 +341,7 @@ class MidasStrategy(BaseStrategy):
 
         Steps:
           1. Snapshot the pool's accounting balance (for the credit poll).
-          2. Read oracle and the redemption-side instantFee. Compute the
+          2. Read oracle and the redemption-side fee. Compute the
              mTBILL amount to redeem, including a fee-rate buffer so that
              post-fee USDC out >= target. Compute min_receive_usdc in
              base-18. Top up the vault's mTBILL allowance if short.
@@ -361,10 +361,12 @@ class MidasStrategy(BaseStrategy):
         pre_balance = await self._read_pool_balance()
 
         price, decimals = await asyncio.to_thread(self._read_oracle_price)
-        fee_bps = await asyncio.to_thread(self._client.get_redemption_instant_fee_bps)
+        fee_bps = await asyncio.to_thread(
+            self._client.get_redemption_fee_bps, self._asset_address,
+        )
         if fee_bps >= 10_000:
             raise MidasInstantUnavailableError(
-                f"Midas redemption instant fee is {fee_bps} bps; refusing to redeem"
+                f"Midas redemption fee is {fee_bps} bps; refusing to redeem"
             )
         # Sized against the vault's own arithmetic rather than an approximation
         # of it. The redemption vault takes its fee in mTBILL first and then

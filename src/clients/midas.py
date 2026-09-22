@@ -146,11 +146,16 @@ class MidasClient:
     def is_redemption_paused(self) -> bool:
         return bool(self.redemption_vault.functions.paused().call())
 
-    def get_redemption_instant_fee_bps(self) -> int:
-        """`instantFee` is stored in basis-points on the redemption vault.
-        Strategy uses it to over-redeem just enough to cover the fee.
+    def get_redemption_fee_bps(self, token_out: str) -> int:
+        """The fee the redemption vault takes on an instant redeem into
+        `token_out`, in basis points: the per-token fee plus `instantFee`,
+        which is how the vault itself adds them up. Strategy sizes the
+        redeem against it.
         """
-        return int(self.redemption_vault.functions.instantFee().call())
+        token = Web3.to_checksum_address(token_out)
+        _, token_fee, _, _ = self.redemption_vault.functions.tokensConfig(token).call()
+        instant_fee = self.redemption_vault.functions.instantFee().call()
+        return int(token_fee) + int(instant_fee)
 
     def get_issuance_min_amount(self) -> int:
         return int(self.issuance_vault.functions.minAmount().call())

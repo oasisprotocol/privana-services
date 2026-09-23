@@ -299,6 +299,7 @@ class MidasStrategy(BaseStrategy):
         if amount <= 0:
             raise ValueError(f"deposit_to_earn requires a positive amount, got {amount}")
 
+        await self._await_bridges_in_flight()
         on_hand = await asyncio.to_thread(
             self._client.get_erc20_balance, self._asset_address,
         )
@@ -309,7 +310,7 @@ class MidasStrategy(BaseStrategy):
                 amount, on_hand,
             )
         else:
-            await self._bridge_to_base(amount)
+            await self._bridge_to_base(amount - on_hand)
             on_hand = await asyncio.to_thread(
                 self._client.get_erc20_balance, self._asset_address,
             )
@@ -537,6 +538,36 @@ class MidasStrategy(BaseStrategy):
             return raw_usdc
         price, decimals = await asyncio.to_thread(self._read_oracle_price)
         return raw_usdc + self.convert_mtbill_to_usdc_amount(mtbill_bal, price, decimals)
+
+    async def in_flight_assets(self) -> int:
+        return sum(int(w.amount) for w in await self._pending_bridges())
+
+    async def _pending_bridges(self) -> list:
+        client = self._get_privana()
+        pending = await self._retry_on_network_error(
+            "get_pending_withdrawals",
+            lambda: client.get_pending_withdrawals(self._pool_address),
+        )
+        token = self._token_id.lower()
+        return [w for w in pending.pending_withdrawals if w.token_id.lower() == token]
+
+    async def _await_bridges_in_flight(self) -> None:
+        """An earlier bridge still on its way would land on the same account
+        and be mistaken for ours, so wait for the account to settle first.
+        """
+        for attempt in range(1, self._max_bridge_poll_attempts + 1):
+            pending = await self._pending_bridges()
+            if not pending:
+                return
+            logger.info(
+                "MidasStrategy: %d earlier bridge(s) still in flight (attempt %d/%d); waiting",
+                len(pending), attempt, self._max_bridge_poll_attempts,
+            )
+            await asyncio.sleep(self._poll_interval_sec)
+        raise RuntimeError(
+            f"MidasStrategy: earlier bridge still in flight after "
+            f"{self._max_bridge_poll_attempts} polls; aborting to release lock"
+        )
 
     async def stranded_assets(self) -> int:
         return await asyncio.to_thread(

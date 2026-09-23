@@ -347,6 +347,35 @@ async def test_deposit_to_earn_supplies_everything_on_the_eoa(strategy, aave_cli
 
 
 @pytest.mark.asyncio
+async def test_deposit_to_earn_bridges_only_the_shortfall(strategy, aave_client, privana) -> None:
+    aave_client.get_erc20_balance.side_effect = [300_000, 300_000, 1_000_000, 1_000_000]
+    aave_client.get_allowance.return_value = 10_000_000
+
+    await strategy.deposit_to_earn(1_000_000)
+
+    assert privana.request_withdrawal.await_args.args[0].amount == 700_000
+    aave_client.supply.assert_called_once_with(ASSET_ADDRESS, 1_000_000)
+
+
+@pytest.mark.asyncio
+async def test_deposit_to_earn_waits_for_an_earlier_bridge_to_land(strategy, aave_client, privana) -> None:
+    privana.get_pending_withdrawals.side_effect = [
+        _PendingWithdrawalsResponse(
+            user_address=POOL_ADDRESS,
+            pending_withdrawals=[_PendingWithdrawal(index=3, amount=500_000, token_id=TOKEN_ID)],
+        ),
+        _PendingWithdrawalsResponse(user_address=POOL_ADDRESS, pending_withdrawals=[]),
+    ]
+    aave_client.get_erc20_balance.side_effect = [500_000, 500_000, 1_000_000, 1_000_000]
+    aave_client.get_allowance.return_value = 10_000_000
+
+    await strategy.deposit_to_earn(1_000_000)
+
+    assert privana.get_pending_withdrawals.await_count == 2
+    assert privana.request_withdrawal.await_args.args[0].amount == 500_000
+
+
+@pytest.mark.asyncio
 async def test_deposit_to_earn_uses_funds_already_on_the_eoa(strategy, aave_client, privana) -> None:
     aave_client.get_erc20_balance.return_value = 1_000_000
     aave_client.get_allowance.return_value = 10_000_000

@@ -920,11 +920,11 @@ class VaultService:
             idle = await strategy.idle_assets()
             stranded = await strategy.stranded_assets()
             minimum = await strategy.min_deploy_amount()
-            # Funds already on the earn account need no bridge: routing that
-            # amount makes the strategy deploy what it holds.
-            amount = idle if idle > 0 and idle >= minimum else stranded
+            # The strategy bridges only what is not already on the earn
+            # account, so idle and stranded funds deploy together.
+            amount = idle + stranded
             if amount <= 0 or amount < minimum:
-                if idle == 0 and stranded == 0:
+                if idle == 0 and stranded == 0 and await strategy.in_flight_assets() == 0:
                     self._complete_undeployed(pool_id_hex)
                 return 0
             if not await strategy.is_healthy():
@@ -941,7 +941,11 @@ class VaultService:
             # guarantees nothing else is mid-flight.
             await self.sync_total_assets(pool_id_hex)
             left = await strategy.idle_assets()
-            if (left == 0 or left < minimum) and await strategy.stranded_assets() == 0:
+            if (
+                (left == 0 or left < minimum)
+                and await strategy.stranded_assets() == 0
+                and await strategy.in_flight_assets() == 0
+            ):
                 self._complete_undeployed(pool_id_hex)
             return amount
 
@@ -1284,6 +1288,7 @@ class VaultService:
                 strategy.name != "manual"
                 and await strategy.idle_assets() == 0
                 and await strategy.stranded_assets() == 0
+                and await strategy.in_flight_assets() == 0
             ):
                 self._complete_undeployed(pool_id_hex)
         except Exception:

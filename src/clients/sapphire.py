@@ -118,7 +118,9 @@ class SapphireClient:
         return tx_hash_hex
 
     def wait_for_receipt(self, tx_hash: str):
-        return self.w3.eth.wait_for_transaction_receipt(tx_hash, 30, 0.5)
+        # Timeout is set to 40 seconds: In case of batched transactions, nonce
+        # recheck happens every 5 rounds, times 6-7 seconds per round + overhead.
+        return self.w3.eth.wait_for_transaction_receipt(tx_hash, 40, 0.5)
 
     def execute_contract_call(
         self,

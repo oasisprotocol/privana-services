@@ -18,7 +18,8 @@ from src.services.swap.worker import lp_transfer_lock
 from src.services.user_queue import users_with_inflight_work
 
 logger = logging.getLogger(__name__)
-BATCH_SIZE = 5
+# The Sapphire client node will relay transactions with up to 10 future nonces.
+BATCH_SIZE = 10
 # Number of seconds after quote expiry to consider an in-flight swap stale.
 STALE_SWAP_TIMEOUT = 13
 SWAP_MANAGER_ABI = load_abi("SwapManager")
@@ -192,7 +193,7 @@ class InternalSwapPipeline:
                     for unsent in prepared[index + 1:]:
                         self._update(unsent["id"], status="scheduled")
                     break
-            # All (at most five) sends precede any receipt wait. No next batch
+            # All sends in the batch precede any receipt wait. No next batch
             # is submitted until these transactions have settled.
             await asyncio.gather(*(self._settle(sapphire, swap) for swap in sent))
 

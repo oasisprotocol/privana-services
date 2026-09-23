@@ -55,6 +55,7 @@ def _validate_settings() -> None:
 async def lifespan(_app: FastAPI):
     from src.clients.accounting import get_accounting_client
     from src.clients.lifi import get_lifi_client
+    from src.services.earn.cache import get_pool_list_cache
     from src.services.earn.idle_deployer import get_idle_deployer
     from src.services.earn.registry import (
         get_strategy_registry,
@@ -108,6 +109,11 @@ async def lifespan(_app: FastAPI):
         logger.exception("Pool rate sampler failed to start; no earn rate history will be recorded")
 
     try:
+        await get_pool_list_cache().start()
+    except Exception:
+        logger.exception("Earn pool listing cache failed to start")
+
+    try:
         await get_earn_worker().start()
     except Exception:
         logger.exception("Earn worker failed to start; queued earn operations will not run")
@@ -131,6 +137,10 @@ async def lifespan(_app: FastAPI):
         await get_pool_rate_sampler().stop()
     except Exception:
         logger.warning("Error stopping pool rate sampler")
+    try:
+        await get_pool_list_cache().stop()
+    except Exception:
+        logger.warning("Error stopping earn pool listing cache")
     try:
         await get_idle_deployer().stop()
     except Exception:

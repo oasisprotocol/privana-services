@@ -32,72 +32,37 @@ def _mock_service(**overrides) -> MagicMock:
 
 
 class TestListPoolsRoute:
-    async def test_returns_200_with_pools(self, api_client):
-        with patch("src.api.earn.get_vault_service") as mock_svc:
-            svc = _mock_service()
-            svc.list_pools.return_value = [_mock_pool()]
-            mock_svc.return_value = svc
+    async def test_returns_cached_snapshot_without_fetching(self, api_client):
+        from src.models.earn import PoolListResponse, PoolResponse
 
-            r = await api_client.get("/v1/earn/pools")
-
-            assert r.status_code == 200
-            data = r.json()
-            assert len(data["pools"]) == 1
-            assert data["pools"][0]["pool_id"] == POOL_ID
-            assert data["pools"][0]["status"] == "active"
-
-    async def test_returns_empty_list(self, api_client):
-        with patch("src.api.earn.get_vault_service") as mock_svc:
-            svc = _mock_service()
-            svc.list_pools.return_value = []
-            mock_svc.return_value = svc
-
+        snapshot = PoolListResponse(pools=[PoolResponse(
+            pool_id=POOL_ID,
+            token_id=USDC_TOKEN_ID,
+            pool_address=POOL_ADDRESS,
+            strategy="manual",
+            total_assets="1100",
+            apy_bps=487,
+            status="paused",
+        )])
+        with patch("src.api.earn.get_pool_list_cache") as cache, patch(
+            "src.api.earn.get_vault_service"
+        ) as service:
+            cache.return_value.get.return_value = snapshot
             r = await api_client.get("/v1/earn/pools")
             assert r.status_code == 200
-            assert r.json()["pools"] == []
-
-    async def test_paused_pool_shows_status(self, api_client):
-        with patch("src.api.earn.get_vault_service") as mock_svc:
-            pool = _mock_pool()
-            pool["active"] = False
-            svc = _mock_service()
-            svc.list_pools.return_value = [pool]
-            mock_svc.return_value = svc
-
-            r = await api_client.get("/v1/earn/pools")
-            assert r.json()["pools"][0]["status"] == "paused"
-
-    async def test_returns_500_on_error(self, api_client):
-        with patch("src.api.earn.get_vault_service") as mock_svc:
-            svc = _mock_service()
-            svc.list_pools.side_effect = RuntimeError("rpc down")
-            mock_svc.return_value = svc
-
-            r = await api_client.get("/v1/earn/pools")
-            assert r.status_code == 500
-
-    async def test_total_assets_reflects_strategy_live_aum(self, api_client):
-        with patch("src.api.earn.get_vault_service") as mock_svc:
-            svc = MagicMock()
-            svc.list_pools.return_value = [_mock_pool()]
-            svc.effective_total_assets = AsyncMock(return_value=1100)
-            svc.strategy_apy_bps_safe = AsyncMock(return_value=0)
-            mock_svc.return_value = svc
-
-            r = await api_client.get("/v1/earn/pools")
             assert r.json()["pools"][0]["total_assets"] == "1100"
-
-    async def test_apy_bps_reflects_strategy_value(self, api_client):
-        with patch("src.api.earn.get_vault_service") as mock_svc:
-            svc = _mock_service()
-            svc.list_pools.return_value = [_mock_pool()]
-            svc.strategy_apy_bps_safe = AsyncMock(return_value=487)
-            mock_svc.return_value = svc
-
-            r = await api_client.get("/v1/earn/pools")
             assert r.json()["pools"][0]["apy_bps"] == 487
+            assert r.json()["pools"][0]["status"] == "paused"
+            service.assert_not_called()
 
-    async def test_strategy_field_reflects_registered_strategy(self, api_client):
+    async def test_returns_503_before_first_refresh(self, api_client):
+        with patch("src.api.earn.get_pool_list_cache") as cache:
+            cache.return_value.get.return_value = None
+            r = await api_client.get("/v1/earn/pools")
+            assert r.status_code == 503
+
+    async def test_refresh_builds_snapshot_and_keeps_it_on_failure(self):
+        from src.services.earn.cache import PoolListCache
         from src.services.earn.registry import (
             get_strategy_registry,
             reset_strategy_registry,
@@ -108,13 +73,21 @@ class TestListPoolsRoute:
         strat.name = "midas-mtbill"
         get_strategy_registry().register(POOL_ID, strat)
         try:
-            with patch("src.api.earn.get_vault_service") as mock_svc:
+            with patch("src.services.earn.cache.get_vault_service") as mock_svc:
                 svc = _mock_service()
                 svc.list_pools.return_value = [_mock_pool()]
+                svc.effective_total_assets = AsyncMock(return_value=1100)
+                svc.strategy_apy_bps_safe = AsyncMock(return_value=487)
                 mock_svc.return_value = svc
-
-                r = await api_client.get("/v1/earn/pools")
-                assert r.json()["pools"][0]["strategy"] == "midas-mtbill"
+                cache = PoolListCache()
+                await cache.refresh_once()
+                assert cache.get().pools[0].strategy == "midas-mtbill"
+                assert cache.get().pools[0].total_assets == "1100"
+                assert cache.get().pools[0].apy_bps == 487
+                svc.list_pools.side_effect = RuntimeError("rpc down")
+                with pytest.raises(RuntimeError):
+                    await cache.refresh_once()
+                assert cache.get().pools[0].total_assets == "1100"
         finally:
             reset_strategy_registry()
 

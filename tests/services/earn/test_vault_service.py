@@ -1654,7 +1654,8 @@ class TestDeployIdle:
 
     async def test_completes_undeployed_deposits_once_their_funds_are_working(self, test_db):
         from src.core.db import db_write, get_db
-        service, _ = self._service(idle=100_000)
+        service, strategy = self._service(idle=100_000)
+        strategy.idle_assets = AsyncMock(side_effect=[100_000] + [0] * 4)
         db_write(
             get_db(),
             """INSERT INTO earn_transactions

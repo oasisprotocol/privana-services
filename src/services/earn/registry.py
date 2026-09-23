@@ -56,6 +56,9 @@ class StrategyRegistry:
                     f"pool {key} holds the same asset on chain {chain_id} as pool {other}; "
                     "one earn account cannot back both"
                 )
+            for old_holding, owner in list(self._holdings.items()):
+                if owner == key and old_holding != holding:
+                    del self._holdings[old_holding]
             self._holdings[holding] = key
         self._strategies[key] = strategy
 

@@ -157,7 +157,9 @@ class AaveStrategy(BaseStrategy):
         if amount <= 0:
             raise ValueError(f"deposit_to_earn requires a positive amount, got {amount}")
 
-        on_hand = self._client.get_erc20_balance(self._asset_address)
+        on_hand = await asyncio.to_thread(
+            self._client.get_erc20_balance, self._asset_address,
+        )
         if on_hand >= amount:
             logger.info(
                 "AaveStrategy.deposit_to_earn: %d already on the LP EOA (balance=%d); "
@@ -166,7 +168,9 @@ class AaveStrategy(BaseStrategy):
             )
         else:
             await self._bridge_to_base(amount)
-            on_hand = self._client.get_erc20_balance(self._asset_address)
+            on_hand = await asyncio.to_thread(
+                self._client.get_erc20_balance, self._asset_address,
+            )
         # Everything on the account is pool money, so supply all of it: a bridge
         # a previous deposit gave up on would otherwise sit here earning nothing.
         deploy = max(amount, on_hand)
@@ -208,28 +212,38 @@ class AaveStrategy(BaseStrategy):
             raise ValueError(f"withdraw_from_earn requires a positive amount, got {amount}")
 
         pre_balance = await self._read_pool_balance()
-
-        # Aave's scaled-balance math can credit 1 wei less than supplied, so
-        # a reclaim of the exact principal reverts against a dust-short
-        # position. Clamp to the position when the shortfall is dust; a real
-        # shortfall still fails loudly.
-        position = await self.total_assets()
-        redeem_amount = amount
-        if position < amount:
-            if amount - position > REDEEM_DUST_TOLERANCE:
-                raise RuntimeError(
-                    f"Aave position {position} cannot cover reclaim of {amount} "
-                    f"(short by {amount - position})"
-                )
-            redeem_amount = position
-
-        redeem_tx = self._client.withdraw(
-            self._asset_address, redeem_amount, to=self._pool_address
+        # Anything already sitting raw on the account is pool money that was
+        # never supplied; spend it before touching the position.
+        on_hand = await asyncio.to_thread(
+            self._client.get_erc20_balance, self._asset_address,
         )
-        logger.info(
-            "AaveStrategy.withdraw_from_earn: redeemed from aave asset=%s amount=%d tx=%s",
-            self._asset_address, redeem_amount, redeem_tx,
-        )
+        from_raw = min(on_hand, amount)
+        redeem_amount = amount - from_raw
+        if redeem_amount > 0:
+            # Aave's scaled-balance math can credit 1 wei less than supplied, so
+            # a reclaim of the exact principal reverts against a dust-short
+            # position. Clamp to the position when the shortfall is dust; a real
+            # shortfall still fails loudly.
+            position = await asyncio.to_thread(
+                self._client.get_aToken_balance,
+                self._asset_address,
+                self._pool_address,
+            )
+            if position < redeem_amount:
+                if redeem_amount - position > REDEEM_DUST_TOLERANCE:
+                    raise RuntimeError(
+                        f"Aave position {position} cannot cover reclaim of {redeem_amount} "
+                        f"(short by {redeem_amount - position})"
+                    )
+                redeem_amount = position
+            redeem_tx = self._client.withdraw(
+                self._asset_address, redeem_amount, to=self._pool_address
+            )
+            logger.info(
+                "AaveStrategy.withdraw_from_earn: redeemed from aave asset=%s amount=%d tx=%s",
+                self._asset_address, redeem_amount, redeem_tx,
+            )
+        redeem_amount += from_raw
 
         # Acquired right before each authed call, not once for the flow: the
         # getter refreshes the bearer token near expiry, and the on-chain legs
@@ -318,7 +332,9 @@ class AaveStrategy(BaseStrategy):
         """
         client = self._get_privana()
         lp_account = Account.from_key(self._lp_secret_key)
-        balance_before = self._client.get_erc20_balance(self._asset_address)
+        balance_before = await asyncio.to_thread(
+            self._client.get_erc20_balance, self._asset_address,
+        )
         nonce_resp = await self._retry_on_network_error(
             "get_withdrawal_nonce",
             lambda: client.get_withdrawal_nonce(self._pool_address),
@@ -359,7 +375,9 @@ class AaveStrategy(BaseStrategy):
         while True:
             attempts += 1
             try:
-                balance = self._client.get_erc20_balance(self._asset_address)
+                balance = await asyncio.to_thread(
+                    self._client.get_erc20_balance, self._asset_address,
+                )
             except Exception as exc:
                 logger.warning(
                     "AaveStrategy._bridge_to_base: balance read failed (attempt %d/%d); retrying: %s",
@@ -453,6 +471,8 @@ class AaveStrategy(BaseStrategy):
         The underlying web3 reads are synchronous; offload via ``to_thread``
         so concurrent gather() siblings keep making progress.
         """
+        # Position first, raw second: a supply landing between the two reads
+        # then drops out of one side or the other, never into both.
         supplied = await asyncio.to_thread(
             self._client.get_aToken_balance,
             self._asset_address,

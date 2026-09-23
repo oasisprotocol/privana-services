@@ -376,6 +376,52 @@ class MidasStrategy(BaseStrategy):
 
         pre_balance = await self._read_pool_balance()
 
+        # Anything already sitting raw on the account is pool money that was
+        # never minted; spend it before touching the position.
+        lp_usdc_before = await asyncio.to_thread(
+            self._client.get_erc20_balance, self._asset_address,
+        )
+        from_raw = min(lp_usdc_before, amount)
+        realized_usdc = 0
+        if amount > from_raw:
+            realized_usdc = await self._redeem(amount - from_raw, lp_usdc_before)
+        realized_usdc += from_raw
+
+        # Acquired right before each authed call, not once for the flow: the
+        # getter refreshes the bearer token near expiry, and the redeem legs
+        # above can outlive a token that was fresh at the start.
+        async def _fetch_deposit_address():
+            client = await self._get_authed_privana()
+            return await client.get_deposit_address(
+                DepositAddressRequest(chain_type="evm")
+            )
+
+        deposit = await self._retry_on_network_error(
+            "get_deposit_address", _fetch_deposit_address
+        )
+
+        transfer_tx = await asyncio.to_thread(
+            self._client.transfer_erc20,
+            self._asset_address,
+            deposit.deposit_address,
+            realized_usdc,
+        )
+        logger.info(
+            "MidasStrategy.withdraw_from_earn: forwarded to deposit_address=%s amount=%d tx=%s",
+            deposit.deposit_address, realized_usdc, transfer_tx,
+        )
+
+        target_balance = pre_balance + realized_usdc
+        await self._poll_until_credited(target_balance, transfer_tx, realized_usdc)
+        logger.info(
+            "MidasStrategy.withdraw_from_earn: pool balance credited pool=%s token=%s amount=%d",
+            self._pool_address, self._token_id, realized_usdc,
+        )
+
+    async def _redeem(self, amount: int, lp_usdc_before: int) -> int:
+        """Redeem enough mTBILL for `amount` USDC through the Instant
+        Redemption Vault and return the USDC that actually arrived.
+        """
         price, decimals = await asyncio.to_thread(self._read_oracle_price)
         fee_bps = await asyncio.to_thread(
             self._client.get_redemption_fee_bps, self._asset_address,
@@ -414,10 +460,6 @@ class MidasStrategy(BaseStrategy):
                 self._client.redemption_vault_address,
                 mtbill_to_redeem,
             )
-
-        lp_usdc_before = await asyncio.to_thread(
-            self._client.get_erc20_balance, self._asset_address,
-        )
 
         try:
             redeem_tx = await asyncio.to_thread(
@@ -459,37 +501,7 @@ class MidasStrategy(BaseStrategy):
             "min_usdc=%d realized_usdc=%d tx=%s",
             mtbill_to_redeem, min_receive_usdc, realized_usdc, redeem_tx,
         )
-
-        # Acquired right before each authed call, not once for the flow: the
-        # getter refreshes the bearer token near expiry, and the redeem legs
-        # above can outlive a token that was fresh at the start.
-        async def _fetch_deposit_address():
-            client = await self._get_authed_privana()
-            return await client.get_deposit_address(
-                DepositAddressRequest(chain_type="evm")
-            )
-
-        deposit = await self._retry_on_network_error(
-            "get_deposit_address", _fetch_deposit_address
-        )
-
-        transfer_tx = await asyncio.to_thread(
-            self._client.transfer_erc20,
-            self._asset_address,
-            deposit.deposit_address,
-            realized_usdc,
-        )
-        logger.info(
-            "MidasStrategy.withdraw_from_earn: forwarded to deposit_address=%s amount=%d tx=%s",
-            deposit.deposit_address, realized_usdc, transfer_tx,
-        )
-
-        target_balance = pre_balance + realized_usdc
-        await self._poll_until_credited(target_balance, transfer_tx, realized_usdc)
-        logger.info(
-            "MidasStrategy.withdraw_from_earn: pool balance credited pool=%s token=%s amount=%d",
-            self._pool_address, self._token_id, realized_usdc,
-        )
+        return realized_usdc
 
     async def min_deploy_amount(self) -> int:
         """The issuance vault's own minimum, converted from Midas base-18 to
@@ -507,11 +519,13 @@ class MidasStrategy(BaseStrategy):
         when the address holds nothing so callers fall back to the on-chain
         pool snapshot.
         """
-        raw_usdc = await asyncio.to_thread(
-            self._client.get_erc20_balance, self._asset_address,
-        )
+        # Position first, raw second: a mint landing between the two reads
+        # then drops out of one side or the other, never into both.
         mtbill_bal = await asyncio.to_thread(
             self._client.get_mtbill_balance, self._pool_address,
+        )
+        raw_usdc = await asyncio.to_thread(
+            self._client.get_erc20_balance, self._asset_address,
         )
         if mtbill_bal == 0:
             return raw_usdc

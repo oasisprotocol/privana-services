@@ -565,6 +565,27 @@ async def test_deposit_to_earn_uses_funds_already_on_the_eoa(
 
 
 @pytest.mark.asyncio
+async def test_withdraw_from_earn_spends_raw_funds_before_the_position(
+    strategy, midas_client, privana,
+) -> None:
+    midas_client.get_erc20_balance.return_value = 1_000_000
+    privana.get_balance = AsyncMock(
+        side_effect=[
+            _Balance(user_address=POOL_ADDRESS, token_id=TOKEN_ID, balance=0),
+            _Balance(user_address=POOL_ADDRESS, token_id=TOKEN_ID, balance=1_000_000),
+        ]
+    )
+    privana.check_deposit = AsyncMock(
+        return_value=_DepositCheckResponse(status="accepted", deposit_id="dep-1")
+    )
+
+    await strategy.withdraw_from_earn(1_000_000)
+
+    midas_client.redeem_instant.assert_not_called()
+    midas_client.transfer_erc20.assert_called_once_with(ASSET_ADDRESS, DEPOSIT_ADDRESS_BASE, 1_000_000)
+
+
+@pytest.mark.asyncio
 async def test_total_assets_counts_usdc_still_on_the_eoa(strategy, midas_client) -> None:
     midas_client.get_erc20_balance.return_value = 5_000_000
     midas_client.get_mtbill_balance.return_value = 20 * 10**18

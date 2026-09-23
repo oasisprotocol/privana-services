@@ -673,6 +673,7 @@ class VaultService:
                 self._update_transaction(tx_id, error=deploy_error)
             else:
                 self._update_transaction(tx_id, status=EARN_STATUS_COMPLETED)
+                await self._complete_undeployed_if_clear(pool_id_hex)
 
         deploy_status = EARN_STATUS_UNDEPLOYED if deploy_error else EARN_STATUS_COMPLETED
 
@@ -934,7 +935,9 @@ class VaultService:
             # taken before the move, so refresh it while the lock still
             # guarantees nothing else is mid-flight.
             await self.sync_total_assets(pool_id_hex)
-            self._complete_undeployed(pool_id_hex)
+            left = await strategy.idle_assets()
+            if left == 0 or left < minimum:
+                self._complete_undeployed(pool_id_hex)
             return idle
 
     async def effective_total_assets(self, pool_id_hex: str, on_chain_total: int) -> int:
@@ -1263,6 +1266,19 @@ class VaultService:
             exchange_rate=rate,
             settled_at=int(time.time()),
         )
+
+    async def _complete_undeployed_if_clear(self, pool_id_hex: str) -> None:
+        """A routed deposit sweeps whatever was left raw on the earn account, so
+        once the pool has nothing idle either, earlier undeployed deposits
+        have been put to work along with it. Bookkeeping only: a failed read
+        here must not fail the deposit that just succeeded.
+        """
+        try:
+            strategy = self._registry.get(pool_id_hex)
+            if strategy.name != "manual" and await strategy.idle_assets() == 0:
+                self._complete_undeployed(pool_id_hex)
+        except Exception:
+            logger.warning("undeployed-row reconcile skipped pool=%s", pool_id_hex, exc_info=True)
 
     def _complete_undeployed(self, pool_id_hex: str) -> None:
         """Deposits whose routing failed sit as ``undeployed`` with their funds

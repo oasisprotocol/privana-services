@@ -299,7 +299,17 @@ class MidasStrategy(BaseStrategy):
         if amount <= 0:
             raise ValueError(f"deposit_to_earn requires a positive amount, got {amount}")
 
-        await self._bridge_to_base(amount)
+        on_hand = await asyncio.to_thread(
+            self._client.get_erc20_balance, self._asset_address,
+        )
+        if on_hand >= amount:
+            logger.info(
+                "MidasStrategy.deposit_to_earn: %d already on the LP EOA (balance=%d); "
+                "skipping the bridge",
+                amount, on_hand,
+            )
+        else:
+            await self._bridge_to_base(amount)
 
         allowance = await asyncio.to_thread(
             self._client.get_allowance,
@@ -484,17 +494,23 @@ class MidasStrategy(BaseStrategy):
         return -(-base18 // _BASE18_SCALE)
 
     async def total_assets(self) -> int:
-        """Live AUM held by the pool address, in USDC base units. mTBILL
-        balance times the oracle price. Returns 0 when the pool holds no
-        mTBILL so callers fall back to the on-chain pool snapshot.
+        """Live AUM held by the pool address, in USDC base units: mTBILL
+        balance times the oracle price, plus any USDC sitting on the address
+        itself. That raw balance is pool money mid-flight, bridged in but not
+        yet minted; leaving it out would show the pool as short. Returns 0
+        when the address holds nothing so callers fall back to the on-chain
+        pool snapshot.
         """
+        raw_usdc = await asyncio.to_thread(
+            self._client.get_erc20_balance, self._asset_address,
+        )
         mtbill_bal = await asyncio.to_thread(
             self._client.get_mtbill_balance, self._pool_address,
         )
         if mtbill_bal == 0:
-            return 0
+            return raw_usdc
         price, decimals = await asyncio.to_thread(self._read_oracle_price)
-        return self.convert_mtbill_to_usdc_amount(mtbill_bal, price, decimals)
+        return raw_usdc + self.convert_mtbill_to_usdc_amount(mtbill_bal, price, decimals)
 
     async def idle_assets(self) -> int:
         """The pool's accounting balance: deposits whose issuance never
@@ -572,26 +588,25 @@ class MidasStrategy(BaseStrategy):
 
     async def _bridge_to_base(self, amount: int) -> None:
         """Submit an accounting Withdraw signed by the LP key and block
-        until accounting reports the request resolved. Mirrors
-        AaveStrategy._bridge_to_base verbatim; the underlying flow is
-        protocol-agnostic. When both strategies are stable this can be
-        lifted into a shared helper module.
+        until the funds land on the LP EOA.
+
+        Landing is judged by the asset balance on the EOA, not by
+        accounting's pending list. A withdrawal the relay resolves before
+        this loop first observes it pending never shows up in that list,
+        and waiting on the list then runs until the poll cap with the funds
+        already here. The poll reads the chain only, so no accounting outage
+        can stretch the cap.
         """
         client = self._get_privana()
         lp_account = Account.from_key(self._lp_secret_key)
-
-        pre = await self._retry_on_network_error(
-            "get_pending_withdrawals",
-            lambda: client.get_pending_withdrawals(self._pool_address),
+        balance_before = await asyncio.to_thread(
+            self._client.get_erc20_balance, self._asset_address,
         )
-        pre_indices: set[int] = {w.index for w in pre.pending_withdrawals}
-
         nonce_resp = await self._retry_on_network_error(
             "get_withdrawal_nonce",
             lambda: client.get_withdrawal_nonce(self._pool_address),
         )
         nonce = nonce_resp.nonce
-
         signature = sign_withdraw_message(
             SignWithdrawParams(
                 account=lp_account,
@@ -623,41 +638,24 @@ class MidasStrategy(BaseStrategy):
                 f"Withdrawal request rejected: status={submission.status} "
                 f"detail={submission.detail}"
             )
-
-        own_index: Optional[int] = None
         attempts = 0
         while True:
             attempts += 1
-            if attempts > self._max_bridge_poll_attempts:
+            balance = await asyncio.to_thread(
+            self._client.get_erc20_balance, self._asset_address,
+        )
+            if balance >= balance_before + amount:
+                logger.info(
+                    "MidasStrategy._bridge_to_base: withdrawal landed nonce=%d amount=%d balance=%d",
+                    nonce, amount, balance,
+                )
+                return
+            if attempts >= self._max_bridge_poll_attempts:
                 raise RuntimeError(
-                    f"MidasStrategy._bridge_to_base: withdrawal unresolved after "
+                    f"MidasStrategy._bridge_to_base: withdrawal not landed after "
                     f"{self._max_bridge_poll_attempts} polls (pool={self._pool_address} "
                     f"token={self._token_id} amount={amount}); aborting to release lock"
                 )
-            pending = await self._retry_on_network_error(
-                "get_pending_withdrawals",
-                lambda: client.get_pending_withdrawals(self._pool_address),
-            )
-            current_indices = {w.index for w in pending.pending_withdrawals}
-
-            if own_index is None:
-                new_indices = current_indices - pre_indices
-                if new_indices:
-                    own_index = min(new_indices)
-
-            if own_index is not None:
-                idx = own_index
-                info = await self._retry_on_network_error(
-                    "get_withdrawal_info",
-                    lambda: client.get_withdrawal_info(idx),
-                )
-                if info.resolved:
-                    logger.info(
-                        "MidasStrategy._bridge_to_base: withdrawal resolved index=%d tx=%s",
-                        own_index, info.tx_identifier,
-                    )
-                    return
-
             await asyncio.sleep(self._poll_interval_sec)
 
     async def _read_pool_balance(self) -> int:

@@ -1652,6 +1652,40 @@ class TestDeployIdle:
 
         strategy.deposit_to_earn.assert_awaited_once_with(100_000)
 
+    async def test_completes_undeployed_deposits_once_their_funds_are_working(self, test_db):
+        from src.core.db import db_write, get_db
+        service, _ = self._service(idle=100_000)
+        db_write(
+            get_db(),
+            """INSERT INTO earn_transactions
+               (id, operation, pool_id, user_address, token_id, amount,
+                signer_address, nonce, signature, input_nonce, input_signature,
+                status, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            ("stuck", "deposit", POOL_ID_HEX, "0xuser", USDC_TOKEN_ID, "100000",
+             "0xuser", 1, "0xsig", 1, "0xsig", "undeployed", 0, 0),
+        )
+        db_write(
+            get_db(),
+            """INSERT INTO earn_transactions
+               (id, operation, pool_id, user_address, token_id, amount,
+                signer_address, nonce, signature, input_nonce, input_signature,
+                status, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            ("elsewhere", "deposit", "0xotherpool", "0xuser", USDC_TOKEN_ID, "100000",
+             "0xuser", 2, "0xsig", 2, "0xsig", "undeployed", 0, 0),
+        )
+
+        await service.deploy_idle(POOL_ID_HEX)
+
+        rows = get_db().execute(
+            "SELECT id, status, error FROM earn_transactions ORDER BY id"
+        ).fetchall()
+        assert [tuple(r) for r in rows] == [
+            ("elsewhere", "undeployed", None),
+            ("stuck", "completed", None),
+        ]
+
     async def test_holds_the_pool_lock_across_the_bridge(self, test_db):
         service, strategy = self._service(idle=100_000)
         held = []

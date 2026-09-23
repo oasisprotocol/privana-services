@@ -90,6 +90,13 @@ class AaveClient:
         contract = self.w3.eth.contract(address=atoken, abi=ERC20_ABI)
         return contract.functions.balanceOf(holder).call()
 
+    def get_erc20_balance(self, asset_address: str, holder: Optional[str] = None) -> int:
+        """Plain ERC20 balance of `holder` (defaults to the LP EOA)."""
+        asset = Web3.to_checksum_address(asset_address)
+        who = Web3.to_checksum_address(holder) if holder else self.account_address
+        contract = self.w3.eth.contract(address=asset, abi=ERC20_ABI)
+        return contract.functions.balanceOf(who).call()
+
     def supply(self, asset_address: str, amount: int) -> str:
         """Supply `amount` of `asset_address` to the pool on behalf of the LP EOA.
 

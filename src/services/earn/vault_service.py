@@ -60,8 +60,8 @@ SYNC_MAX_DROP_BPS = 100
 # as two calls, so when the chain moves between them the node rejects the
 # leash. It is transient by nature: the next attempt builds a fresh one.
 _STALE_LEASH = "base block not found"
-READ_RETRY_ATTEMPTS = 3
-READ_RETRY_BACKOFF_SEC = 0.2
+READ_RETRY_ATTEMPTS = 5
+READ_RETRY_BACKOFF_SEC = 0.5
 
 # Protocol-owned principal only moves when an operator records or drops it,
 # so re-reading it on every quote buys nothing and costs a signed query.
@@ -934,6 +934,7 @@ class VaultService:
             # taken before the move, so refresh it while the lock still
             # guarantees nothing else is mid-flight.
             await self.sync_total_assets(pool_id_hex)
+            self._complete_undeployed(pool_id_hex)
             return idle
 
     async def effective_total_assets(self, pool_id_hex: str, on_chain_total: int) -> int:
@@ -1261,6 +1262,18 @@ class VaultService:
             shares_delta=str(delta),
             exchange_rate=rate,
             settled_at=int(time.time()),
+        )
+
+    def _complete_undeployed(self, pool_id_hex: str) -> None:
+        """Deposits whose routing failed sit as ``undeployed`` with their funds
+        idle in the pool. Once the idle balance has been deployed those funds
+        are working, so the rows have nothing left to wait for.
+        """
+        db_write(
+            get_db(),
+            "UPDATE earn_transactions SET status = ?, error = NULL, updated_at = ? "
+            "WHERE pool_id = ? AND operation = ? AND status = ?",
+            (EARN_STATUS_COMPLETED, int(time.time()), pool_id_hex, EARN_OP_DEPOSIT, EARN_STATUS_UNDEPLOYED),
         )
 
     def _update_transaction(self, tx_id: str, **fields) -> None:

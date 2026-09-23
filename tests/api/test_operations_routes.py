@@ -215,3 +215,82 @@ class TestUnsettledOperationsRoute:
 
         assert r.status_code == 502
         assert r.json()["detail"] == "Accounting token validation failed"
+
+
+class TestOperationsRoute:
+    async def test_lists_every_status_newest_first_with_a_cursor(self, api_client, test_db):
+        _insert_swap(test_db, "swap-completed", status="completed", created_at=400, updated_at=900)
+        _insert_swap(test_db, "swap-pending", status="pending", created_at=300)
+        _insert_earn(test_db, "earn-completed", status="completed", created_at=200, updated_at=950)
+        _insert_earn(test_db, "earn-failed", status="failed", created_at=100)
+        _insert_swap(test_db, "swap-other-user", user_address=OTHER_USER_ADDRESS, created_at=500)
+
+        with patch("src.api._auth.get_accounting_client", return_value=_auth_client()):
+            first = await api_client.get(
+                "/v1/operations",
+                params={"limit": 2},
+                headers={"Authorization": "Bearer user-jwt"},
+            )
+            assert first.status_code == 200
+            page = first.json()
+            assert [op["operation_id"] for op in page["operations"]] == [
+                "swap-completed",
+                "swap-pending",
+            ]
+            assert page["next_cursor"] == "300:swap-pending"
+
+            second = await api_client.get(
+                "/v1/operations",
+                params={"limit": 2, "before": page["next_cursor"]},
+                headers={"Authorization": "Bearer user-jwt"},
+            )
+            assert second.status_code == 200
+            assert [op["operation_id"] for op in second.json()["operations"]] == [
+                "earn-completed",
+                "earn-failed",
+            ]
+            assert second.json()["next_cursor"] == "100:earn-failed"
+
+            third = await api_client.get(
+                "/v1/operations",
+                params={"limit": 2, "before": second.json()["next_cursor"]},
+                headers={"Authorization": "Bearer user-jwt"},
+            )
+            assert third.json() == {"operations": [], "next_cursor": None}
+
+    async def test_cursor_breaks_ties_on_operation_id(self, api_client, test_db):
+        _insert_swap(test_db, "b", created_at=100)
+        _insert_swap(test_db, "a", created_at=100)
+        _insert_earn(test_db, "c", created_at=100)
+
+        with patch("src.api._auth.get_accounting_client", return_value=_auth_client()):
+            first = await api_client.get(
+                "/v1/operations",
+                params={"limit": 2},
+                headers={"Authorization": "Bearer user-jwt"},
+            )
+            second = await api_client.get(
+                "/v1/operations",
+                params={"limit": 2, "before": first.json()["next_cursor"]},
+                headers={"Authorization": "Bearer user-jwt"},
+            )
+
+        ids = [op["operation_id"] for op in first.json()["operations"]]
+        ids += [op["operation_id"] for op in second.json()["operations"]]
+        assert ids == ["c", "b", "a"]
+
+    async def test_rejects_a_malformed_cursor(self, api_client):
+        with patch("src.api._auth.get_accounting_client", return_value=_auth_client()):
+            r = await api_client.get(
+                "/v1/operations",
+                params={"before": "not-a-cursor"},
+                headers={"Authorization": "Bearer user-jwt"},
+            )
+
+        assert r.status_code == 400
+        assert r.json()["detail"] == "Invalid cursor"
+
+    async def test_rejects_missing_auth(self, api_client):
+        r = await api_client.get("/v1/operations")
+
+        assert r.status_code == 401

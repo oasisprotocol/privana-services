@@ -28,3 +28,9 @@ class UnsettledOperation(BaseModel):
 
 class UnsettledOperationsResponse(BaseModel):
     operations: list[UnsettledOperation]
+
+
+class OperationsResponse(BaseModel):
+    operations: list[UnsettledOperation]
+    # Pass back as ``before`` to fetch the next (older) page; null on the last page.
+    next_cursor: Optional[str] = None

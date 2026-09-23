@@ -56,7 +56,7 @@ def _network_for_chain(chain_id: int) -> Network:
 
 class AaveStrategy(BaseStrategy):
     """Aave V3 strategy. Bridges pool funds from the privana accounting
-    layer on Sapphire to the LP EOA on Base, supplies them to Aave V3, and
+    layer on Sapphire to the earn account on Base, supplies them to Aave V3, and
     redeems on the way out.
 
     Both bridge legs are fully state-based: this class polls accounting
@@ -66,7 +66,7 @@ class AaveStrategy(BaseStrategy):
     machine resolves.
 
     Per-pool params (`asset_address`, `token_id`, optional `pool_address`)
-    are passed at construction time. Cross-pool params (LP key, accounting
+    are passed at construction time. Cross-pool params (earn pool key, accounting
     contract, chain id) come from settings so each pool doesn't restate
     them.
     """
@@ -94,7 +94,7 @@ class AaveStrategy(BaseStrategy):
 
         settings = load_settings()
         self._pool_address = pool_address or settings.earn_pool_address
-        self._lp_secret_key = settings.earn_pool_secret_key
+        self._ep_secret_key = settings.earn_pool_secret_key
         self._accounting_contract = settings.accounting_contract_address
         self._network = _network_for_chain(settings.accounting_chain_id)
 
@@ -140,7 +140,7 @@ class AaveStrategy(BaseStrategy):
         )
 
     async def deposit_to_earn(self, amount: int) -> None:
-        """Bridge `amount` from accounting on Sapphire to the LP EOA on Base,
+        """Bridge `amount` from accounting on Sapphire to the earn account on Base,
         then supply it to Aave.
 
         Steps:
@@ -163,7 +163,7 @@ class AaveStrategy(BaseStrategy):
         )
         if on_hand >= amount:
             logger.info(
-                "AaveStrategy.deposit_to_earn: %d already on the LP EOA (balance=%d); "
+                "AaveStrategy.deposit_to_earn: %d already on the earn account (balance=%d); "
                 "skipping the bridge",
                 amount, on_hand,
             )
@@ -321,8 +321,8 @@ class AaveStrategy(BaseStrategy):
                 await asyncio.sleep(self._poll_interval_sec)
 
     async def _bridge_to_base(self, amount: int) -> None:
-        """Submit an accounting Withdraw signed by the LP key and block
-        until the funds land on the LP EOA.
+        """Submit an accounting Withdraw signed by the earn pool key and block
+        until the funds land on the earn account.
 
         Landing is judged by the asset balance on the EOA, not by
         accounting's pending list. A withdrawal the relay resolves before
@@ -332,7 +332,7 @@ class AaveStrategy(BaseStrategy):
         can stretch the cap.
         """
         client = self._get_privana()
-        lp_account = Account.from_key(self._lp_secret_key)
+        ep_account = Account.from_key(self._ep_secret_key)
         balance_before = await asyncio.to_thread(
             self._client.get_erc20_balance, self._asset_address,
         )
@@ -343,7 +343,7 @@ class AaveStrategy(BaseStrategy):
         nonce = nonce_resp.nonce
         signature = sign_withdraw_message(
             SignWithdrawParams(
-                account=lp_account,
+                account=ep_account,
                 network=self._network,
                 verifying_contract=self._accounting_contract,
                 message=WithdrawMessage(

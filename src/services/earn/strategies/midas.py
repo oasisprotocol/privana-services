@@ -80,7 +80,7 @@ def _network_for_chain(chain_id: int) -> Network:
 
 class MidasStrategy(BaseStrategy):
     """Midas mTBILL strategy. Bridges pool USDC from the privana accounting
-    layer on Sapphire to the LP EOA on Base, mints mTBILL via the Midas
+    layer on Sapphire to the earn account on Base, mints mTBILL via the Midas
     Issuance Vault, and redeems via the Instant Redemption Vault on the way
     out.
 
@@ -139,7 +139,7 @@ class MidasStrategy(BaseStrategy):
 
         settings = load_settings()
         self._pool_address = pool_address or settings.earn_pool_address
-        self._lp_secret_key = settings.earn_pool_secret_key
+        self._ep_secret_key = settings.earn_pool_secret_key
         self._accounting_contract = settings.accounting_contract_address
         self._network = _network_for_chain(settings.accounting_chain_id)
         self._slippage_bps = (
@@ -284,7 +284,7 @@ class MidasStrategy(BaseStrategy):
         return (mtbill_amount * oracle_price) // scale
 
     async def deposit_to_earn(self, amount: int) -> None:
-        """Bridge `amount` USDC from accounting on Sapphire to the LP EOA on
+        """Bridge `amount` USDC from accounting on Sapphire to the earn account on
         Base, then mint mTBILL via the Midas Issuance Vault.
 
         Steps:
@@ -293,7 +293,7 @@ class MidasStrategy(BaseStrategy):
           3. Price the deposit: read oracle, compute expected mTBILL out,
              apply slippage tolerance to derive min_receive_amount.
           4. depositInstant(USDC, amount in base-18, min_receive,
-             referrerId=0). mTBILL is minted to the LP EOA on success; vault
+             referrerId=0). mTBILL is minted to the earn account on success; vault
              sweeps USDC to its configured tokensReceiver atomically.
         """
         if amount <= 0:
@@ -305,7 +305,7 @@ class MidasStrategy(BaseStrategy):
         )
         if on_hand >= amount:
             logger.info(
-                "MidasStrategy.deposit_to_earn: %d already on the LP EOA (balance=%d); "
+                "MidasStrategy.deposit_to_earn: %d already on the earn account (balance=%d); "
                 "skipping the bridge",
                 amount, on_hand,
             )
@@ -649,8 +649,8 @@ class MidasStrategy(BaseStrategy):
                 await asyncio.sleep(self._poll_interval_sec)
 
     async def _bridge_to_base(self, amount: int) -> None:
-        """Submit an accounting Withdraw signed by the LP key and block
-        until the funds land on the LP EOA.
+        """Submit an accounting Withdraw signed by the earn pool key and block
+        until the funds land on the earn account.
 
         Landing is judged by the asset balance on the EOA, not by
         accounting's pending list. A withdrawal the relay resolves before
@@ -660,7 +660,7 @@ class MidasStrategy(BaseStrategy):
         can stretch the cap.
         """
         client = self._get_privana()
-        lp_account = Account.from_key(self._lp_secret_key)
+        ep_account = Account.from_key(self._ep_secret_key)
         balance_before = await asyncio.to_thread(
             self._client.get_erc20_balance, self._asset_address,
         )
@@ -671,7 +671,7 @@ class MidasStrategy(BaseStrategy):
         nonce = nonce_resp.nonce
         signature = sign_withdraw_message(
             SignWithdrawParams(
-                account=lp_account,
+                account=ep_account,
                 network=self._network,
                 verifying_contract=self._accounting_contract,
                 message=WithdrawMessage(

@@ -919,12 +919,13 @@ class VaultService:
         async with self._pools_tx_lock:
             idle = await strategy.idle_assets()
             stranded = await strategy.stranded_assets()
+            in_flight = await strategy.in_flight_assets()
             minimum = await strategy.min_deploy_amount()
-            # The strategy bridges only what is not already on the earn
-            # account, so idle and stranded funds deploy together.
-            amount = idle + stranded
+            # The strategy waits for bridges in flight, then bridges only what
+            # is not already on the earn account, so all three deploy together.
+            amount = idle + stranded + in_flight
             if amount <= 0 or amount < minimum:
-                if idle == 0 and stranded == 0 and await strategy.in_flight_assets() == 0:
+                if amount == 0:
                     self._complete_undeployed(pool_id_hex)
                 return 0
             if not await strategy.is_healthy():

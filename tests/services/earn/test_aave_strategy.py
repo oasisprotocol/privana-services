@@ -240,7 +240,7 @@ async def test_deposit_to_earn_bridges_then_supplies(strategy, aave_client, priv
             pending_withdrawals=[_PendingWithdrawal(index=42, amount=1_000_000)],
         ),
     ]
-    aave_client.get_erc20_balance.side_effect = [0, 0, 1_000_000]
+    aave_client.get_erc20_balance.side_effect = [0, 0, 1_000_000, 1_000_000]
     aave_client.get_allowance.return_value = 0
     aave_client.supply.return_value = "0xsupply"
 
@@ -269,7 +269,7 @@ async def test_deposit_to_earn_skips_approve_when_allowance_sufficient(
             pending_withdrawals=[_PendingWithdrawal(index=10, amount=500_000)],
         ),
     ]
-    aave_client.get_erc20_balance.side_effect = [0, 0, 500_000]
+    aave_client.get_erc20_balance.side_effect = [0, 0, 500_000, 500_000]
     aave_client.get_allowance.return_value = 10_000_000_000
     aave_client.supply.return_value = "0xsupply"
 
@@ -302,12 +302,12 @@ async def test_deposit_to_earn_propagates_request_failure(strategy, aave_client,
 
 @pytest.mark.asyncio
 async def test_bridge_keeps_polling_until_the_funds_land(strategy, aave_client, privana) -> None:
-    aave_client.get_erc20_balance.side_effect = [0, 0, 0, 0, 1_000_000]
+    aave_client.get_erc20_balance.side_effect = [0, 0, 0, 0, 1_000_000, 1_000_000]
     aave_client.get_allowance.return_value = 10_000_000
 
     await strategy.deposit_to_earn(1_000_000)
 
-    assert aave_client.get_erc20_balance.call_count == 5
+    assert aave_client.get_erc20_balance.call_count == 6
     aave_client.supply.assert_called_once_with(ASSET_ADDRESS, 1_000_000)
 
 
@@ -316,13 +316,34 @@ async def test_bridge_lands_even_when_accounting_never_lists_it_pending(
     strategy, aave_client, privana
 ) -> None:
     privana.get_withdrawal_info = AsyncMock(side_effect=AssertionError("must not be consulted"))
-    aave_client.get_erc20_balance.side_effect = [0, 0, 1_000_000]
+    aave_client.get_erc20_balance.side_effect = [0, 0, 1_000_000, 1_000_000]
     aave_client.get_allowance.return_value = 10_000_000
 
     await strategy.deposit_to_earn(1_000_000)
 
     privana.request_withdrawal.assert_awaited_once()
     aave_client.supply.assert_called_once_with(ASSET_ADDRESS, 1_000_000)
+
+
+@pytest.mark.asyncio
+async def test_bridge_keeps_polling_through_a_failed_balance_read(strategy, aave_client, privana) -> None:
+    aave_client.get_erc20_balance.side_effect = [0, 0, RuntimeError("rpc down"), 1_000_000, 1_000_000]
+    aave_client.get_allowance.return_value = 10_000_000
+
+    await strategy.deposit_to_earn(1_000_000)
+
+    aave_client.supply.assert_called_once_with(ASSET_ADDRESS, 1_000_000)
+
+
+@pytest.mark.asyncio
+async def test_deposit_to_earn_supplies_everything_on_the_eoa(strategy, aave_client, privana) -> None:
+    aave_client.get_erc20_balance.side_effect = [0, 0, 1_500_000, 1_500_000]
+    aave_client.get_allowance.return_value = 0
+
+    await strategy.deposit_to_earn(1_000_000)
+
+    aave_client.approve_pool.assert_called_once_with(ASSET_ADDRESS, 1_500_000)
+    aave_client.supply.assert_called_once_with(ASSET_ADDRESS, 1_500_000)
 
 
 @pytest.mark.asyncio
@@ -610,7 +631,7 @@ async def test_bridge_survives_transient_network_error_on_the_nonce_read(
         NetworkError("Server disconnected"),
         _WithdrawalNonce(user_address=POOL_ADDRESS, nonce=7),
     ]
-    aave_client.get_erc20_balance.side_effect = [0, 0, 1_000_000]
+    aave_client.get_erc20_balance.side_effect = [0, 0, 1_000_000, 1_000_000]
     aave_client.get_allowance.return_value = 10_000_000
 
     await strategy.deposit_to_earn(1_000_000)

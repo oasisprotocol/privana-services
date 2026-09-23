@@ -166,19 +166,23 @@ class AaveStrategy(BaseStrategy):
             )
         else:
             await self._bridge_to_base(amount)
+            on_hand = self._client.get_erc20_balance(self._asset_address)
+        # Everything on the account is pool money, so supply all of it: a bridge
+        # a previous deposit gave up on would otherwise sit here earning nothing.
+        deploy = max(amount, on_hand)
 
         allowance = self._client.get_allowance(self._asset_address)
-        if allowance < amount:
+        if allowance < deploy:
             logger.info(
                 "AaveStrategy.deposit_to_earn: topping up allowance asset=%s current=%d needed=%d",
-                self._asset_address, allowance, amount,
+                self._asset_address, allowance, deploy,
             )
-            self._client.approve_pool(self._asset_address, amount)
+            self._client.approve_pool(self._asset_address, deploy)
 
-        tx_hash = self._client.supply(self._asset_address, amount)
+        tx_hash = self._client.supply(self._asset_address, deploy)
         logger.info(
             "AaveStrategy.deposit_to_earn: supplied asset=%s amount=%d tx=%s",
-            self._asset_address, amount, tx_hash,
+            self._asset_address, deploy, tx_hash,
         )
 
     async def withdraw_from_earn(self, amount: int) -> None:
@@ -354,7 +358,14 @@ class AaveStrategy(BaseStrategy):
         attempts = 0
         while True:
             attempts += 1
-            balance = self._client.get_erc20_balance(self._asset_address)
+            try:
+                balance = self._client.get_erc20_balance(self._asset_address)
+            except Exception as exc:
+                logger.warning(
+                    "AaveStrategy._bridge_to_base: balance read failed (attempt %d/%d); retrying: %s",
+                    attempts, self._max_bridge_poll_attempts, exc,
+                )
+                balance = -1
             if balance >= balance_before + amount:
                 logger.info(
                     "AaveStrategy._bridge_to_base: withdrawal landed nonce=%d amount=%d balance=%d",

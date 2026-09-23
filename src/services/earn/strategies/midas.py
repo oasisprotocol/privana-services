@@ -310,38 +310,44 @@ class MidasStrategy(BaseStrategy):
             )
         else:
             await self._bridge_to_base(amount)
+            on_hand = await asyncio.to_thread(
+                self._client.get_erc20_balance, self._asset_address,
+            )
+        # Everything on the account is pool money, so mint all of it: a bridge
+        # a previous deposit gave up on would otherwise sit here earning nothing.
+        deploy = max(amount, on_hand)
 
         allowance = await asyncio.to_thread(
             self._client.get_allowance,
             self._asset_address,
             self._client.issuance_vault_address,
         )
-        if allowance < amount:
+        if allowance < deploy:
             logger.info(
                 "MidasStrategy.deposit_to_earn: topping up allowance asset=%s current=%d needed=%d",
-                self._asset_address, allowance, amount,
+                self._asset_address, allowance, deploy,
             )
             await asyncio.to_thread(
                 self._client.approve,
                 self._asset_address,
                 self._client.issuance_vault_address,
-                amount,
+                deploy,
             )
 
         price, decimals = await asyncio.to_thread(self._read_oracle_price)
-        expected_mtbill = self.convert_usdc_to_mtbill_amount(amount, price, decimals)
+        expected_mtbill = self.convert_usdc_to_mtbill_amount(deploy, price, decimals)
         min_receive = expected_mtbill * (10_000 - self._slippage_bps) // 10_000
 
         tx_hash = await asyncio.to_thread(
             self._client.deposit_instant,
             self._asset_address,
-            amount * _BASE18_SCALE,
+            deploy * _BASE18_SCALE,
             min_receive,
         )
         logger.info(
             "MidasStrategy.deposit_to_earn: minted via Midas asset=%s amount=%d "
             "expected_mtbill=%d min_receive=%d tx=%s",
-            self._asset_address, amount, expected_mtbill, min_receive, tx_hash,
+            self._asset_address, deploy, expected_mtbill, min_receive, tx_hash,
         )
 
     async def withdraw_from_earn(self, amount: int) -> None:
@@ -641,9 +647,16 @@ class MidasStrategy(BaseStrategy):
         attempts = 0
         while True:
             attempts += 1
-            balance = await asyncio.to_thread(
-            self._client.get_erc20_balance, self._asset_address,
-        )
+            try:
+                balance = await asyncio.to_thread(
+                self._client.get_erc20_balance, self._asset_address,
+            )
+            except Exception as exc:
+                logger.warning(
+                    "MidasStrategy._bridge_to_base: balance read failed (attempt %d/%d); retrying: %s",
+                    attempts, self._max_bridge_poll_attempts, exc,
+                )
+                balance = -1
             if balance >= balance_before + amount:
                 logger.info(
                     "MidasStrategy._bridge_to_base: withdrawal landed nonce=%d amount=%d balance=%d",

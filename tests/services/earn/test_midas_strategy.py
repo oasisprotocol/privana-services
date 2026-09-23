@@ -467,7 +467,7 @@ async def test_deposit_to_earn_bridges_approves_and_mints(
             pending_withdrawals=[_PendingWithdrawal(index=42, amount=1_000_000)],
         ),
     ]
-    midas_client.get_erc20_balance.side_effect = [0, 0, 1_000_000]
+    midas_client.get_erc20_balance.side_effect = [0, 0, 1_000_000, 1_000_000]
     midas_client.get_allowance.return_value = 0
     midas_client.get_oracle_answer.return_value = 10**18
     midas_client.get_oracle_decimals.return_value = 18
@@ -502,7 +502,7 @@ async def test_deposit_to_earn_skips_approve_when_allowance_sufficient(
             pending_withdrawals=[_PendingWithdrawal(index=1, amount=500_000)],
         ),
     ]
-    midas_client.get_erc20_balance.side_effect = [0, 0, 500_000]
+    midas_client.get_erc20_balance.side_effect = [0, 0, 500_000, 500_000]
     midas_client.get_allowance.return_value = 10**12
 
     await strategy.deposit_to_earn(500_000)
@@ -519,12 +519,37 @@ async def test_bridge_lands_even_when_accounting_never_lists_it_pending(
         return_value=_PendingWithdrawalsResponse(user_address=POOL_ADDRESS, pending_withdrawals=[]),
     )
     privana.get_withdrawal_info = AsyncMock(side_effect=AssertionError("must not be consulted"))
-    midas_client.get_erc20_balance.side_effect = [0, 0, 0, 0, 1_000_000]
+    midas_client.get_erc20_balance.side_effect = [0, 0, 0, 0, 1_000_000, 1_000_000]
 
     await strategy.deposit_to_earn(1_000_000)
 
     privana.request_withdrawal.assert_awaited_once()
     midas_client.deposit_instant.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_bridge_keeps_polling_through_a_failed_balance_read(
+    strategy, midas_client, privana,
+) -> None:
+    midas_client.get_erc20_balance.side_effect = [0, 0, RuntimeError("rpc down"), 1_000_000, 1_000_000]
+
+    await strategy.deposit_to_earn(1_000_000)
+
+    midas_client.deposit_instant.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_deposit_to_earn_mints_everything_on_the_eoa(
+    strategy, midas_client, privana,
+) -> None:
+    midas_client.get_erc20_balance.side_effect = [0, 0, 1_500_000, 1_500_000]
+    midas_client.get_oracle_answer.return_value = 10**18
+    midas_client.get_oracle_decimals.return_value = 18
+
+    await strategy.deposit_to_earn(1_000_000)
+
+    assert midas_client.approve.call_args.args[2] == 1_500_000
+    assert midas_client.deposit_instant.call_args.args[1] == 1_500_000 * 10**12
 
 
 @pytest.mark.asyncio

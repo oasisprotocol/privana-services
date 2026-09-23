@@ -1662,7 +1662,7 @@ class TestDeployIdle:
                 signer_address, nonce, signature, input_nonce, input_signature,
                 status, created_at, updated_at)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            ("stuck", "deposit", POOL_ID_HEX, "0xuser", USDC_TOKEN_ID, "100000",
+            ("stuck", "deposit", POOL_ID_HEX.upper().replace("0X", "0x"), "0xuser", USDC_TOKEN_ID, "100000",
              "0xuser", 1, "0xsig", 1, "0xsig", "undeployed", 0, 0),
         )
         db_write(

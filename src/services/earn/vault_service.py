@@ -1267,13 +1267,14 @@ class VaultService:
     def _complete_undeployed(self, pool_id_hex: str) -> None:
         """Deposits whose routing failed sit as ``undeployed`` with their funds
         idle in the pool. Once the idle balance has been deployed those funds
-        are working, so the rows have nothing left to wait for.
+        are working, so the rows have nothing left to wait for. ``updated_at``
+        is left alone: value history reads it as the deposit's settlement time.
         """
         db_write(
             get_db(),
-            "UPDATE earn_transactions SET status = ?, error = NULL, updated_at = ? "
-            "WHERE pool_id = ? AND operation = ? AND status = ?",
-            (EARN_STATUS_COMPLETED, int(time.time()), pool_id_hex, EARN_OP_DEPOSIT, EARN_STATUS_UNDEPLOYED),
+            "UPDATE earn_transactions SET status = ?, error = NULL "
+            "WHERE lower(pool_id) = ? AND operation = ? AND status = ?",
+            (EARN_STATUS_COMPLETED, pool_id_hex.lower(), EARN_OP_DEPOSIT, EARN_STATUS_UNDEPLOYED),
         )
 
     def _update_transaction(self, tx_id: str, **fields) -> None:

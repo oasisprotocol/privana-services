@@ -1,6 +1,7 @@
 import logging
 
 from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import JSONResponse
 
 from src.models.api import (
     QuoteResponse,
@@ -10,6 +11,7 @@ from src.models.api import (
 )
 from src.services.swap.executor import get_swap_executor
 from src.services.swap.quote_service import get_quote_service
+from src.services.user_queue import OperationPendingError
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +43,7 @@ async def get_quote(
 
 
 @router.post("/swap", response_model=SwapResponse)
-async def execute_swap(payload: SwapRequest) -> SwapResponse:
+async def execute_swap(payload: SwapRequest) -> SwapResponse | JSONResponse:
     try:
         executor = get_swap_executor()
         swap = await executor.schedule_swap(
@@ -55,6 +57,8 @@ async def execute_swap(payload: SwapRequest) -> SwapResponse:
             message=f"Swap {swap.status}",
             tx_hash=swap.swap_tx_hash,
         )
+    except OperationPendingError as exc:
+        return JSONResponse(status_code=409, content=exc.payload())
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:

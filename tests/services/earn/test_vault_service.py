@@ -2115,6 +2115,80 @@ class TestScheduling:
 
         assert test_db.execute("SELECT COUNT(*) c FROM earn_transactions").fetchone()["c"] == 0
 
+    def test_a_second_deposit_on_a_held_nonce_is_refused_before_it_queues(self, test_db):
+        from eth_account import Account
+
+        from src.services.user_queue import OperationPendingError
+
+        service, contract, _, _ = _make_service()
+        _schedulable(contract)
+        key = "0x" + "66" * 32
+        user = Account.from_key(key).address
+        first = service.schedule_deposit(
+            pool_id_hex=POOL_ID_HEX, user_address=user,
+            amount="1000", nonce=3, signature=_transfer_sig(key, 1000, 3),
+        )
+
+        with pytest.raises(OperationPendingError) as exc:
+            service.schedule_deposit(
+                pool_id_hex=POOL_ID_HEX, user_address=user,
+                amount="2000", nonce=3, signature=_transfer_sig(key, 2000, 3),
+            )
+
+        assert exc.value.operation_type == "earn_deposit"
+        assert exc.value.operation_id == first["id"]
+        assert test_db.execute("SELECT COUNT(*) c FROM earn_transactions").fetchone()["c"] == 1
+
+    def test_a_withdraw_consent_nonce_never_blocks_a_deposit(self, test_db):
+        from eth_account import Account
+
+        service, contract, _, _ = _make_service()
+        _schedulable(contract)
+        key = "0x" + "77" * 32
+        user = Account.from_key(key).address
+        service.schedule_withdraw(
+            pool_id_hex=POOL_ID_HEX, user_address=user,
+            amount="500", nonce=3, signature=self._consent(key, 500, 3),
+        )
+
+        result = service.schedule_deposit(
+            pool_id_hex=POOL_ID_HEX, user_address=user,
+            amount="1000", nonce=3, signature=_transfer_sig(key, 1000, 3),
+        )
+
+        assert result["status"] == "scheduled"
+        assert test_db.execute("SELECT COUNT(*) c FROM earn_transactions").fetchone()["c"] == 2
+
+    def test_a_queued_swap_blocks_a_deposit_on_the_same_nonce(self, test_db):
+        import time
+
+        from eth_account import Account
+
+        from src.services.user_queue import OperationPendingError
+
+        service, contract, _, _ = _make_service()
+        _schedulable(contract)
+        key = "0x" + "88" * 32
+        user = Account.from_key(key).address
+        now = int(time.time())
+        test_db.execute(
+            """INSERT INTO swaps
+               (id, quote_id, user_address, from_token_id, to_token_id, from_amount,
+                to_amount_estimate, status, venue, created_at, updated_at,
+                input_nonce, input_signature)
+               VALUES ('swap-1', 'q', ?, ?, ?, '1', '1', 'scheduled', 'internal', ?, ?, '3', '0xsig')""",
+            (user.lower(), USDC_TOKEN_ID, USDC_TOKEN_ID, now, now),
+        )
+        test_db.commit()
+
+        with pytest.raises(OperationPendingError) as exc:
+            service.schedule_deposit(
+                pool_id_hex=POOL_ID_HEX, user_address=user,
+                amount="1000", nonce=3, signature=_transfer_sig(key, 1000, 3),
+            )
+
+        assert (exc.value.operation_type, exc.value.operation_id) == ("swap", "swap-1")
+
     def test_executing_a_scheduled_row_updates_it_rather_than_adding_another(self, test_db):
         from eth_account import Account
 

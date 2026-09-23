@@ -3,6 +3,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from src.clients.accounting import JwtIdentity
+from src.services.user_queue import OperationPendingError
 
 USDC_TOKEN_ID = "0x330ba47d00c7ce3018deee017b319fd7cc6473a2ddc9e6eba6ebb4207be15279"
 POOL_ID = "0x" + "ab" * 32
@@ -290,6 +291,23 @@ class TestDepositRoute:
             })
             assert r.status_code == 400
             assert "Invalid amount" in r.json()["detail"]
+
+    async def test_a_held_nonce_is_a_409_naming_the_earlier_operation(self, api_client):
+        with patch("src.api.earn.get_vault_service") as mock_svc:
+            svc = MagicMock()
+            svc.schedule_deposit = MagicMock(side_effect=OperationPendingError("earn_deposit", "op-0"))
+            mock_svc.return_value = svc
+
+            r = await api_client.post("/v1/earn/deposit", json={
+                "pool_id": POOL_ID,
+                "user_address": USER_ADDRESS,
+                "amount": "1000",
+                "nonce": 0,
+                "signature": "0x" + "aa" * 65,
+            })
+            assert r.status_code == 409
+            assert r.json()["pending_operation_id"] == "op-0"
+            assert r.json()["pending_operation_type"] == "earn_deposit"
 
 
 class TestWithdrawRoute:

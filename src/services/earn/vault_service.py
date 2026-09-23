@@ -917,13 +917,17 @@ class VaultService:
             return 0
 
         async with self._pools_tx_lock:
+            # A bridge still listed as pending may or may not have landed, so
+            # the balances below cannot be trusted until it clears. The next
+            # sweep sees the settled picture.
+            if await strategy.in_flight_assets() > 0:
+                return 0
             idle = await strategy.idle_assets()
             stranded = await strategy.stranded_assets()
-            in_flight = await strategy.in_flight_assets()
             minimum = await strategy.min_deploy_amount()
-            # The strategy waits for bridges in flight, then bridges only what
-            # is not already on the earn account, so all three deploy together.
-            amount = idle + stranded + in_flight
+            # The strategy bridges only what is not already on the earn
+            # account, so idle and stranded funds deploy together.
+            amount = idle + stranded
             if amount <= 0 or amount < minimum:
                 if amount == 0:
                     self._complete_undeployed(pool_id_hex)
@@ -942,11 +946,7 @@ class VaultService:
             # guarantees nothing else is mid-flight.
             await self.sync_total_assets(pool_id_hex)
             left = await strategy.idle_assets()
-            if (
-                (left == 0 or left < minimum)
-                and await strategy.stranded_assets() == 0
-                and await strategy.in_flight_assets() == 0
-            ):
+            if (left == 0 or left < minimum) and await strategy.stranded_assets() == 0:
                 self._complete_undeployed(pool_id_hex)
             return amount
 

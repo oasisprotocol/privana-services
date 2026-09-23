@@ -1723,12 +1723,12 @@ class TestDeployIdle:
         row = get_db().execute("SELECT status FROM earn_transactions WHERE id = 'stuck'").fetchone()
         assert row[0] == "undeployed"
 
-    async def test_counts_a_bridge_in_flight_towards_the_deployment(self, test_db):
+    async def test_stands_down_while_a_bridge_is_in_flight(self, test_db):
         service, strategy = self._service(idle=600_000)
-        strategy.in_flight_assets = AsyncMock(side_effect=[400_000, 0])
+        strategy.in_flight_assets = AsyncMock(return_value=400_000)
 
-        assert await service.deploy_idle(POOL_ID_HEX) == 1_000_000
-        strategy.deposit_to_earn.assert_awaited_once_with(1_000_000)
+        assert await service.deploy_idle(POOL_ID_HEX) == 0
+        strategy.deposit_to_earn.assert_not_awaited()
 
     async def test_reconciles_undeployed_rows_when_nothing_is_waiting(self, test_db):
         from src.core.db import db_write, get_db

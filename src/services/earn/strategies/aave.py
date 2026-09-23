@@ -471,17 +471,24 @@ class AaveStrategy(BaseStrategy):
         The underlying web3 reads are synchronous; offload via ``to_thread``
         so concurrent gather() siblings keep making progress.
         """
-        # Position first, raw second: a supply landing between the two reads
-        # then drops out of one side or the other, never into both.
+        # Both sides at one block, so a supply or redeem landing between the
+        # reads cannot show up on both of them.
+        block = await asyncio.to_thread(lambda: self._client.w3.eth.block_number)
         supplied = await asyncio.to_thread(
             self._client.get_aToken_balance,
             self._asset_address,
             self._pool_address,
+            block,
         )
         raw = await asyncio.to_thread(
-            self._client.get_erc20_balance, self._asset_address,
+            self._client.get_erc20_balance, self._asset_address, None, block,
         )
         return supplied + raw
+
+    async def stranded_assets(self) -> int:
+        return await asyncio.to_thread(
+            self._client.get_erc20_balance, self._asset_address,
+        )
 
     async def idle_assets(self) -> int:
         """The pool's accounting balance: deposits whose bridge to Base never

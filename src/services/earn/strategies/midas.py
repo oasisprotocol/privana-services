@@ -436,6 +436,11 @@ class MidasStrategy(BaseStrategy):
         # USDC and grossing up for the fee lands one base unit under that on
         # mainnet, and the transfer to the user then cannot be covered.
         mtbill_to_redeem = self.size_redeem(amount, price, decimals, fee_bps)
+        # A shortfall left after spending raw funds can be smaller than the
+        # vault's minimum redeem. Redeem the minimum then; the surplus USDC
+        # is forwarded with the rest and sits idle until redeployed.
+        min_mtbill = await asyncio.to_thread(self._client.get_redemption_min_amount)
+        mtbill_to_redeem = max(mtbill_to_redeem, min_mtbill)
         # The pool has to hand `amount` on to the user straight after this, so
         # anything less is unusable. Floor the redeem at the target rather than
         # at a slippage band below it: reverting here is recoverable, whereas a
@@ -519,18 +524,24 @@ class MidasStrategy(BaseStrategy):
         when the address holds nothing so callers fall back to the on-chain
         pool snapshot.
         """
-        # Position first, raw second: a mint landing between the two reads
-        # then drops out of one side or the other, never into both.
+        # Both sides at one block, so a mint or redeem landing between the
+        # reads cannot show up on both of them.
+        block = await asyncio.to_thread(lambda: self._client.w3.eth.block_number)
         mtbill_bal = await asyncio.to_thread(
-            self._client.get_mtbill_balance, self._pool_address,
+            self._client.get_mtbill_balance, self._pool_address, block,
         )
         raw_usdc = await asyncio.to_thread(
-            self._client.get_erc20_balance, self._asset_address,
+            self._client.get_erc20_balance, self._asset_address, None, block,
         )
         if mtbill_bal == 0:
             return raw_usdc
         price, decimals = await asyncio.to_thread(self._read_oracle_price)
         return raw_usdc + self.convert_mtbill_to_usdc_amount(mtbill_bal, price, decimals)
+
+    async def stranded_assets(self) -> int:
+        return await asyncio.to_thread(
+            self._client.get_erc20_balance, self._asset_address,
+        )
 
     async def idle_assets(self) -> int:
         """The pool's accounting balance: deposits whose issuance never

@@ -1630,6 +1630,7 @@ class TestDeployIdle:
         strategy = MagicMock()
         strategy.name = name
         strategy.idle_assets = AsyncMock(return_value=idle)
+        strategy.stranded_assets = AsyncMock(return_value=0)
         strategy.min_deploy_amount = AsyncMock(return_value=minimum)
         strategy.is_healthy = AsyncMock(return_value=healthy)
         strategy.total_assets = AsyncMock(return_value=1000)
@@ -1686,6 +1687,32 @@ class TestDeployIdle:
             ("elsewhere", "undeployed", None),
             ("stuck", "completed", None),
         ]
+
+    async def test_sweeps_funds_stranded_on_the_earn_account(self, test_db):
+        service, strategy = self._service(idle=0)
+        strategy.stranded_assets = AsyncMock(side_effect=[5_000_000, 0])
+
+        assert await service.deploy_idle(POOL_ID_HEX) == 5_000_000
+        strategy.deposit_to_earn.assert_awaited_once_with(5_000_000)
+
+    async def test_reconciles_undeployed_rows_when_nothing_is_waiting(self, test_db):
+        from src.core.db import db_write, get_db
+        service, _ = self._service(idle=0)
+        db_write(
+            get_db(),
+            """INSERT INTO earn_transactions
+               (id, operation, pool_id, user_address, token_id, amount,
+                signer_address, nonce, signature, input_nonce, input_signature,
+                status, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            ("stuck", "deposit", POOL_ID_HEX, "0xuser", USDC_TOKEN_ID, "100000",
+             "0xuser", 1, "0xsig", 1, "0xsig", "undeployed", 0, 0),
+        )
+
+        assert await service.deploy_idle(POOL_ID_HEX) == 0
+
+        row = get_db().execute("SELECT status FROM earn_transactions WHERE id = 'stuck'").fetchone()
+        assert row[0] == "completed"
 
     async def test_holds_the_pool_lock_across_the_bridge(self, test_db):
         service, strategy = self._service(idle=100_000)

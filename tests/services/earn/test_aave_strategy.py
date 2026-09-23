@@ -436,7 +436,7 @@ async def test_total_assets_reads_aToken_balance_for_pool_address(strategy, aave
     aave_client.get_aToken_balance.return_value = 42_000_000
 
     assert await strategy.total_assets() == 42_000_000
-    aave_client.get_aToken_balance.assert_called_once_with(ASSET_ADDRESS, POOL_ADDRESS)
+    assert aave_client.get_aToken_balance.call_args.args[:2] == (ASSET_ADDRESS, POOL_ADDRESS)
 
 
 @pytest.mark.asyncio

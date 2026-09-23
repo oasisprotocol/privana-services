@@ -918,27 +918,32 @@ class VaultService:
 
         async with self._pools_tx_lock:
             idle = await strategy.idle_assets()
+            stranded = await strategy.stranded_assets()
             minimum = await strategy.min_deploy_amount()
-            if idle <= 0 or idle < minimum:
+            # Funds already on the earn account need no bridge: routing that
+            # amount makes the strategy deploy what it holds.
+            amount = idle if idle > 0 and idle >= minimum else stranded
+            if amount <= 0 or amount < minimum:
+                if idle == 0 and stranded == 0:
+                    self._complete_undeployed(pool_id_hex)
                 return 0
             if not await strategy.is_healthy():
                 logger.info(
                     "Idle deploy pool=%s: %d idle but the strategy is unhealthy; leaving it",
-                    pool_id_hex, idle,
+                    pool_id_hex, amount,
                 )
                 return 0
-
             logger.info("Idle deploy pool=%s: routing %d into %s",
-                        pool_id_hex, idle, strategy.name)
-            await self._route_to_strategy(pool_id_hex, idle)
+                        pool_id_hex, amount, strategy.name)
+            await self._route_to_strategy(pool_id_hex, amount)
             # Backing is unchanged, but totalAssets is written from a reading
             # taken before the move, so refresh it while the lock still
             # guarantees nothing else is mid-flight.
             await self.sync_total_assets(pool_id_hex)
             left = await strategy.idle_assets()
-            if left == 0 or left < minimum:
+            if (left == 0 or left < minimum) and await strategy.stranded_assets() == 0:
                 self._complete_undeployed(pool_id_hex)
-            return idle
+            return amount
 
     async def effective_total_assets(self, pool_id_hex: str, on_chain_total: int) -> int:
         """Live AUM for a pool, derived from the strategy when available.
@@ -1275,7 +1280,11 @@ class VaultService:
         """
         try:
             strategy = self._registry.get(pool_id_hex)
-            if strategy.name != "manual" and await strategy.idle_assets() == 0:
+            if (
+                strategy.name != "manual"
+                and await strategy.idle_assets() == 0
+                and await strategy.stranded_assets() == 0
+            ):
                 self._complete_undeployed(pool_id_hex)
         except Exception:
             logger.warning("undeployed-row reconcile skipped pool=%s", pool_id_hex, exc_info=True)

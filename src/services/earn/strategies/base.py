@@ -71,6 +71,13 @@ class BaseStrategy(ABC):
         externally (e.g. manual).
         """
 
+    async def stranded_assets(self) -> int:
+        """Pool money sitting raw on the earn account: bridged in for a
+        deposit whose protocol leg never ran, or left behind by a redeem.
+        Counted in ``total_assets``; the idle sweep puts it to work.
+        """
+        return 0
+
     @abstractmethod
     async def idle_assets(self) -> int:
         """Pool funds credited to the pool but not deployed to the external

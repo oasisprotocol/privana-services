@@ -136,9 +136,9 @@ class MidasClient:
         )
         return int(answer), int(updated_at)
 
-    def get_mtbill_balance(self, holder: str) -> int:
+    def get_mtbill_balance(self, holder: str, block: Optional[int] = None) -> int:
         holder = Web3.to_checksum_address(holder)
-        return self.mtbill.functions.balanceOf(holder).call()
+        return self.mtbill.functions.balanceOf(holder).call(block_identifier=block if block is not None else "latest")
 
     def is_issuance_paused(self) -> bool:
         return bool(self.issuance_vault.functions.paused().call())
@@ -163,11 +163,13 @@ class MidasClient:
     def get_redemption_min_amount(self) -> int:
         return int(self.redemption_vault.functions.minAmount().call())
 
-    def get_erc20_balance(self, asset_address: str, holder: Optional[str] = None) -> int:
+    def get_erc20_balance(
+        self, asset_address: str, holder: Optional[str] = None, block: Optional[int] = None,
+    ) -> int:
         asset = Web3.to_checksum_address(asset_address)
         account = Web3.to_checksum_address(holder) if holder else self.account_address
         contract = self.w3.eth.contract(address=asset, abi=ERC20_ABI)
-        return contract.functions.balanceOf(account).call()
+        return contract.functions.balanceOf(account).call(block_identifier=block if block is not None else "latest")
 
     def get_allowance(self, asset_address: str, spender: str, owner: Optional[str] = None) -> int:
         asset = Web3.to_checksum_address(asset_address)

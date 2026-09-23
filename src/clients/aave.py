@@ -81,21 +81,27 @@ class AaveClient:
         reserve = self._get_reserve_data(asset_address)
         return Web3.to_checksum_address(reserve[8])
 
-    def get_aToken_balance(self, asset_address: str, holder: str) -> int:
+    def get_aToken_balance(self, asset_address: str, holder: str, block: Optional[int] = None) -> int:
         """Current aToken balance of `holder`, which equals underlying principal
         plus accrued yield at the moment of the call.
         """
         atoken = Web3.to_checksum_address(self.get_aToken_address(asset_address))
         holder = Web3.to_checksum_address(holder)
         contract = self.w3.eth.contract(address=atoken, abi=ERC20_ABI)
-        return contract.functions.balanceOf(holder).call()
+        return contract.functions.balanceOf(holder).call(
+            block_identifier=block if block is not None else "latest"
+        )
 
-    def get_erc20_balance(self, asset_address: str, holder: Optional[str] = None) -> int:
+    def get_erc20_balance(
+        self, asset_address: str, holder: Optional[str] = None, block: Optional[int] = None,
+    ) -> int:
         """Plain ERC20 balance of `holder` (defaults to the LP EOA)."""
         asset = Web3.to_checksum_address(asset_address)
         who = Web3.to_checksum_address(holder) if holder else self.account_address
         contract = self.w3.eth.contract(address=asset, abi=ERC20_ABI)
-        return contract.functions.balanceOf(who).call()
+        return contract.functions.balanceOf(who).call(
+            block_identifier=block if block is not None else "latest"
+        )
 
     def supply(self, asset_address: str, amount: int) -> str:
         """Supply `amount` of `asset_address` to the pool on behalf of the LP EOA.

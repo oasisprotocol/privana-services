@@ -120,6 +120,7 @@ def midas_client():
     client.is_issuance_paused.return_value = False
     client.is_redemption_paused.return_value = False
     client.get_redemption_fee_bps.return_value = 0
+    client.get_redemption_min_amount.return_value = 0
     return client
 
 
@@ -583,6 +584,29 @@ async def test_withdraw_from_earn_spends_raw_funds_before_the_position(
 
     midas_client.redeem_instant.assert_not_called()
     midas_client.transfer_erc20.assert_called_once_with(ASSET_ADDRESS, DEPOSIT_ADDRESS_BASE, 1_000_000)
+
+
+@pytest.mark.asyncio
+async def test_withdraw_from_earn_redeems_at_least_the_vault_minimum(
+    strategy, midas_client, privana,
+) -> None:
+    midas_client.get_redemption_min_amount.return_value = 10**18
+    midas_client.get_erc20_balance.side_effect = [0, 1_100_000]
+    privana.get_balance = AsyncMock(
+        side_effect=[
+            _Balance(user_address=POOL_ADDRESS, token_id=TOKEN_ID, balance=0),
+            _Balance(user_address=POOL_ADDRESS, token_id=TOKEN_ID, balance=1_100_000),
+        ]
+    )
+    privana.check_deposit = AsyncMock(
+        return_value=_DepositCheckResponse(status="accepted", deposit_id="dep-1")
+    )
+
+    await strategy.withdraw_from_earn(500_000)
+
+    assert midas_client.redeem_instant.call_args.args[1] == 10**18
+    assert midas_client.redeem_instant.call_args.args[2] == 500_000 * 10**12
+    midas_client.transfer_erc20.assert_called_once_with(ASSET_ADDRESS, DEPOSIT_ADDRESS_BASE, 1_100_000)
 
 
 @pytest.mark.asyncio

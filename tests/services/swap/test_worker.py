@@ -8,6 +8,7 @@ from eth_account import Account
 from src.core.db import _run_migrations
 from src.core.eip712 import recover_transfer_signer, sign_transfer
 from src.services.swap.executor import SwapExecutor
+from src.services.swap.internal_pipeline import BATCH_SIZE
 from src.services.swap.worker import SwapWorker
 
 
@@ -52,29 +53,33 @@ def rows(db):
     return [dict(r) for r in db.execute("SELECT * FROM swaps ORDER BY rowid")]
 
 
-async def test_five_submissions_precede_receipts_and_sixth_waits(worker, enqueue, test_db, settings):
-    for i in range(1, 7):
+async def test_batch_submissions_precede_receipts_and_next_waits(worker, enqueue, test_db, settings):
+    for i in range(1, BATCH_SIZE + 2):
         await enqueue(i)
     events = []
     original_send = worker.sapphire.submit_contract_call.side_effect
 
     def send(**kwargs):
         events.append("send")
-        assert len([r for r in rows(test_db) if r["status"] == "executing"]) == 5
+        assert len([r for r in rows(test_db) if r["status"] == "executing"]) == BATCH_SIZE
         return next(original_send)
 
     def receipt(tx_hash):
         events.append("receipt")
-        assert events[:5] == ["send"] * 5
-        assert sum(r["swap_tx_hash"] is not None for r in rows(test_db)) == 5
+        assert events[:BATCH_SIZE] == ["send"] * BATCH_SIZE
+        assert sum(r["swap_tx_hash"] is not None for r in rows(test_db)) == BATCH_SIZE
         return {"status": 1, "blockNumber": 100}
 
     worker.sapphire.submit_contract_call.side_effect = send
     worker.sapphire.wait_for_receipt.side_effect = receipt
     await worker.run_internal_once()
-    assert [r["status"] for r in rows(test_db)] == ["completed"] * 5 + ["scheduled"]
-    assert [r["output_nonce"] for r in rows(test_db)[:5]] == list(range(7, 12))
-    assert [c.kwargs["args"][7] for c in worker.sapphire.simulate_contract_call.call_args_list] == [7] * 5
+    assert [r["status"] for r in rows(test_db)] == ["completed"] * BATCH_SIZE + ["scheduled"]
+    assert [r["output_nonce"] for r in rows(test_db)[:BATCH_SIZE]] == list(
+        range(7, 7 + BATCH_SIZE)
+    )
+    assert [
+        c.kwargs["args"][7] for c in worker.sapphire.simulate_contract_call.call_args_list
+    ] == [7] * BATCH_SIZE
     for call in worker.sapphire.submit_contract_call.call_args_list:
         args = call.kwargs["args"]
         signer = recover_transfer_signer(
@@ -84,7 +89,10 @@ async def test_five_submissions_precede_receipts_and_sixth_waits(worker, enqueue
             nonce=args[7], signature="0x" + args[8].hex(),
         )
         assert signer.lower() == settings.liquidity_provider_address.lower()
-    assert all(r["to_amount_actual"] == r["to_amount_estimate"] for r in rows(test_db)[:5])
+    assert all(
+        r["to_amount_actual"] == r["to_amount_estimate"]
+        for r in rows(test_db)[:BATCH_SIZE]
+    )
     worker.sapphire.submit_contract_call.side_effect = original_send
     worker.sapphire.wait_for_receipt.side_effect = None
     await worker.run_internal_once()

@@ -589,3 +589,16 @@ class TestMidasDefiLlamaWiring:
 
         assert strategy._defillama_pool_id is None
         assert any("not project" in r.message for r in caplog.records)
+
+
+def test_register_refuses_two_pools_backed_by_the_same_raw_balance():
+    from unittest.mock import MagicMock
+
+    from src.services.earn.registry import StrategyRegistry
+    registry = StrategyRegistry()
+    registry.register("0x" + "aa" * 32, MagicMock(name="aave"), chain_id=8453, asset_address="0xUSDC")
+
+    with pytest.raises(ValueError, match="same asset on chain 8453"):
+        registry.register("0x" + "bb" * 32, MagicMock(name="midas"), chain_id=8453, asset_address="0xusdc")
+
+    registry.register("0x" + "bb" * 32, MagicMock(name="midas"), chain_id=1, asset_address="0xusdc")

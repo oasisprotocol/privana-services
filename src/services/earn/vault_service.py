@@ -60,8 +60,8 @@ SYNC_MAX_DROP_BPS = 100
 # as two calls, so when the chain moves between them the node rejects the
 # leash. It is transient by nature: the next attempt builds a fresh one.
 _STALE_LEASH = "base block not found"
-READ_RETRY_ATTEMPTS = 3
-READ_RETRY_BACKOFF_SEC = 0.2
+READ_RETRY_ATTEMPTS = 5
+READ_RETRY_BACKOFF_SEC = 0.5
 
 # Protocol-owned principal only moves when an operator records or drops it,
 # so re-reading it on every quote buys nothing and costs a signed query.
@@ -673,6 +673,7 @@ class VaultService:
                 self._update_transaction(tx_id, error=deploy_error)
             else:
                 self._update_transaction(tx_id, status=EARN_STATUS_COMPLETED)
+                await self._complete_undeployed_if_clear(pool_id_hex)
 
         deploy_status = EARN_STATUS_UNDEPLOYED if deploy_error else EARN_STATUS_COMPLETED
 
@@ -916,25 +917,38 @@ class VaultService:
             return 0
 
         async with self._pools_tx_lock:
+            # A bridge still listed as pending may or may not have landed, so
+            # the balances below cannot be trusted until it clears. The next
+            # sweep sees the settled picture.
+            if await strategy.in_flight_assets() > 0:
+                return 0
             idle = await strategy.idle_assets()
+            stranded = await strategy.stranded_assets()
             minimum = await strategy.min_deploy_amount()
-            if idle <= 0 or idle < minimum:
+            # The strategy bridges only what is not already on the earn
+            # account, so idle and stranded funds deploy together.
+            amount = idle + stranded
+            if amount <= 0 or amount < minimum:
+                if amount == 0:
+                    self._complete_undeployed(pool_id_hex)
                 return 0
             if not await strategy.is_healthy():
                 logger.info(
                     "Idle deploy pool=%s: %d idle but the strategy is unhealthy; leaving it",
-                    pool_id_hex, idle,
+                    pool_id_hex, amount,
                 )
                 return 0
-
             logger.info("Idle deploy pool=%s: routing %d into %s",
-                        pool_id_hex, idle, strategy.name)
-            await self._route_to_strategy(pool_id_hex, idle)
+                        pool_id_hex, amount, strategy.name)
+            await self._route_to_strategy(pool_id_hex, amount)
             # Backing is unchanged, but totalAssets is written from a reading
             # taken before the move, so refresh it while the lock still
             # guarantees nothing else is mid-flight.
             await self.sync_total_assets(pool_id_hex)
-            return idle
+            left = await strategy.idle_assets()
+            if (left == 0 or left < minimum) and await strategy.stranded_assets() == 0:
+                self._complete_undeployed(pool_id_hex)
+            return amount
 
     async def effective_total_assets(self, pool_id_hex: str, on_chain_total: int) -> int:
         """Live AUM for a pool, derived from the strategy when available.
@@ -1261,6 +1275,37 @@ class VaultService:
             shares_delta=str(delta),
             exchange_rate=rate,
             settled_at=int(time.time()),
+        )
+
+    async def _complete_undeployed_if_clear(self, pool_id_hex: str) -> None:
+        """A routed deposit sweeps whatever was left raw on the earn account, so
+        once the pool has nothing idle either, earlier undeployed deposits
+        have been put to work along with it. Bookkeeping only: a failed read
+        here must not fail the deposit that just succeeded.
+        """
+        try:
+            strategy = self._registry.get(pool_id_hex)
+            if (
+                strategy.name != "manual"
+                and await strategy.idle_assets() == 0
+                and await strategy.stranded_assets() == 0
+                and await strategy.in_flight_assets() == 0
+            ):
+                self._complete_undeployed(pool_id_hex)
+        except Exception:
+            logger.warning("undeployed-row reconcile skipped pool=%s", pool_id_hex, exc_info=True)
+
+    def _complete_undeployed(self, pool_id_hex: str) -> None:
+        """Deposits whose routing failed sit as ``undeployed`` with their funds
+        idle in the pool. Once the idle balance has been deployed those funds
+        are working, so the rows have nothing left to wait for. ``updated_at``
+        is left alone: value history reads it as the deposit's settlement time.
+        """
+        db_write(
+            get_db(),
+            "UPDATE earn_transactions SET status = ?, error = NULL "
+            "WHERE lower(pool_id) = ? AND operation = ? AND status = ?",
+            (EARN_STATUS_COMPLETED, pool_id_hex.lower(), EARN_OP_DEPOSIT, EARN_STATUS_UNDEPLOYED),
         )
 
     def _update_transaction(self, tx_id: str, **fields) -> None:

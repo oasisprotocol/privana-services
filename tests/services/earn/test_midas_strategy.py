@@ -120,6 +120,7 @@ def midas_client():
     client.is_issuance_paused.return_value = False
     client.is_redemption_paused.return_value = False
     client.get_redemption_fee_bps.return_value = 0
+    client.get_redemption_min_amount.return_value = 0
     return client
 
 
@@ -467,9 +468,7 @@ async def test_deposit_to_earn_bridges_approves_and_mints(
             pending_withdrawals=[_PendingWithdrawal(index=42, amount=1_000_000)],
         ),
     ]
-    privana.get_withdrawal_info.return_value = _WithdrawalInfo(
-        index=42, resolved=True, tx_identifier="0xresolved",
-    )
+    midas_client.get_erc20_balance.side_effect = [0, 0, 1_000_000, 1_000_000]
     midas_client.get_allowance.return_value = 0
     midas_client.get_oracle_answer.return_value = 10**18
     midas_client.get_oracle_decimals.return_value = 18
@@ -504,13 +503,120 @@ async def test_deposit_to_earn_skips_approve_when_allowance_sufficient(
             pending_withdrawals=[_PendingWithdrawal(index=1, amount=500_000)],
         ),
     ]
-    privana.get_withdrawal_info.return_value = _WithdrawalInfo(index=1, resolved=True)
+    midas_client.get_erc20_balance.side_effect = [0, 0, 500_000, 500_000]
     midas_client.get_allowance.return_value = 10**12
 
     await strategy.deposit_to_earn(500_000)
 
     midas_client.approve.assert_not_called()
     midas_client.deposit_instant.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_bridge_lands_even_when_accounting_never_lists_it_pending(
+    strategy, midas_client, privana,
+) -> None:
+    privana.get_pending_withdrawals = AsyncMock(
+        return_value=_PendingWithdrawalsResponse(user_address=POOL_ADDRESS, pending_withdrawals=[]),
+    )
+    privana.get_withdrawal_info = AsyncMock(side_effect=AssertionError("must not be consulted"))
+    midas_client.get_erc20_balance.side_effect = [0, 0, 0, 0, 1_000_000, 1_000_000]
+
+    await strategy.deposit_to_earn(1_000_000)
+
+    privana.request_withdrawal.assert_awaited_once()
+    midas_client.deposit_instant.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_bridge_keeps_polling_through_a_failed_balance_read(
+    strategy, midas_client, privana,
+) -> None:
+    midas_client.get_erc20_balance.side_effect = [0, 0, RuntimeError("rpc down"), 1_000_000, 1_000_000]
+
+    await strategy.deposit_to_earn(1_000_000)
+
+    midas_client.deposit_instant.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_deposit_to_earn_mints_everything_on_the_eoa(
+    strategy, midas_client, privana,
+) -> None:
+    midas_client.get_erc20_balance.side_effect = [0, 0, 1_500_000, 1_500_000]
+    midas_client.get_oracle_answer.return_value = 10**18
+    midas_client.get_oracle_decimals.return_value = 18
+
+    await strategy.deposit_to_earn(1_000_000)
+
+    assert midas_client.approve.call_args.args[2] == 1_500_000
+    assert midas_client.deposit_instant.call_args.args[1] == 1_500_000 * 10**12
+
+
+@pytest.mark.asyncio
+async def test_deposit_to_earn_uses_funds_already_on_the_eoa(
+    strategy, midas_client, privana,
+) -> None:
+    midas_client.get_erc20_balance.return_value = 1_000_000
+
+    await strategy.deposit_to_earn(1_000_000)
+
+    privana.request_withdrawal.assert_not_awaited()
+    midas_client.deposit_instant.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_withdraw_from_earn_spends_raw_funds_before_the_position(
+    strategy, midas_client, privana,
+) -> None:
+    midas_client.get_erc20_balance.return_value = 1_000_000
+    privana.get_balance = AsyncMock(
+        side_effect=[
+            _Balance(user_address=POOL_ADDRESS, token_id=TOKEN_ID, balance=0),
+            _Balance(user_address=POOL_ADDRESS, token_id=TOKEN_ID, balance=1_000_000),
+        ]
+    )
+    privana.check_deposit = AsyncMock(
+        return_value=_DepositCheckResponse(status="accepted", deposit_id="dep-1")
+    )
+
+    await strategy.withdraw_from_earn(1_000_000)
+
+    midas_client.redeem_instant.assert_not_called()
+    midas_client.transfer_erc20.assert_called_once_with(ASSET_ADDRESS, DEPOSIT_ADDRESS_BASE, 1_000_000)
+
+
+@pytest.mark.asyncio
+async def test_withdraw_from_earn_redeems_at_least_the_vault_minimum(
+    strategy, midas_client, privana,
+) -> None:
+    midas_client.get_redemption_min_amount.return_value = 10**18
+    midas_client.get_erc20_balance.side_effect = [0, 1_100_000]
+    privana.get_balance = AsyncMock(
+        side_effect=[
+            _Balance(user_address=POOL_ADDRESS, token_id=TOKEN_ID, balance=0),
+            _Balance(user_address=POOL_ADDRESS, token_id=TOKEN_ID, balance=1_100_000),
+        ]
+    )
+    privana.check_deposit = AsyncMock(
+        return_value=_DepositCheckResponse(status="accepted", deposit_id="dep-1")
+    )
+
+    await strategy.withdraw_from_earn(500_000)
+
+    assert midas_client.redeem_instant.call_args.args[1] == 10**18
+    assert midas_client.redeem_instant.call_args.args[2] == 500_000 * 10**12
+    midas_client.transfer_erc20.assert_called_once_with(ASSET_ADDRESS, DEPOSIT_ADDRESS_BASE, 1_100_000)
+
+
+@pytest.mark.asyncio
+async def test_total_assets_counts_usdc_still_on_the_eoa(strategy, midas_client) -> None:
+    midas_client.get_erc20_balance.return_value = 5_000_000
+    midas_client.get_mtbill_balance.return_value = 20 * 10**18
+    midas_client.get_oracle_answer.return_value = 10**18
+    midas_client.get_oracle_decimals.return_value = 18
+
+    assert await strategy.total_assets() == 25_000_000
 
 
 @pytest.mark.asyncio

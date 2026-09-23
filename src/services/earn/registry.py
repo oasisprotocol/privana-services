@@ -29,15 +29,37 @@ class StrategyRegistry:
 
     def __init__(self) -> None:
         self._strategies: dict[str, BaseStrategy] = {}
+        self._holdings: dict[tuple[int, str], str] = {}
         self._default: BaseStrategy = ManualStrategy()
 
-    def register(self, pool_id: str, strategy: BaseStrategy) -> None:
+    def register(
+        self,
+        pool_id: str,
+        strategy: BaseStrategy,
+        *,
+        chain_id: Optional[int] = None,
+        asset_address: Optional[str] = None,
+    ) -> None:
         key = self._normalize(pool_id)
         if key in self._strategies:
             logger.warning(
                 "StrategyRegistry: overwriting strategy for pool=%s old=%s new=%s",
                 key, self._strategies[key].name, strategy.name,
             )
+        # Strategies value the asset sitting raw on the shared earn account as
+        # their own. Two pools reading the same balance would each count it.
+        if chain_id is not None and asset_address is not None:
+            holding = (chain_id, asset_address.lower())
+            other = self._holdings.get(holding)
+            if other is not None and other != key:
+                raise ValueError(
+                    f"pool {key} holds the same asset on chain {chain_id} as pool {other}; "
+                    "one earn account cannot back both"
+                )
+            for old_holding, owner in list(self._holdings.items()):
+                if owner == key and old_holding != holding:
+                    del self._holdings[old_holding]
+            self._holdings[holding] = key
         self._strategies[key] = strategy
 
     def get(self, pool_id: str) -> BaseStrategy:
@@ -294,6 +316,8 @@ async def register_aave_strategies_from_config(
                 token_id=token_id,
                 defillama_pool_id=llama_id,
             ),
+            chain_id=token_info.chain_id,
+            asset_address=asset_address,
         )
         logger.info(
             "Registered AaveStrategy pool=%s asset=%s token=%s chain=%s apy_history=%s",
@@ -404,6 +428,8 @@ async def register_midas_strategies_from_config(
                 token_id=token_id,
                 defillama_pool_id=llama_id,
             ),
+            chain_id=token_info.chain_id,
+            asset_address=asset_address,
         )
         logger.info(
             "Registered MidasStrategy pool=%s asset=%s token=%s chain=%s apy_history=%s",

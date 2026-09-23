@@ -71,6 +71,19 @@ class BaseStrategy(ABC):
         externally (e.g. manual).
         """
 
+    async def in_flight_assets(self) -> int:
+        """Pool money accounting has debited for a bridge that has not landed
+        on the earn account yet. Nothing is settled while this is non-zero.
+        """
+        return 0
+
+    async def stranded_assets(self) -> int:
+        """Pool money sitting raw on the earn account: bridged in for a
+        deposit whose protocol leg never ran, or left behind by a redeem.
+        Counted in ``total_assets``; the idle sweep puts it to work.
+        """
+        return 0
+
     @abstractmethod
     async def idle_assets(self) -> int:
         """Pool funds credited to the pool but not deployed to the external

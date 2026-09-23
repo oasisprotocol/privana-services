@@ -56,7 +56,7 @@ def _network_for_chain(chain_id: int) -> Network:
 
 class AaveStrategy(BaseStrategy):
     """Aave V3 strategy. Bridges pool funds from the privana accounting
-    layer on Sapphire to the LP EOA on Base, supplies them to Aave V3, and
+    layer on Sapphire to the earn account on Base, supplies them to Aave V3, and
     redeems on the way out.
 
     Both bridge legs are fully state-based: this class polls accounting
@@ -66,7 +66,7 @@ class AaveStrategy(BaseStrategy):
     machine resolves.
 
     Per-pool params (`asset_address`, `token_id`, optional `pool_address`)
-    are passed at construction time. Cross-pool params (LP key, accounting
+    are passed at construction time. Cross-pool params (earn pool key, accounting
     contract, chain id) come from settings so each pool doesn't restate
     them.
     """
@@ -94,7 +94,7 @@ class AaveStrategy(BaseStrategy):
 
         settings = load_settings()
         self._pool_address = pool_address or settings.earn_pool_address
-        self._lp_secret_key = settings.earn_pool_secret_key
+        self._ep_secret_key = settings.earn_pool_secret_key
         self._accounting_contract = settings.accounting_contract_address
         self._network = _network_for_chain(settings.accounting_chain_id)
 
@@ -140,7 +140,7 @@ class AaveStrategy(BaseStrategy):
         )
 
     async def deposit_to_earn(self, amount: int) -> None:
-        """Bridge `amount` from accounting on Sapphire to the LP EOA on Base,
+        """Bridge `amount` from accounting on Sapphire to the earn account on Base,
         then supply it to Aave.
 
         Steps:
@@ -157,20 +157,37 @@ class AaveStrategy(BaseStrategy):
         if amount <= 0:
             raise ValueError(f"deposit_to_earn requires a positive amount, got {amount}")
 
-        await self._bridge_to_base(amount)
+        await self._await_bridges_in_flight()
+        on_hand = await asyncio.to_thread(
+            self._client.get_erc20_balance, self._asset_address,
+        )
+        if on_hand >= amount:
+            logger.info(
+                "AaveStrategy.deposit_to_earn: %d already on the earn account (balance=%d); "
+                "skipping the bridge",
+                amount, on_hand,
+            )
+        else:
+            await self._bridge_to_base(amount - on_hand)
+            on_hand = await asyncio.to_thread(
+                self._client.get_erc20_balance, self._asset_address,
+            )
+        # Everything on the account is pool money, so supply all of it: a bridge
+        # a previous deposit gave up on would otherwise sit here earning nothing.
+        deploy = max(amount, on_hand)
 
         allowance = self._client.get_allowance(self._asset_address)
-        if allowance < amount:
+        if allowance < deploy:
             logger.info(
                 "AaveStrategy.deposit_to_earn: topping up allowance asset=%s current=%d needed=%d",
-                self._asset_address, allowance, amount,
+                self._asset_address, allowance, deploy,
             )
-            self._client.approve_pool(self._asset_address, amount)
+            self._client.approve_pool(self._asset_address, deploy)
 
-        tx_hash = self._client.supply(self._asset_address, amount)
+        tx_hash = self._client.supply(self._asset_address, deploy)
         logger.info(
             "AaveStrategy.deposit_to_earn: supplied asset=%s amount=%d tx=%s",
-            self._asset_address, amount, tx_hash,
+            self._asset_address, deploy, tx_hash,
         )
 
     async def withdraw_from_earn(self, amount: int) -> None:
@@ -196,28 +213,38 @@ class AaveStrategy(BaseStrategy):
             raise ValueError(f"withdraw_from_earn requires a positive amount, got {amount}")
 
         pre_balance = await self._read_pool_balance()
-
-        # Aave's scaled-balance math can credit 1 wei less than supplied, so
-        # a reclaim of the exact principal reverts against a dust-short
-        # position. Clamp to the position when the shortfall is dust; a real
-        # shortfall still fails loudly.
-        position = await self.total_assets()
-        redeem_amount = amount
-        if position < amount:
-            if amount - position > REDEEM_DUST_TOLERANCE:
-                raise RuntimeError(
-                    f"Aave position {position} cannot cover reclaim of {amount} "
-                    f"(short by {amount - position})"
-                )
-            redeem_amount = position
-
-        redeem_tx = self._client.withdraw(
-            self._asset_address, redeem_amount, to=self._pool_address
+        # Anything already sitting raw on the account is pool money that was
+        # never supplied; spend it before touching the position.
+        on_hand = await asyncio.to_thread(
+            self._client.get_erc20_balance, self._asset_address,
         )
-        logger.info(
-            "AaveStrategy.withdraw_from_earn: redeemed from aave asset=%s amount=%d tx=%s",
-            self._asset_address, redeem_amount, redeem_tx,
-        )
+        from_raw = min(on_hand, amount)
+        redeem_amount = amount - from_raw
+        if redeem_amount > 0:
+            # Aave's scaled-balance math can credit 1 wei less than supplied, so
+            # a reclaim of the exact principal reverts against a dust-short
+            # position. Clamp to the position when the shortfall is dust; a real
+            # shortfall still fails loudly.
+            position = await asyncio.to_thread(
+                self._client.get_aToken_balance,
+                self._asset_address,
+                self._pool_address,
+            )
+            if position < redeem_amount:
+                if redeem_amount - position > REDEEM_DUST_TOLERANCE:
+                    raise RuntimeError(
+                        f"Aave position {position} cannot cover reclaim of {redeem_amount} "
+                        f"(short by {redeem_amount - position})"
+                    )
+                redeem_amount = position
+            redeem_tx = self._client.withdraw(
+                self._asset_address, redeem_amount, to=self._pool_address
+            )
+            logger.info(
+                "AaveStrategy.withdraw_from_earn: redeemed from aave asset=%s amount=%d tx=%s",
+                self._asset_address, redeem_amount, redeem_tx,
+            )
+        redeem_amount += from_raw
 
         # Acquired right before each authed call, not once for the flow: the
         # getter refreshes the bearer token near expiry, and the on-chain legs
@@ -294,35 +321,29 @@ class AaveStrategy(BaseStrategy):
                 await asyncio.sleep(self._poll_interval_sec)
 
     async def _bridge_to_base(self, amount: int) -> None:
-        """Submit an accounting Withdraw and block until accounting reports
-        the request resolved.
+        """Submit an accounting Withdraw signed by the earn pool key and block
+        until the funds land on the earn account.
 
-        State-based, no wall-clock timeout: the loop only exits when our
-        withdrawal's `resolved` flag flips True (the relay completed the
-        on-chain transfer). The PyPI SDK does not surface a failed/rejected
-        status enum on this endpoint, so a hard relay failure surfaces only
-        if `request_withdrawal` itself rejects synchronously. Idempotent
-        reads tunnel through ``_retry_on_network_error`` so a single dropped
-        TCP read doesn't tear the loop down.
+        Landing is judged by the asset balance on the EOA, not by
+        accounting's pending list. A withdrawal the relay resolves before
+        this loop first observes it pending never shows up in that list,
+        and waiting on the list then runs until the poll cap with the funds
+        already here. The poll reads the chain only, so no accounting outage
+        can stretch the cap.
         """
         client = self._get_privana()
-        lp_account = Account.from_key(self._lp_secret_key)
-
-        pre = await self._retry_on_network_error(
-            "get_pending_withdrawals",
-            lambda: client.get_pending_withdrawals(self._pool_address),
+        ep_account = Account.from_key(self._ep_secret_key)
+        balance_before = await asyncio.to_thread(
+            self._client.get_erc20_balance, self._asset_address,
         )
-        pre_indices: set[int] = {w.index for w in pre.pending_withdrawals}
-
         nonce_resp = await self._retry_on_network_error(
             "get_withdrawal_nonce",
             lambda: client.get_withdrawal_nonce(self._pool_address),
         )
         nonce = nonce_resp.nonce
-
         signature = sign_withdraw_message(
             SignWithdrawParams(
-                account=lp_account,
+                account=ep_account,
                 network=self._network,
                 verifying_contract=self._accounting_contract,
                 message=WithdrawMessage(
@@ -351,41 +372,31 @@ class AaveStrategy(BaseStrategy):
                 f"Withdrawal request rejected: status={submission.status} "
                 f"detail={submission.detail}"
             )
-
-        own_index: Optional[int] = None
         attempts = 0
         while True:
             attempts += 1
-            if attempts > self._max_bridge_poll_attempts:
+            try:
+                balance = await asyncio.to_thread(
+                    self._client.get_erc20_balance, self._asset_address,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "AaveStrategy._bridge_to_base: balance read failed (attempt %d/%d); retrying: %s",
+                    attempts, self._max_bridge_poll_attempts, exc,
+                )
+                balance = -1
+            if balance >= balance_before + amount:
+                logger.info(
+                    "AaveStrategy._bridge_to_base: withdrawal landed nonce=%d amount=%d balance=%d",
+                    nonce, amount, balance,
+                )
+                return
+            if attempts >= self._max_bridge_poll_attempts:
                 raise RuntimeError(
-                    f"AaveStrategy._bridge_to_base: withdrawal unresolved after "
+                    f"AaveStrategy._bridge_to_base: withdrawal not landed after "
                     f"{self._max_bridge_poll_attempts} polls (pool={self._pool_address} "
                     f"token={self._token_id} amount={amount}); aborting to release lock"
                 )
-            pending = await self._retry_on_network_error(
-                "get_pending_withdrawals",
-                lambda: client.get_pending_withdrawals(self._pool_address),
-            )
-            current_indices = {w.index for w in pending.pending_withdrawals}
-
-            if own_index is None:
-                new_indices = current_indices - pre_indices
-                if new_indices:
-                    own_index = min(new_indices)
-
-            if own_index is not None:
-                idx = own_index
-                info = await self._retry_on_network_error(
-                    "get_withdrawal_info",
-                    lambda: client.get_withdrawal_info(idx),
-                )
-                if info.resolved:
-                    logger.info(
-                        "AaveStrategy._bridge_to_base: withdrawal resolved index=%d tx=%s",
-                        own_index, info.tx_identifier,
-                    )
-                    return
-
             await asyncio.sleep(self._poll_interval_sec)
 
     async def _read_pool_balance(self) -> int:
@@ -453,15 +464,61 @@ class AaveStrategy(BaseStrategy):
 
     async def total_assets(self) -> int:
         """aToken balance held by the pool address for this asset, which
-        equals principal plus accrued Aave yield.
+        equals principal plus accrued Aave yield, plus any of the asset
+        sitting raw on the address. That raw balance is pool money mid-flight,
+        bridged in but not yet supplied; leaving it out would show the pool
+        as short.
 
-        The underlying web3 read is synchronous; offload via ``to_thread``
+        The underlying web3 reads are synchronous; offload via ``to_thread``
         so concurrent gather() siblings keep making progress.
         """
-        return await asyncio.to_thread(
+        # Both sides at one block, so a supply or redeem landing between the
+        # reads cannot show up on both of them.
+        block = await asyncio.to_thread(lambda: self._client.w3.eth.block_number)
+        supplied = await asyncio.to_thread(
             self._client.get_aToken_balance,
             self._asset_address,
             self._pool_address,
+            block,
+        )
+        raw = await asyncio.to_thread(
+            self._client.get_erc20_balance, self._asset_address, None, block,
+        )
+        return supplied + raw
+
+    async def in_flight_assets(self) -> int:
+        return sum(int(w.amount) for w in await self._pending_bridges())
+
+    async def _pending_bridges(self) -> list:
+        client = self._get_privana()
+        pending = await self._retry_on_network_error(
+            "get_pending_withdrawals",
+            lambda: client.get_pending_withdrawals(self._pool_address),
+        )
+        token = self._token_id.lower()
+        return [w for w in pending.pending_withdrawals if w.token_id.lower() == token]
+
+    async def _await_bridges_in_flight(self) -> None:
+        """An earlier bridge still on its way would land on the same account
+        and be mistaken for ours, so wait for the account to settle first.
+        """
+        for attempt in range(1, self._max_bridge_poll_attempts + 1):
+            pending = await self._pending_bridges()
+            if not pending:
+                return
+            logger.info(
+                "AaveStrategy: %d earlier bridge(s) still in flight (attempt %d/%d); waiting",
+                len(pending), attempt, self._max_bridge_poll_attempts,
+            )
+            await asyncio.sleep(self._poll_interval_sec)
+        raise RuntimeError(
+            f"AaveStrategy: earlier bridge still in flight after "
+            f"{self._max_bridge_poll_attempts} polls; aborting to release lock"
+        )
+
+    async def stranded_assets(self) -> int:
+        return await asyncio.to_thread(
+            self._client.get_erc20_balance, self._asset_address,
         )
 
     async def idle_assets(self) -> int:

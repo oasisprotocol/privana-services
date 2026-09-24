@@ -15,11 +15,17 @@ SIWE_TOKEN = "0x" + "ee" * 32
 BLOCK = 500
 
 
-def _pool_shares(contract, by_block, latest=None):
-    """pools() returns ``by_block[n]`` when pinned to block n, else ``latest``."""
+def _pool_shares(contract, by_block, latest=None, assets=None):
+    """pools() returns ``by_block[n]`` shares and ``assets[n]`` assets (default:
+    the same) when pinned to block n, else ``latest`` for both."""
+    assets = assets or by_block
+
     def pools(block_identifier=None):
-        shares = latest if block_identifier is None else by_block[block_identifier]
-        return (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, shares, shares, True)
+        if block_identifier is None:
+            shares = total = latest
+        else:
+            shares, total = by_block[block_identifier], assets[block_identifier]
+        return (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, shares, total, True)
     contract.functions.pools.return_value.call.side_effect = pools
 
 
@@ -1363,7 +1369,8 @@ class TestShareDeltaCapture:
 
     async def test_deposit_records_positive_delta_and_rate(self, test_db):
         service, contract, _, _ = _make_service()
-        _pool_shares(contract, {BLOCK - 1: 1000, BLOCK: 1100}, latest=1000)
+        _pool_shares(contract, {BLOCK - 1: 1000, BLOCK: 1100}, latest=1000,
+                     assets={BLOCK - 1: 1000, BLOCK: 1105})
 
         await service.deposit(POOL_ID_HEX, USER_ADDRESS, "105", 5, "0x" + "aa" * 65)
 
@@ -1374,7 +1381,8 @@ class TestShareDeltaCapture:
 
     async def test_withdraw_records_negative_delta(self, test_db):
         service, contract, _, _ = _make_service()
-        _pool_shares(contract, {BLOCK - 1: 1000, BLOCK: 600}, latest=1000)
+        _pool_shares(contract, {BLOCK - 1: 1000, BLOCK: 600}, latest=1000,
+                     assets={BLOCK - 1: 1000, BLOCK: 580})
 
         with patch(
             "src.services.earn.vault_service.sign_transfer",
@@ -1389,12 +1397,41 @@ class TestShareDeltaCapture:
     async def test_a_later_mint_is_not_folded_in(self, test_db):
         # A later read no longer folds the next cashflow in.
         service, contract, _, _ = _make_service()
-        _pool_shares(contract, {BLOCK - 1: 1000, BLOCK: 1100}, latest=1300)
+        _pool_shares(contract, {BLOCK - 1: 1000, BLOCK: 1100}, latest=1300,
+                     assets={BLOCK - 1: 1000, BLOCK: 1105})
 
         await service.deposit(POOL_ID_HEX, USER_ADDRESS, "105", 5, "0x" + "aa" * 65)
 
         row = test_db.execute("SELECT * FROM earn_transactions").fetchone()
         assert row["shares_delta"] == "100"
+
+    async def test_a_block_another_deposit_shared_records_no_delta(self, test_db):
+        # A direct deposit of 50 landed beside ours: its shares must not be
+        # booked to this user, so earned stays unavailable instead.
+        service, contract, _, _ = _make_service()
+        _pool_shares(contract, {BLOCK - 1: 1000, BLOCK: 1150}, latest=1000,
+                     assets={BLOCK - 1: 1000, BLOCK: 1155})
+
+        await service.deposit(POOL_ID_HEX, USER_ADDRESS, "105", 5, "0x" + "aa" * 65)
+
+        row = test_db.execute("SELECT * FROM earn_transactions").fetchone()
+        assert row["status"] != "failed"
+        assert row["shares_delta"] is None
+
+    async def test_a_withdraw_sharing_its_block_with_a_deposit_records_no_delta(self, test_db):
+        # Net assets still fall, but not by the withdrawal alone.
+        service, contract, _, _ = _make_service()
+        _pool_shares(contract, {BLOCK - 1: 1000, BLOCK: 650}, latest=1000,
+                     assets={BLOCK - 1: 1000, BLOCK: 630})
+
+        with patch(
+            "src.services.earn.vault_service.sign_transfer",
+            return_value="0x" + "bb" * 65,
+        ):
+            await service.withdraw(POOL_ID_HEX, USER_ADDRESS, "420", 0, USER_WITHDRAW_SIG)
+
+        row = test_db.execute("SELECT * FROM earn_transactions").fetchone()
+        assert row["shares_delta"] is None
 
     async def test_failed_deposit_records_no_delta(self, test_db):
         service, contract, saph, _ = _make_service()
@@ -1517,7 +1554,7 @@ class TestRepairShareLedger:
         from src.services.earn.vault_service import _settled_shares
         rows = [
             self._row("d1", block=10, shares_delta="300"),
-            self._row("d2", block=20, shares_delta=None),
+            self._row("d2", block=20, shares_delta=None, amount="50"),
             self._row("w1", block=30, operation="withdraw", status="failed", amount="30"),
             self._row("d3", block=40, status="failed", amount="50"),
             self._row("reverted", block=-50, status="failed"),
@@ -1601,6 +1638,28 @@ class TestRepairShareLedger:
 
         await service.repair_share_ledger()
 
+        saph.w3.eth.get_transaction_receipt.assert_not_called()
+
+    @pytest.mark.parametrize("status,shares_delta,repaired", [
+        # It landed, so it settles, but its shares stay unknown.
+        ("failed", None, "undeployed"),
+        # A delta booked before the check is cleared, not trusted.
+        ("completed", "150", "completed"),
+    ])
+    async def test_shares_from_a_block_something_else_moved_are_never_written(
+        self, test_db, status, shares_delta, repaired
+    ):
+        # 150 arrived in block 20, not this deposit's 50 alone.
+        rows = [self._row("d1", block=20, status=status, shares_delta=shares_delta, amount="50")]
+        service, saph = self._service(rows, chain_total=200, history={19: 0, 20: 150})
+
+        await service.repair_share_ledger()
+        saph.w3.eth.get_transaction_receipt.reset_mock()
+        await service.repair_share_ledger()
+
+        d1 = self._get(test_db, "d1")
+        assert (d1["status"], d1["shares_delta"], d1["exchange_rate"]) == (repaired, None, None)
+        # Not rescanned until the pool moves.
         saph.w3.eth.get_transaction_receipt.assert_not_called()
 
     async def test_rows_sharing_a_block_are_skipped(self, test_db):
@@ -1783,6 +1842,44 @@ class TestDeployIdle:
         assert await service.deploy_idle(POOL_ID_HEX) == 100_000
 
         strategy.deposit_to_earn.assert_awaited_once_with(100_000)
+
+    async def test_a_reverted_withdraw_found_by_recovery_is_redeployed(self, test_db):
+        """Timeout, then recovery reads the revert and fails the row; the
+        reclaim it left idle goes back to the strategy on the next deploy,
+        under the usual conditions, and the pool is resynced."""
+        from src.core.db import db_write, get_db
+        from src.services.earn.worker import EarnWorker
+        service, strategy = self._service(idle=100_000)
+        service.sync_total_assets = AsyncMock(return_value=1000)
+        db_write(
+            get_db(),
+            """INSERT INTO earn_transactions
+               (id, operation, pool_id, user_address, token_id, amount,
+                signer_address, nonce, signature, status, created_at, updated_at, tx_hash)
+               VALUES ('w1', 'withdraw', ?, '0xuser', ?, '100000', ?, 1, '0xsig',
+                       'pending', 0, 0, '0xw1')""",
+            (POOL_ID_HEX, USDC_TOKEN_ID, POOL_ADDRESS),
+        )
+        service.sapphire.wait_for_receipt = MagicMock(
+            side_effect=[TimeoutError("timed out"), {"status": 0, "blockNumber": 7}]
+        )
+
+        with patch("src.services.earn.worker.get_vault_service", return_value=service):
+            await EarnWorker()._recover()
+            assert self._status(test_db, "w1") == "pending"
+            await EarnWorker()._recover()
+        assert self._status(test_db, "w1") == "failed"
+        strategy.deposit_to_earn.assert_not_awaited()
+
+        assert await service.deploy_idle(POOL_ID_HEX) == 100_000
+        strategy.deposit_to_earn.assert_awaited_once_with(100_000)
+        service.sync_total_assets.assert_awaited()
+
+    @staticmethod
+    def _status(test_db, tx_id):
+        return test_db.execute(
+            "SELECT status FROM earn_transactions WHERE id = ?", (tx_id,)
+        ).fetchone()["status"]
 
     async def test_completes_undeployed_deposits_once_their_funds_are_working(self, test_db):
         from src.core.db import db_write, get_db

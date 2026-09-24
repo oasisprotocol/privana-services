@@ -115,7 +115,7 @@ class EarnWorker:
             logger.info("Earn %s %s recovered as landed", row["operation"], row["id"])
             pool_id = bytes.fromhex(row["pool_id"].removeprefix("0x"))
             await service._record_share_delta(
-                row["id"], pool_id, receipt["blockNumber"], row["amount"],
+                row["id"], pool_id, receipt["blockNumber"], row["operation"], row["amount"],
             )
             # Never routed, so the idle deployer completes a deposit.
             status = (

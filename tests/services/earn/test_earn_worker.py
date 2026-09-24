@@ -152,7 +152,7 @@ async def test_a_row_with_a_hash_is_settled_from_its_receipt(test_db):
     with patch("src.services.earn.worker.get_vault_service", return_value=service):
         await EarnWorker()._recover()
 
-    service._record_share_delta.assert_awaited_once_with("t1", bytes.fromhex("aa" * 32), 42, "1000")
+    service._record_share_delta.assert_awaited_once_with("t1", bytes.fromhex("aa" * 32), 42, "deposit", "1000")
     # Routing never ran, so the idle deployer completes it.
     assert service._update_transaction.call_args.kwargs["status"] == "undeployed"
 

@@ -18,6 +18,7 @@ from src.services.earn.vault_service import (
     EARN_STATUS_FAILED,
     EARN_STATUS_PENDING,
     EARN_STATUS_SCHEDULED,
+    EARN_STATUS_UNDEPLOYED,
     get_vault_service,
 )
 from src.services.user_queue import users_with_inflight_work
@@ -43,6 +44,7 @@ def _public_error(exc: Exception) -> str:
 POLL_INTERVAL = 1.0
 # How often a withdrawal waiting for liquidity asks its strategy again.
 LIQUIDITY_RECHECK_SEC = 120
+REPAIR_INTERVAL_SEC = 60.0
 
 
 class EarnWorker:
@@ -117,10 +119,17 @@ class EarnWorker:
             service._update_transaction(row["id"], error=sanitize_error(str(exc)))
             return
         if receipt["status"] == 1:
-            logger.info("Earn %s %s recovered as completed", row["operation"], row["id"])
-            service._update_transaction(
-                row["id"], status=EARN_STATUS_COMPLETED, error=None,
+            logger.info("Earn %s %s recovered as landed", row["operation"], row["id"])
+            pool_id = bytes.fromhex(row["pool_id"].removeprefix("0x"))
+            await service._record_share_delta(
+                row["id"], pool_id, receipt["blockNumber"], row["amount"],
             )
+            # Never routed, so the idle deployer completes a deposit.
+            status = (
+                EARN_STATUS_UNDEPLOYED if row["operation"] == EARN_OP_DEPOSIT
+                else EARN_STATUS_COMPLETED
+            )
+            service._update_transaction(row["id"], status=status, error=None)
         else:
             service._update_transaction(
                 row["id"], status=EARN_STATUS_FAILED,
@@ -256,7 +265,15 @@ class EarnWorker:
             )
 
     async def _loop(self) -> None:
+        next_repair = 0.0
         while not self._stop.is_set():
+            # Between operations, never alongside one.
+            if time.monotonic() >= next_repair:
+                try:
+                    await get_vault_service().repair_share_ledger()
+                except Exception:
+                    logger.exception("Earn share ledger repair failed")
+                next_repair = time.monotonic() + REPAIR_INTERVAL_SEC
             try:
                 await self.run_once()
             except Exception:

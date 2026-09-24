@@ -146,7 +146,24 @@ async def test_a_row_with_a_hash_is_settled_from_its_receipt(test_db):
     _row(test_db, "t1", status="executing")
     db_write(test_db, "UPDATE earn_transactions SET tx_hash = ? WHERE id = ?", ("0xabc", "t1"))
     service = MagicMock()
-    service.sapphire.wait_for_receipt = MagicMock(return_value={"status": 1})
+    service.sapphire.wait_for_receipt = MagicMock(return_value={"status": 1, "blockNumber": 42})
+    service._record_share_delta = AsyncMock()
+
+    with patch("src.services.earn.worker.get_vault_service", return_value=service):
+        await EarnWorker()._recover()
+
+    service._record_share_delta.assert_awaited_once_with("t1", bytes.fromhex("aa" * 32), 42, "1000")
+    # Routing never ran, so the idle deployer completes it.
+    assert service._update_transaction.call_args.kwargs["status"] == "undeployed"
+
+
+@pytest.mark.asyncio
+async def test_a_recovered_withdraw_is_completed(test_db):
+    _row(test_db, "t1", operation="withdraw", status="pending")
+    db_write(test_db, "UPDATE earn_transactions SET tx_hash = ? WHERE id = ?", ("0xabc", "t1"))
+    service = MagicMock()
+    service.sapphire.wait_for_receipt = MagicMock(return_value={"status": 1, "blockNumber": 42})
+    service._record_share_delta = AsyncMock()
 
     with patch("src.services.earn.worker.get_vault_service", return_value=service):
         await EarnWorker()._recover()
@@ -155,30 +172,37 @@ async def test_a_row_with_a_hash_is_settled_from_its_receipt(test_db):
 
 
 @pytest.mark.asyncio
-async def test_a_submitted_row_without_a_hash_is_never_replayed(test_db):
-    """Its accounting transfer may already be on chain, so replaying it could
-    pay twice. Surface it for manual recovery instead."""
+async def test_an_unknown_receipt_leaves_the_row_pending(test_db):
     _row(test_db, "t1", status="pending")
+    db_write(test_db, "UPDATE earn_transactions SET tx_hash = ? WHERE id = ?", ("0xabc", "t1"))
     service = MagicMock()
+    service.sapphire.wait_for_receipt = MagicMock(side_effect=TimeoutError("timed out"))
 
     with patch("src.services.earn.worker.get_vault_service", return_value=service):
-        await EarnWorker()._recover()
+        assert await EarnWorker()._recover() is True
 
-    assert service._update_transaction.call_args.kwargs["status"] == "failed"
-    assert "manual recovery" in service._update_transaction.call_args.kwargs["error"]
+    assert "status" not in service._update_transaction.call_args.kwargs
 
 
 @pytest.mark.asyncio
-async def test_nothing_new_is_claimed_while_a_row_is_still_in_flight(test_db):
-    _row(test_db, "inflight", user=USER_B, status="executing")
-    _row(test_db, "queued", user=USER_A)
+async def test_the_share_ledger_repair_keeps_running_between_operations(test_db):
+    worker = EarnWorker()
     service = MagicMock()
+    service.repair_share_ledger = AsyncMock(side_effect=[RuntimeError("rpc down"), None, None])
+    iterations = []
 
-    with patch("src.services.earn.worker.get_vault_service", return_value=service):
-        await EarnWorker().run_once()
+    async def run_once():
+        iterations.append(1)
+        if len(iterations) == 3:
+            worker._stop.set()
 
-    assert _status(test_db, "queued") == "scheduled"
-    service.deposit.assert_not_called()
+    worker.run_once = run_once
+    with patch("src.services.earn.worker.get_vault_service", return_value=service), \
+         patch("src.services.earn.worker.REPAIR_INTERVAL_SEC", 0), \
+         patch("src.services.earn.worker.POLL_INTERVAL", 0):
+        await worker._loop()
+
+    assert service.repair_share_ledger.await_count == 3
 
 
 @pytest.mark.asyncio

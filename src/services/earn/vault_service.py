@@ -25,6 +25,7 @@ from src.core.validation import (
     validate_amount,
     validate_signature,
 )
+from src.services.earn import progress
 from src.services.earn.change import change_24h
 from src.services.earn.earned import (
     STATUS_LEDGER_INCOMPLETE,
@@ -634,6 +635,7 @@ class VaultService:
 
             shares_before = await self._total_shares_safe(pool_id)
 
+            progress.report(progress.RECORDING)
             try:
                 tx_hash = await self._submit_and_settle(
                     tx_id,
@@ -832,6 +834,7 @@ class VaultService:
 
             shares_before = await self._total_shares_safe(pool_id)
 
+            progress.report(progress.PAYING_OUT)
             try:
                 tx_hash = await self._submit_and_settle(
                     tx_id,

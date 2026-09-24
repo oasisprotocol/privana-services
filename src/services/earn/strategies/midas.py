@@ -25,6 +25,7 @@ from src.clients.privana import (
     get_privana_client,
 )
 from src.core.config import load_settings
+from src.services.earn import progress
 from src.services.earn.strategies.base import ApyPoint, BaseStrategy
 from src.services.earn.strategies.defillama_history import defillama_apy_history
 
@@ -310,6 +311,7 @@ class MidasStrategy(BaseStrategy):
                 amount, on_hand,
             )
         else:
+            progress.report(progress.BRIDGING)
             await self._bridge_to_base(amount - on_hand)
             on_hand = await asyncio.to_thread(
                 self._client.get_erc20_balance, self._asset_address,
@@ -317,6 +319,7 @@ class MidasStrategy(BaseStrategy):
         # Everything on the account is pool money, so mint all of it: a bridge
         # a previous deposit gave up on would otherwise sit here earning nothing.
         deploy = max(amount, on_hand)
+        progress.report(progress.DEPLOYING)
 
         allowance = await asyncio.to_thread(
             self._client.get_allowance,
@@ -375,6 +378,7 @@ class MidasStrategy(BaseStrategy):
         if amount <= 0:
             raise ValueError(f"withdraw_from_earn requires a positive amount, got {amount}")
 
+        progress.report(progress.RECLAIMING)
         pre_balance = await self._read_pool_balance()
 
         # Anything already sitting raw on the account is pool money that was
@@ -401,6 +405,7 @@ class MidasStrategy(BaseStrategy):
             "get_deposit_address", _fetch_deposit_address
         )
 
+        progress.report(progress.RETURNING)
         transfer_tx = await asyncio.to_thread(
             self._client.transfer_erc20,
             self._asset_address,
@@ -751,6 +756,7 @@ class MidasStrategy(BaseStrategy):
                 )
             )
         except Exception as exc:
+            progress.report_finality(exc)
             logger.warning(
                 "MidasStrategy.withdraw_from_earn: check_deposit not accepted yet "
                 "(%s); will retry",

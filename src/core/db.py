@@ -139,6 +139,9 @@ MIGRATIONS = [
     # overwriting the consent would leave a crashed row unreconstructable.
     "ALTER TABLE earn_transactions ADD COLUMN input_nonce INTEGER;",
     "ALTER TABLE earn_transactions ADD COLUMN input_signature TEXT;",
+    # Timeline of the steps an operation has passed through, as a JSON list of
+    # {stage, at, detail}, so the feed can say more than "pending".
+    "ALTER TABLE earn_transactions ADD COLUMN stages TEXT;",
 
 ]
 

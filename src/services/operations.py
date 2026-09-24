@@ -31,7 +31,8 @@ _SWAP_SELECT = """
         NULL AS pool_id,
         NULL AS token_id,
         NULL AS amount,
-        input_nonce AS nonce
+        input_nonce AS nonce,
+        NULL AS stages
     FROM swaps
     WHERE user_address = ?"""
 
@@ -53,7 +54,8 @@ _EARN_SELECT = """
         pool_id,
         token_id,
         amount,
-        CAST(input_nonce AS TEXT) AS nonce
+        CAST(input_nonce AS TEXT) AS nonce,
+        stages
     FROM earn_transactions
     WHERE user_address = ?"""
 

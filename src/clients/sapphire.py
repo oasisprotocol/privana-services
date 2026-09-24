@@ -50,7 +50,7 @@ class SapphireClient:
         )
         self.w3 = Web3(sapphire_http_provider(self.rpc_url, settings.sapphire_rpc_headers))
         # Unsigned: Sapphire rejects signed queries pinned to a past block.
-        self.reader = Web3(sapphire_http_provider(self.rpc_url, settings.sapphire_rpc_headers))
+        self.w3_unwrapped = Web3(sapphire_http_provider(self.rpc_url, settings.sapphire_rpc_headers))
         self.w3.middleware_onion.add(SignAndSendRawMiddlewareBuilder.build(self.account))
         self.w3 = sapphire.wrap(self.w3, self.account)
         self.w3.eth.default_account = self.account.address

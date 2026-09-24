@@ -15,20 +15,6 @@ SIWE_TOKEN = "0x" + "ee" * 32
 BLOCK = 500
 
 
-def _pool_shares(contract, by_block, latest=None, assets=None):
-    """pools() returns ``by_block[n]`` shares and ``assets[n]`` assets (default:
-    the same) when pinned to block n, else ``latest`` for both."""
-    assets = assets or by_block
-
-    def pools(block_identifier=None):
-        if block_identifier is None:
-            shares = total = latest
-        else:
-            shares, total = by_block[block_identifier], assets[block_identifier]
-        return (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, shares, total, True)
-    contract.functions.pools.return_value.call.side_effect = pools
-
-
 def _make_service(registry=None):
     settings = replace(
         load_settings(),
@@ -52,7 +38,7 @@ def _make_service(registry=None):
         contract = MagicMock()
         w3.eth.contract.return_value = contract
         saph.w3 = w3
-        saph.reader = w3
+        saph.w3_unwrapped = w3
         saph.execute_contract_call = MagicMock(return_value="0x" + "ff" * 32)
         # The earn flows broadcast and wait separately so a receipt timeout
         # still leaves a hash behind for the recovery pass to reconcile.
@@ -1456,102 +1442,6 @@ class TestGetAllBalancesChange:
         assert balances[0]["change_24h_pct"] is None
 
 
-class TestShareDeltaCapture:
-    """A cashflow's share movement is totalShares across its block."""
-
-    async def test_deposit_records_positive_delta_and_rate(self, test_db):
-        service, contract, _, _ = _make_service()
-        _pool_shares(contract, {BLOCK - 1: 1000, BLOCK: 1100}, latest=1000,
-                     assets={BLOCK - 1: 1000, BLOCK: 1105})
-
-        await service.deposit(POOL_ID_HEX, USER_ADDRESS, "105", 5, "0x" + "aa" * 65)
-
-        row = test_db.execute("SELECT * FROM earn_transactions").fetchone()
-        assert row["shares_delta"] == "100"
-        assert row["exchange_rate"] == "1.05"
-        assert row["settled_at"] == 1_000_000 + BLOCK
-
-    async def test_withdraw_records_negative_delta(self, test_db):
-        service, contract, _, _ = _make_service()
-        _pool_shares(contract, {BLOCK - 1: 1000, BLOCK: 600}, latest=1000,
-                     assets={BLOCK - 1: 1000, BLOCK: 580})
-
-        with patch(
-            "src.services.earn.vault_service.sign_transfer",
-            return_value="0x" + "bb" * 65,
-        ):
-            await service.withdraw(POOL_ID_HEX, USER_ADDRESS, "420", 0, USER_WITHDRAW_SIG)
-
-        row = test_db.execute("SELECT * FROM earn_transactions").fetchone()
-        assert row["shares_delta"] == "-400"
-        assert row["exchange_rate"] == "1.05"
-
-    async def test_a_later_mint_is_not_folded_in(self, test_db):
-        # A later read no longer folds the next cashflow in.
-        service, contract, _, _ = _make_service()
-        _pool_shares(contract, {BLOCK - 1: 1000, BLOCK: 1100}, latest=1300,
-                     assets={BLOCK - 1: 1000, BLOCK: 1105})
-
-        await service.deposit(POOL_ID_HEX, USER_ADDRESS, "105", 5, "0x" + "aa" * 65)
-
-        row = test_db.execute("SELECT * FROM earn_transactions").fetchone()
-        assert row["shares_delta"] == "100"
-
-    async def test_a_block_another_deposit_shared_records_no_delta(self, test_db):
-        # A direct deposit of 50 landed beside ours: its shares must not be
-        # booked to this user, so earned stays unavailable instead.
-        service, contract, _, _ = _make_service()
-        _pool_shares(contract, {BLOCK - 1: 1000, BLOCK: 1150}, latest=1000,
-                     assets={BLOCK - 1: 1000, BLOCK: 1155})
-
-        await service.deposit(POOL_ID_HEX, USER_ADDRESS, "105", 5, "0x" + "aa" * 65)
-
-        row = test_db.execute("SELECT * FROM earn_transactions").fetchone()
-        assert row["status"] != "failed"
-        assert row["shares_delta"] is None
-
-    async def test_a_withdraw_sharing_its_block_with_a_deposit_records_no_delta(self, test_db):
-        # Net assets still fall, but not by the withdrawal alone.
-        service, contract, _, _ = _make_service()
-        _pool_shares(contract, {BLOCK - 1: 1000, BLOCK: 650}, latest=1000,
-                     assets={BLOCK - 1: 1000, BLOCK: 630})
-
-        with patch(
-            "src.services.earn.vault_service.sign_transfer",
-            return_value="0x" + "bb" * 65,
-        ):
-            await service.withdraw(POOL_ID_HEX, USER_ADDRESS, "420", 0, USER_WITHDRAW_SIG)
-
-        row = test_db.execute("SELECT * FROM earn_transactions").fetchone()
-        assert row["shares_delta"] is None
-
-    async def test_failed_deposit_records_no_delta(self, test_db):
-        service, contract, saph, _ = _make_service()
-        contract.functions.pools.return_value.call.return_value = (
-            bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1000, 1050, True,
-        )
-        saph.execute_contract_call.side_effect = RuntimeError("reverted")
-
-        await service.deposit(POOL_ID_HEX, USER_ADDRESS, "105", 5, "0x" + "aa" * 65)
-
-        row = test_db.execute("SELECT * FROM earn_transactions").fetchone()
-        assert row["status"] == "failed"
-        assert row["shares_delta"] is None
-
-    async def test_delta_is_null_when_the_block_read_fails(self, test_db):
-        service, contract, _, _ = _make_service()
-        _pool_shares(contract, {BLOCK: 1100}, latest=1000)  # BLOCK - 1 raises
-
-        result = await service.deposit(
-            POOL_ID_HEX, USER_ADDRESS, "105", 5, "0x" + "aa" * 65
-        )
-
-        # The deposit itself still settles; only the earned figure is lost.
-        assert result["status"] == "completed"
-        row = test_db.execute("SELECT * FROM earn_transactions").fetchone()
-        assert row["shares_delta"] is None
-
-
 class TestReceiptUnknown:
     """An unread receipt leaves the row pending for recovery."""
 
@@ -1593,176 +1483,6 @@ class TestReceiptUnknown:
         ).fetchone()
         assert row["status"] == "pending"
         assert row["tx_hash"] == "0x" + "ff" * 32
-
-
-class TestRepairShareLedger:
-    """Rows in a mismatched pool are re-derived from their block."""
-
-    # totalShares: +100 at block 10, +50 at 20, -30 at 30, +50 at 40.
-    HISTORY = {9: 0, 10: 100, 19: 100, 20: 150, 29: 150, 30: 120, 39: 120, 40: 170}
-
-    def _row(self, tx_id, *, block, operation="deposit", status="completed",
-             shares_delta=None, updated_at=111, amount="100"):
-        from src.core.db import db_write, get_db
-        db_write(
-            get_db(),
-            """INSERT INTO earn_transactions
-               (id, operation, pool_id, user_address, token_id, amount,
-                signer_address, nonce, signature, status, created_at, updated_at,
-                tx_hash, shares_delta, error)
-               VALUES (?, ?, ?, ?, '0xtok', ?, '0xsig', 0, '0xsig', ?, 100, ?, ?, ?, ?)""",
-            (tx_id, operation, POOL_ID_HEX, USER_ADDRESS.lower(), amount, status,
-             updated_at, f"0x{tx_id}", shares_delta,
-             "timed out" if status == "failed" else None),
-        )
-        return f"0x{tx_id}", block
-
-    def _service(self, rows, *, chain_total=170, history=None):
-        from web3.exceptions import TransactionNotFound
-        service, contract, saph, _ = _make_service()
-        _pool_shares(contract, history or self.HISTORY)
-        receipts = {tx_hash: block for tx_hash, block in rows}
-
-        def receipt(tx_hash):
-            block = receipts[tx_hash]
-            if block is None:
-                raise TransactionNotFound(tx_hash)
-            if block < 0:
-                return {"status": 0, "blockNumber": -block}
-            return {"status": 1, "blockNumber": block}
-
-        saph.w3.eth.get_transaction_receipt.side_effect = receipt
-        service.list_pools = MagicMock(
-            return_value=[{"pool_id": POOL_ID_HEX, "total_shares": chain_total}]
-        )
-        return service, saph
-
-    def _get(self, test_db, tx_id):
-        return test_db.execute(
-            "SELECT * FROM earn_transactions WHERE id = ?", (tx_id,)
-        ).fetchone()
-
-    async def test_wrong_missing_and_failed_but_landed_rows_are_rederived(self, test_db):
-        from src.services.earn.vault_service import _settled_shares
-        rows = [
-            self._row("d1", block=10, shares_delta="300"),
-            self._row("d2", block=20, shares_delta=None, amount="50"),
-            self._row("w1", block=30, operation="withdraw", status="failed", amount="30"),
-            self._row("d3", block=40, status="failed", amount="50"),
-            self._row("reverted", block=-50, status="failed"),
-            self._row("dropped", block=None, status="failed"),
-        ]
-        service, _ = self._service(rows)
-
-        await service.repair_share_ledger()
-
-        d1 = self._get(test_db, "d1")
-        assert (d1["shares_delta"], d1["updated_at"]) == ("100", 111)
-        assert self._get(test_db, "d2")["shares_delta"] == "50"
-        w1 = self._get(test_db, "w1")
-        assert (w1["status"], w1["error"], w1["shares_delta"]) == ("completed", None, "-30")
-        # Charted when it landed, not when the repair ran.
-        assert w1["updated_at"] == w1["settled_at"] == 1_000_000 + 30
-        assert self._get(test_db, "d3")["status"] == "undeployed"
-        assert self._get(test_db, "reverted")["status"] == "failed"
-        assert self._get(test_db, "dropped")["status"] == "failed"
-        assert _settled_shares(POOL_ID_HEX) == 170
-
-    async def test_rows_in_flight_are_left_for_recovery(self, test_db):
-        rows = [self._row("d1", block=10, status="pending")]
-        service, saph = self._service(rows, chain_total=100)
-
-        await service.repair_share_ledger()
-
-        saph.w3.eth.get_transaction_receipt.assert_not_called()
-        assert self._get(test_db, "d1")["status"] == "pending"
-
-    async def test_a_second_run_changes_nothing(self, test_db):
-        rows = [self._row("d1", block=10, shares_delta="300"),
-                self._row("d2", block=20, shares_delta="50"),
-                self._row("w1", block=30, operation="withdraw", shares_delta="-30"),
-                self._row("d3", block=40, shares_delta="50")]
-        service, saph = self._service(rows)
-        await service.repair_share_ledger()
-        saph.w3.eth.get_transaction_receipt.reset_mock()
-
-        await service.repair_share_ledger()
-
-        saph.w3.eth.get_transaction_receipt.assert_not_called()
-
-    async def test_a_pool_that_reconciles_is_left_alone(self, test_db):
-        rows = [self._row("d1", block=10, shares_delta="170")]
-        service, saph = self._service(rows)
-
-        await service.repair_share_ledger()
-
-        saph.w3.eth.get_transaction_receipt.assert_not_called()
-
-    @pytest.mark.parametrize("status,shares_delta,unavailable", [
-        ("completed", "300", ConnectionError("rpc down")),
-        ("completed", "300", "not-found"),
-        # A wrongly failed row the node has not caught up on yet.
-        ("failed", None, "not-found"),
-    ])
-    async def test_an_unread_receipt_is_retried_on_the_next_pass(
-        self, test_db, status, shares_delta, unavailable
-    ):
-        from web3.exceptions import TransactionNotFound
-        rows = [self._row("d1", block=10, status=status, shares_delta=shares_delta)]
-        service, saph = self._service(rows, chain_total=100)
-        receipt = saph.w3.eth.get_transaction_receipt.side_effect
-        first = TransactionNotFound("0xd1") if unavailable == "not-found" else unavailable
-        saph.w3.eth.get_transaction_receipt.side_effect = [first, receipt("0xd1")]
-
-        await service.repair_share_ledger()
-        assert self._get(test_db, "d1")["shares_delta"] == shares_delta
-
-        await service.repair_share_ledger()
-        assert self._get(test_db, "d1")["shares_delta"] == "100"
-        assert self._get(test_db, "d1")["status"] != "failed"
-
-    async def test_a_mismatch_no_receipt_explains_is_not_rescanned(self, test_db):
-        rows = [self._row("d1", block=10, shares_delta="100")]
-        # The chain holds 50 shares no row accounts for.
-        service, saph = self._service(rows, chain_total=150)
-        await service.repair_share_ledger()
-        saph.w3.eth.get_transaction_receipt.reset_mock()
-
-        await service.repair_share_ledger()
-
-        saph.w3.eth.get_transaction_receipt.assert_not_called()
-
-    @pytest.mark.parametrize("status,shares_delta,repaired", [
-        # It landed, so it settles, but its shares stay unknown.
-        ("failed", None, "undeployed"),
-        # A delta booked before the check is cleared, not trusted.
-        ("completed", "150", "completed"),
-    ])
-    async def test_shares_from_a_block_something_else_moved_are_never_written(
-        self, test_db, status, shares_delta, repaired
-    ):
-        # 150 arrived in block 20, not this deposit's 50 alone.
-        rows = [self._row("d1", block=20, status=status, shares_delta=shares_delta, amount="50")]
-        service, saph = self._service(rows, chain_total=200, history={19: 0, 20: 150})
-
-        await service.repair_share_ledger()
-        saph.w3.eth.get_transaction_receipt.reset_mock()
-        await service.repair_share_ledger()
-
-        d1 = self._get(test_db, "d1")
-        assert (d1["status"], d1["shares_delta"], d1["exchange_rate"]) == (repaired, None, None)
-        # Not rescanned until the pool moves.
-        saph.w3.eth.get_transaction_receipt.assert_not_called()
-
-    async def test_rows_sharing_a_block_are_skipped(self, test_db):
-        rows = [self._row("d1", block=10, shares_delta="1"),
-                self._row("d2", block=10, shares_delta="2")]
-        service, _ = self._service(rows, chain_total=100)
-
-        await service.repair_share_ledger()
-
-        assert self._get(test_db, "d1")["shares_delta"] == "1"
-        assert self._get(test_db, "d2")["shares_delta"] == "2"
 
 
 class TestGetAllBalancesEarned:
@@ -1937,6 +1657,23 @@ class TestDeployIdle:
 
         strategy.deposit_to_earn.assert_awaited_once_with(100_000)
 
+    @pytest.mark.parametrize("status,waits", [
+        ("executing", True), ("pending", True), ("failed", False),
+    ])
+    async def test_waits_for_unresolved_rows_in_this_pool(self, test_db, status, waits):
+        from src.core.db import db_write
+        service, strategy = self._service(idle=100_000)
+        db_write(
+            test_db,
+            """INSERT INTO earn_transactions
+               (id, operation, pool_id, user_address, token_id, amount,
+                signer_address, nonce, signature, status, created_at, updated_at)
+               VALUES ('w1', 'withdraw', ?, 'user', 'token', '100', 'signer', 0, '', ?, 1, 2)""",
+            ("0x" + POOL_ID_HEX[2:].upper(), status),
+        )
+        assert await service.deploy_idle(POOL_ID_HEX) == (0 if waits else 100_000)
+        assert strategy.deposit_to_earn.await_count == (0 if waits else 1)
+
     async def test_a_reverted_withdraw_found_by_recovery_is_redeployed(self, test_db):
         """Timeout, then recovery reads the revert and fails the row; the
         reclaim it left idle goes back to the strategy on the next deploy,
@@ -1954,8 +1691,11 @@ class TestDeployIdle:
                        'pending', 0, 0, '0xw1')""",
             (POOL_ID_HEX, USDC_TOKEN_ID, POOL_ADDRESS),
         )
-        service.sapphire.wait_for_receipt = MagicMock(
-            side_effect=[TimeoutError("timed out"), {"status": 0, "blockNumber": 7}]
+        service.sapphire.w3.eth.get_transaction_receipt = MagicMock(
+            side_effect=[
+                TimeoutError("timed out"),
+                {"status": 0, "blockNumber": 7, "to": service.contract_address},
+            ]
         )
 
         with patch("src.services.earn.worker.get_vault_service", return_value=service):

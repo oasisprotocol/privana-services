@@ -166,7 +166,7 @@ def test_the_reader_sends_historical_calls_unsigned():
         client = sapphire_module.SapphireClient()
 
     call = {"to": "0x" + "33" * 20, "data": "0x1234"}
-    client.reader.eth.call(call, 100)
+    client.w3_unwrapped.eth.call(call, 100)
 
     method, params = next(c for p in providers for c in p.calls if c[0] == "eth_call")
     assert method == "eth_call"

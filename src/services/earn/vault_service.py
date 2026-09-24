@@ -2,13 +2,12 @@ import asyncio
 import logging
 import time
 import uuid
-from collections import Counter
 from decimal import Decimal
 from functools import partial
 from typing import Optional
 
 from web3 import Web3
-from web3.exceptions import ContractLogicError, TransactionNotFound, Web3RPCError
+from web3.exceptions import ContractLogicError, Web3RPCError
 
 from src.clients.accounting import get_accounting_client
 from src.clients.sapphire import get_pool_admin_sapphire_client
@@ -86,19 +85,6 @@ def _exchange_rate(total_assets: int, total_shares: int) -> str:
     return str(Decimal(total_assets) / Decimal(total_shares))
 
 
-def _settled_shares(pool_id_hex: str) -> Optional[int]:
-    """Sum of a pool's settled share movements, or None if one is missing."""
-    total = 0
-    for row in get_db().execute(
-        "SELECT shares_delta FROM earn_transactions WHERE LOWER(pool_id) = ? AND status IN (?, ?)",
-        (pool_id_hex.lower(), EARN_STATUS_COMPLETED, EARN_STATUS_UNDEPLOYED),
-    ):
-        if row["shares_delta"] is None:
-            return None
-        total += int(row["shares_delta"])
-    return total
-
-
 class VaultService:
     def __init__(self, registry: Optional[StrategyRegistry] = None) -> None:
         self.settings = load_settings()
@@ -115,11 +101,10 @@ class VaultService:
             address=self.contract_address,
             abi=EARN_MANAGER_ABI,
         )
-        self._history = self.sapphire.reader.eth.contract(
+        self._history = self.sapphire.w3_unwrapped.eth.contract(
             address=self.contract_address,
             abi=EARN_MANAGER_ABI,
         )
-        self._ledger_scanned: dict[str, tuple[Optional[int], int]] = {}
 
     async def _route_to_strategy(self, pool_id_hex: str, amount: int) -> None:
         """After a successful EarnManager.deposit, push the same amount into
@@ -461,7 +446,7 @@ class VaultService:
 
     async def _submit_and_settle(
         self, tx_id: str, *, function_name: str, args: list
-    ) -> tuple[str, int]:
+    ) -> str:
         """Broadcast, record the hash, then wait for the receipt.
 
         Split the way the swap pipeline splits it: a receipt wait that times
@@ -483,7 +468,7 @@ class VaultService:
             raise ReceiptUnknown(tx_hash) from exc
         if receipt["status"] != 1:
             raise RuntimeError(f"Transaction reverted: {tx_hash}")
-        return tx_hash, receipt["blockNumber"]
+        return tx_hash
 
     def _schedule(
         self,
@@ -666,7 +651,7 @@ class VaultService:
 
             progress.update(progress.RECORDING)
             try:
-                tx_hash, block = await self._submit_and_settle(
+                tx_hash = await self._submit_and_settle(
                     tx_id,
                     function_name="deposit",
                     args=[
@@ -707,7 +692,6 @@ class VaultService:
             self._update_transaction(
                 tx_id, status=EARN_STATUS_UNDEPLOYED, tx_hash=tx_hash
             )
-            await self._record_share_delta(tx_id, pool_id, block, EARN_OP_DEPOSIT, amount)
 
             deploy_error = None
             try:
@@ -881,7 +865,7 @@ class VaultService:
 
             progress.update(progress.PAYING_OUT)
             try:
-                tx_hash, block = await self._submit_and_settle(
+                tx_hash = await self._submit_and_settle(
                     tx_id,
                     function_name="withdraw",
                     args=[
@@ -927,8 +911,6 @@ class VaultService:
                     "status": "failed",
                     "error": error,
                 }
-
-            await self._record_share_delta(tx_id, pool_id, block, EARN_OP_WITHDRAW, amount)
 
         self._update_transaction(tx_id, status=EARN_STATUS_COMPLETED, tx_hash=tx_hash)
 
@@ -981,6 +963,15 @@ class VaultService:
             return 0
 
         async with self._pools_tx_lock:
+            # A pending withdrawal still needs its reclaimed funds after the
+            # original call releases the lock.
+            if get_db().execute(
+                "SELECT 1 FROM earn_transactions WHERE LOWER(pool_id) = ? "
+                "AND status IN (?, ?) LIMIT 1",
+                (pool_id_hex.lower(), EARN_STATUS_EXECUTING, EARN_STATUS_PENDING),
+            ).fetchone():
+                logger.info("Idle deploy pool=%s: an earn operation is unresolved; waiting", pool_id_hex)
+                return 0
             # A bridge still listed as pending may or may not have landed, so
             # the balances below cannot be trusted until it clears. The next
             # sweep sees the settled picture.
@@ -1290,142 +1281,6 @@ class VaultService:
             operation, tx_id, signer_address, user_address, token_id, amount, nonce,
         )
         return tx_id
-
-    def shares_moved_in_block(
-        self, pool_id: bytes, block: int, operation: str, amount: str
-    ) -> tuple[Optional[int], int]:
-        """The pool's totalShares change across one block, and that block's time.
-
-        Per-user shares are confidential, so this is the cashflow's movement
-        only if nothing else moved the pool in that block. A direct deposit
-        beside it also moves totalAssets, so unless the block moved assets by
-        exactly this cashflow's amount the change is None.
-        """
-        def totals(at: int) -> tuple[int, int]:
-            pool = self._read_with_retry(
-                partial(self._history.functions.pools(pool_id).call, block_identifier=at),
-                "pools",
-            )
-            return int(pool[2]), int(pool[3])
-
-        (shares, assets), (shares_before, assets_before) = totals(block), totals(block - 1)
-        expected = int(amount) if operation == EARN_OP_DEPOSIT else -int(amount)
-        moved = shares - shares_before
-        if assets - assets_before != expected:
-            logger.warning(
-                "earn shares in block %d not attributable: moved %d assets, not %d",
-                block, assets - assets_before, expected,
-            )
-            moved = None
-        return moved, int(self.sapphire.w3.eth.get_block(block)["timestamp"])
-
-    @staticmethod
-    def _settlement(amount: str, delta: Optional[int], settled_at: int) -> dict:
-        # What this cashflow paid, not the pool's later ratio.
-        rate = str(Decimal(int(amount)) / Decimal(abs(delta))) if delta else None
-        shares = None if delta is None else str(delta)
-        return {"shares_delta": shares, "exchange_rate": rate, "settled_at": settled_at}
-
-    async def _record_share_delta(
-        self, tx_id: str, pool_id: bytes, block: int, operation: str, amount: str
-    ) -> None:
-        """Persist this cashflow's signed share movement and settlement rate.
-
-        A failed read leaves it NULL for ``repair_share_ledger``. A shared
-        block leaves it NULL for good, so earned is unavailable, not wrong.
-        """
-        try:
-            delta, settled_at = await asyncio.to_thread(
-                self.shares_moved_in_block, pool_id, block, operation, amount
-            )
-        except Exception:
-            logger.exception("Share movement read failed for %s", tx_id)
-            return
-        self._update_transaction(tx_id, **self._settlement(amount, delta, settled_at))
-
-    async def repair_share_ledger(self) -> None:
-        """Re-derive share movements in pools that disagree with totalShares.
-
-        One wrong row blanks earned for the whole pool. Rows with a hash are
-        re-read from their block, including failed rows that landed. A pool is
-        rescanned only once its figures move or a scan missed a receipt.
-        """
-        for pool in await asyncio.to_thread(self.list_pools):
-            pool_id_hex = pool["pool_id"]
-            chain = int(pool["total_shares"])
-            figures = (_settled_shares(pool_id_hex), chain)
-            if figures[0] == chain or self._ledger_scanned.get(pool_id_hex) == figures:
-                continue
-            try:
-                complete = await asyncio.to_thread(self._repair_pool_ledger, pool_id_hex)
-            except Exception:
-                logger.exception("earn ledger repair failed pool=%s", pool_id_hex)
-                continue
-            accounted = _settled_shares(pool_id_hex)
-            logger.warning(
-                "earn ledger repair done pool=%s accounted=%s chain=%d complete=%s",
-                pool_id_hex, accounted, chain, complete,
-            )
-            if complete:
-                self._ledger_scanned[pool_id_hex] = (accounted, chain)
-
-    def _repair_pool_ledger(self, pool_id_hex: str) -> bool:
-        """Returns whether every row's receipt could be read."""
-        rows = get_db().execute(
-            """SELECT id, operation, amount, status, tx_hash, shares_delta, updated_at
-               FROM earn_transactions
-               WHERE LOWER(pool_id) = ? AND tx_hash IS NOT NULL AND status IN (?, ?, ?)""",
-            (pool_id_hex.lower(), EARN_STATUS_COMPLETED, EARN_STATUS_UNDEPLOYED, EARN_STATUS_FAILED),
-        ).fetchall()
-        landed, complete = [], True
-        for row in rows:
-            try:
-                receipt = self.sapphire.w3.eth.get_transaction_receipt(row["tx_hash"])
-            except TransactionNotFound:
-                # Not proof it never landed, so rescan later.
-                logger.warning("earn ledger repair: no receipt for %s", row["id"])
-                complete = False
-                continue
-            if receipt["status"] == 1:
-                landed.append((dict(row), receipt["blockNumber"]))
-
-        blocks = Counter(block for _, block in landed)
-        pool_id = bytes.fromhex(pool_id_hex.removeprefix("0x"))
-        for row, block in landed:
-            if blocks[block] > 1:
-                logger.warning(
-                    "earn ledger repair skipped %s: block %d holds another cashflow",
-                    row["id"], block,
-                )
-                continue
-            delta, settled_at = self.shares_moved_in_block(
-                pool_id, block, row["operation"], row["amount"]
-            )
-            fields = self._settlement(row["amount"], delta, settled_at)
-            if row["status"] != EARN_STATUS_FAILED and row["shares_delta"] == fields["shares_delta"]:
-                continue
-            if row["status"] == EARN_STATUS_FAILED:
-                # Dated when it landed. The idle deployer completes a deposit.
-                status = (
-                    EARN_STATUS_UNDEPLOYED if row["operation"] == EARN_OP_DEPOSIT
-                    else EARN_STATUS_COMPLETED
-                )
-                fields.update(status=status, error=None, updated_at=settled_at)
-                if row["operation"] == EARN_OP_WITHDRAW:
-                    logger.warning(
-                        "earn withdraw %s landed after its reclaim was rolled back; "
-                        "check the pool's backing",
-                        row["id"],
-                    )
-            else:
-                fields["updated_at"] = row["updated_at"]
-            self._update_transaction(row["id"], **fields)
-            logger.warning(
-                "earn ledger repaired %s pool=%s shares_delta %s -> %s status %s -> %s",
-                row["id"], pool_id_hex, row["shares_delta"], delta,
-                row["status"], fields.get("status", row["status"]),
-            )
-        return complete
 
     async def _complete_undeployed_if_clear(self, pool_id_hex: str) -> None:
         """A routed deposit sweeps whatever was left raw on the earn account, so

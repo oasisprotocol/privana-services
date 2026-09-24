@@ -28,10 +28,14 @@ async def api_client():
     import src.clients.accounting as acct_mod
     import src.clients.lifi as lifi_mod
     import src.clients.sapphire as saph_mod
+    import src.services.earn.cache as cache_mod
 
     acct_mod._client_instance = None
     lifi_mod._client_instance = None
     saph_mod._client_instance = None
+    cache_mod._cache_instance = None
+
+    await cache_mod.get_pool_list_cache().refresh_once()
 
     from src.main import app
     transport = httpx.ASGITransport(app=app)
@@ -41,6 +45,7 @@ async def api_client():
     acct_mod._client_instance = None
     lifi_mod._client_instance = None
     saph_mod._client_instance = None
+    cache_mod._cache_instance = None
 
 
 @pytest.fixture

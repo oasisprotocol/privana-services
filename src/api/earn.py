@@ -18,11 +18,11 @@ from src.models.earn import (
     DepositResponse,
     PoolDetailResponse,
     PoolListResponse,
-    PoolResponse,
     WithdrawRequest,
     WithdrawResponse,
 )
 from src.models.history import EarnHistoryPoint, EarnHistoryResponse, usd_string
+from src.services.earn.cache import get_pool_list_cache
 from src.services.earn.registry import get_strategy_registry
 from src.services.earn.vault_service import get_vault_service
 from src.services.portfolio.history_service import MAX_HISTORY_DAYS, earn_history
@@ -87,36 +87,10 @@ async def _private_read_token(request: Request) -> str:
 
 @router.get("/pools", response_model=PoolListResponse)
 async def list_pools() -> PoolListResponse:
-    try:
-        service = get_vault_service()
-        pools = await asyncio.to_thread(service.list_pools)
-        # AUM and APY reads are independent per pool, so fan them out together
-        # to keep tail latency at max(slowest read) instead of sum-of-reads.
-        results = await asyncio.gather(
-            *[
-                asyncio.gather(
-                    service.effective_total_assets(p["pool_id"], p["total_assets"]),
-                    service.strategy_apy_bps_safe(p["pool_id"]),
-                )
-                for p in pools
-            ]
-        )
-        responses = [
-            PoolResponse(
-                pool_id=p["pool_id"],
-                token_id=p["token_id"],
-                strategy=get_strategy_registry().get(p["pool_id"]).name,
-                total_assets=str(effective),
-                apy_bps=apy_bps,
-                status="active" if p["active"] else "paused",
-                pool_address=p["pool_address"],
-            )
-            for p, (effective, apy_bps) in zip(pools, results)
-        ]
-        return PoolListResponse(pools=responses)
-    except Exception as exc:
-        logger.exception("Failed to list earn pools")
-        raise HTTPException(status_code=500, detail="Failed to list pools") from exc
+    snapshot = get_pool_list_cache().get()
+    if snapshot is None:
+        raise HTTPException(status_code=503, detail="Earn pools are loading")
+    return snapshot
 
 
 @router.get("/pools/{pool_id}", response_model=PoolDetailResponse)

@@ -707,7 +707,7 @@ class VaultService:
             self._update_transaction(
                 tx_id, status=EARN_STATUS_UNDEPLOYED, tx_hash=tx_hash
             )
-            await self._record_share_delta(tx_id, pool_id, block, amount)
+            await self._record_share_delta(tx_id, pool_id, block, EARN_OP_DEPOSIT, amount)
 
             deploy_error = None
             try:
@@ -928,7 +928,7 @@ class VaultService:
                     "error": error,
                 }
 
-            await self._record_share_delta(tx_id, pool_id, block, amount)
+            await self._record_share_delta(tx_id, pool_id, block, EARN_OP_WITHDRAW, amount)
 
         self._update_transaction(tx_id, status=EARN_STATUS_COMPLETED, tx_hash=tx_hash)
 
@@ -1291,39 +1291,52 @@ class VaultService:
         )
         return tx_id
 
-    def shares_moved_in_block(self, pool_id: bytes, block: int) -> tuple[int, int]:
+    def shares_moved_in_block(
+        self, pool_id: bytes, block: int, operation: str, amount: str
+    ) -> tuple[Optional[int], int]:
         """The pool's totalShares change across one block, and that block's time.
 
-        Per-user shares are confidential, but the worker submits one cashflow
-        at a time, so this is that cashflow's movement. A third-party deposit
-        in the same block would be folded in; the pool-wide check catches it.
+        Per-user shares are confidential, so this is the cashflow's movement
+        only if nothing else moved the pool in that block. A direct deposit
+        beside it also moves totalAssets, so unless the block moved assets by
+        exactly this cashflow's amount the change is None.
         """
-        def total_shares(at: int) -> int:
+        def totals(at: int) -> tuple[int, int]:
             pool = self._read_with_retry(
                 partial(self._history.functions.pools(pool_id).call, block_identifier=at),
                 "pools",
             )
-            return int(pool[2])
+            return int(pool[2]), int(pool[3])
 
-        moved = total_shares(block) - total_shares(block - 1)
+        (shares, assets), (shares_before, assets_before) = totals(block), totals(block - 1)
+        expected = int(amount) if operation == EARN_OP_DEPOSIT else -int(amount)
+        moved = shares - shares_before
+        if assets - assets_before != expected:
+            logger.warning(
+                "earn shares in block %d not attributable: moved %d assets, not %d",
+                block, assets - assets_before, expected,
+            )
+            moved = None
         return moved, int(self.sapphire.w3.eth.get_block(block)["timestamp"])
 
     @staticmethod
-    def _settlement(amount: str, delta: int, settled_at: int) -> dict:
+    def _settlement(amount: str, delta: Optional[int], settled_at: int) -> dict:
         # What this cashflow paid, not the pool's later ratio.
         rate = str(Decimal(int(amount)) / Decimal(abs(delta))) if delta else None
-        return {"shares_delta": str(delta), "exchange_rate": rate, "settled_at": settled_at}
+        shares = None if delta is None else str(delta)
+        return {"shares_delta": shares, "exchange_rate": rate, "settled_at": settled_at}
 
     async def _record_share_delta(
-        self, tx_id: str, pool_id: bytes, block: int, amount: str
+        self, tx_id: str, pool_id: bytes, block: int, operation: str, amount: str
     ) -> None:
         """Persist this cashflow's signed share movement and settlement rate.
 
-        A failed read leaves it NULL for ``repair_share_ledger``.
+        A failed read leaves it NULL for ``repair_share_ledger``. A shared
+        block leaves it NULL for good, so earned is unavailable, not wrong.
         """
         try:
             delta, settled_at = await asyncio.to_thread(
-                self.shares_moved_in_block, pool_id, block
+                self.shares_moved_in_block, pool_id, block, operation, amount
             )
         except Exception:
             logger.exception("Share movement read failed for %s", tx_id)
@@ -1385,10 +1398,12 @@ class VaultService:
                     row["id"], block,
                 )
                 continue
-            delta, settled_at = self.shares_moved_in_block(pool_id, block)
-            if row["status"] != EARN_STATUS_FAILED and row["shares_delta"] == str(delta):
-                continue
+            delta, settled_at = self.shares_moved_in_block(
+                pool_id, block, row["operation"], row["amount"]
+            )
             fields = self._settlement(row["amount"], delta, settled_at)
+            if row["status"] != EARN_STATUS_FAILED and row["shares_delta"] == fields["shares_delta"]:
+                continue
             if row["status"] == EARN_STATUS_FAILED:
                 # Dated when it landed. The idle deployer completes a deposit.
                 status = (
@@ -1406,7 +1421,7 @@ class VaultService:
                 fields["updated_at"] = row["updated_at"]
             self._update_transaction(row["id"], **fields)
             logger.warning(
-                "earn ledger repaired %s pool=%s shares_delta %s -> %d status %s -> %s",
+                "earn ledger repaired %s pool=%s shares_delta %s -> %s status %s -> %s",
                 row["id"], pool_id_hex, row["shares_delta"], delta,
                 row["status"], fields.get("status", row["status"]),
             )

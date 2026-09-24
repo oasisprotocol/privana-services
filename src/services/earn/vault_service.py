@@ -59,8 +59,10 @@ SYNC_MAX_DROP_BPS = 100
 # Sapphire authenticates a read by wrapping it in a signed query whose leash
 # pins a recent block. The client reads the head and then the block before it
 # as two calls, so when the chain moves between them the node rejects the
-# leash. It is transient by nature: the next attempt builds a fresh one.
-_STALE_LEASH = "base block not found"
+# leash. It is transient by nature: the next attempt builds a fresh one. The
+# query also carries the caller's account nonce, so a transaction from the same
+# account landing mid-read leaves it stale in the same way.
+_STALE_QUERY = ("base block not found", "stale nonce")
 READ_RETRY_ATTEMPTS = 5
 READ_RETRY_BACKOFF_SEC = 0.5
 
@@ -218,7 +220,8 @@ class VaultService:
             try:
                 return call()
             except Web3RPCError as exc:
-                if _STALE_LEASH not in str(exc) or attempt == READ_RETRY_ATTEMPTS:
+                stale = any(marker in str(exc) for marker in _STALE_QUERY)
+                if not stale or attempt == READ_RETRY_ATTEMPTS:
                     raise
                 logger.warning(
                     "%s hit a stale signed-query leash (attempt %d/%d); retrying",

@@ -1839,6 +1839,20 @@ class TestStaleLeashRetry:
         with patch("src.services.earn.vault_service.time.sleep"):
             assert service.get_seeded_assets(b"\x11" * 32) == 100_000
 
+    def test_a_stale_query_nonce_is_retried(self, test_db):
+        from web3.exceptions import Web3RPCError
+
+        service, contract, _, _ = _make_service()
+        contract.functions.getUserShares.return_value.call.side_effect = [
+            Web3RPCError(
+                "{'code': -32000, 'message': 'invalid signed simulate call query: stale nonce'}"
+            ),
+            7,
+        ]
+
+        with patch("src.services.earn.vault_service.time.sleep"):
+            assert service.get_user_shares_via_token(b"\x11" * 32, "0xab") == 7
+
     def test_it_gives_up_rather_than_retrying_forever(self, test_db):
         from web3.exceptions import Web3RPCError
 

@@ -139,6 +139,8 @@ MIGRATIONS = [
     # overwriting the consent would leave a crashed row unreconstructable.
     "ALTER TABLE earn_transactions ADD COLUMN input_nonce INTEGER;",
     "ALTER TABLE earn_transactions ADD COLUMN input_signature TEXT;",
+    # Requests once stored the pool id as sent, with or without 0x.
+    "UPDATE earn_transactions SET pool_id = '0x' || pool_id WHERE pool_id NOT LIKE '0x%';",
 
 ]
 

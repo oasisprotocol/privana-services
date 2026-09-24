@@ -501,6 +501,8 @@ class VaultService:
         validate_amount(amount, "amount")
         validate_signature(signature, "signature")
         pool_id = bytes.fromhex(pool_id_hex.removeprefix("0x"))
+        # Stored in the form list_pools returns, which every pool query keys on.
+        pool_id_hex = "0x" + pool_id.hex()
 
         # An HTTP retry returns the original operation rather than queueing a
         # second one, which is also how a caller learns the outcome of a
@@ -966,6 +968,14 @@ class VaultService:
             return 0
 
         async with self._pools_tx_lock:
+            # An unresolved withdraw's reclaim is idle here, waiting for its
+            # payout, so none of it can be deployed until the row settles.
+            if get_db().execute(
+                "SELECT 1 FROM earn_transactions WHERE LOWER(pool_id) = ? AND status IN (?, ?)",
+                (pool_id_hex.lower(), EARN_STATUS_EXECUTING, EARN_STATUS_PENDING),
+            ).fetchone():
+                logger.info("Idle deploy pool=%s: an earn operation is unresolved; waiting", pool_id_hex)
+                return 0
             # A bridge still listed as pending may or may not have landed, so
             # the balances below cannot be trusted until it clears. The next
             # sweep sees the settled picture.

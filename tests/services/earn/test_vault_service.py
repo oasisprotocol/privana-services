@@ -1843,6 +1843,48 @@ class TestDeployIdle:
 
         strategy.deposit_to_earn.assert_awaited_once_with(100_000)
 
+    @pytest.mark.parametrize("status,pool_id,waits", [
+        # A pending withdraw's reclaim is idle, waiting for its payout.
+        ("pending", POOL_ID_HEX, True),
+        ("executing", POOL_ID_HEX.upper().replace("0X", "0x"), True),
+        ("scheduled", POOL_ID_HEX, False),
+        ("pending", "0x" + "cd" * 32, False),
+    ])
+    async def test_waits_while_an_earn_operation_is_unresolved(self, test_db, status, pool_id, waits):
+        from src.core.db import db_write, get_db
+        service, strategy = self._service(idle=100_000)
+        service.sync_total_assets = AsyncMock(return_value=1000)
+        db_write(
+            get_db(),
+            """INSERT INTO earn_transactions
+               (id, operation, pool_id, user_address, token_id, amount,
+                signer_address, nonce, signature, status, created_at, updated_at)
+               VALUES ('w1', 'withdraw', ?, '0xuser', ?, '100000', ?, 1, '0xsig', ?, 0, 0)""",
+            (pool_id, USDC_TOKEN_ID, POOL_ADDRESS, status),
+        )
+
+        moved = await service.deploy_idle(POOL_ID_HEX)
+
+        assert moved == (0 if waits else 100_000)
+        assert strategy.deposit_to_earn.await_count == (0 if waits else 1)
+        assert service.sync_total_assets.await_count == (0 if waits else 1)
+
+    async def test_waits_on_a_row_stored_without_the_0x_prefix(self, test_db):
+        from src.core.db import _run_migrations, db_write, get_db
+        service, strategy = self._service(idle=100_000)
+        db_write(
+            get_db(),
+            """INSERT INTO earn_transactions
+               (id, operation, pool_id, user_address, token_id, amount,
+                signer_address, nonce, signature, status, created_at, updated_at)
+               VALUES ('w1', 'withdraw', ?, '0xuser', ?, '100000', ?, 1, '0xsig', 'pending', 0, 0)""",
+            (POOL_ID_HEX.removeprefix("0x"), USDC_TOKEN_ID, POOL_ADDRESS),
+        )
+        _run_migrations(get_db())
+
+        assert await service.deploy_idle(POOL_ID_HEX) == 0
+        strategy.deposit_to_earn.assert_not_awaited()
+
     async def test_a_reverted_withdraw_found_by_recovery_is_redeployed(self, test_db):
         """Timeout, then recovery reads the revert and fails the row; the
         reclaim it left idle goes back to the strategy on the next deploy,
@@ -2235,7 +2277,7 @@ class TestScheduling:
         key = "0x" + "33" * 32
         user = Account.from_key(key).address
         result = service.schedule_deposit(
-            pool_id_hex=POOL_ID_HEX, user_address=user,
+            pool_id_hex=POOL_ID_HEX.removeprefix("0x"), user_address=user,
             amount="1000", nonce=3, signature=_transfer_sig(key, 1000, 3),
         )
 
@@ -2243,6 +2285,7 @@ class TestScheduling:
         row = test_db.execute(
             "SELECT * FROM earn_transactions WHERE id = ?", (result["id"],)
         ).fetchone()
+        assert row["pool_id"] == POOL_ID_HEX
         assert row["operation"] == "deposit"
         assert row["status"] == "scheduled"
         assert row["amount"] == "1000"

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import uuid
 from typing import Optional
 
 from src.core.db import get_db
@@ -29,7 +30,8 @@ _SWAP_SELECT = """
         to_amount_actual,
         NULL AS pool_id,
         NULL AS token_id,
-        NULL AS amount
+        NULL AS amount,
+        input_nonce AS nonce
     FROM swaps
     WHERE user_address = ?"""
 
@@ -50,7 +52,8 @@ _EARN_SELECT = """
         NULL AS to_amount_actual,
         pool_id,
         token_id,
-        amount
+        amount,
+        CAST(input_nonce AS TEXT) AS nonce
     FROM earn_transactions
     WHERE user_address = ?"""
 
@@ -90,8 +93,13 @@ def encode_cursor(created_at: int, operation_id: str) -> str:
 
 def decode_cursor(cursor: str) -> tuple[int, str]:
     created_at, sep, operation_id = cursor.partition(":")
-    if not sep or not operation_id or not created_at.isdigit():
+    if not sep or not created_at.isdigit():
         raise ValueError("Invalid cursor")
+    try:
+        # Operation ids are uuid4 on both tables; anything else is not a cursor we issued.
+        uuid.UUID(operation_id)
+    except ValueError as exc:
+        raise ValueError("Invalid cursor") from exc
     return int(created_at), operation_id
 
 

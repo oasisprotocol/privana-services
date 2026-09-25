@@ -25,6 +25,7 @@ from src.core.validation import (
     validate_amount,
     validate_signature,
 )
+from src.services.earn import progress
 from src.services.earn.change import change_24h
 from src.services.earn.earned import (
     STATUS_LEDGER_INCOMPLETE,
@@ -634,6 +635,7 @@ class VaultService:
 
             shares_before = await self._total_shares_safe(pool_id)
 
+            progress.update(progress.RECORDING)
             try:
                 tx_hash = await self._submit_and_settle(
                     tx_id,
@@ -832,6 +834,7 @@ class VaultService:
 
             shares_before = await self._total_shares_safe(pool_id)
 
+            progress.update(progress.PAYING_OUT)
             try:
                 tx_hash = await self._submit_and_settle(
                     tx_id,
@@ -1316,10 +1319,18 @@ class VaultService:
 
     def _update_transaction(self, tx_id: str, **fields) -> None:
         db = get_db()
+        old_status = None
+        if "status" in fields:
+            row = db.execute(
+                "SELECT status FROM earn_transactions WHERE id = ?", (tx_id,)
+            ).fetchone()
+            old_status = row["status"] if row else None
         fields["updated_at"] = int(time.time())
         set_clause = ", ".join(f"{k} = ?" for k in fields)
         values = list(fields.values()) + [tx_id]
         db_write(db, f"UPDATE earn_transactions SET {set_clause} WHERE id = ?", tuple(values))
+        if "status" in fields and fields["status"] != old_status:
+            progress.record_status(tx_id, old_status, fields["status"])
 
     async def get_all_balances(
         self, token_hex: str, user_address: Optional[str] = None

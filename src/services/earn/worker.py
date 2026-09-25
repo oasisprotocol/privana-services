@@ -7,6 +7,8 @@ from typing import Optional
 
 from src.core.db import db_write, get_db
 from src.core.validation import sanitize_error
+from src.services.earn import progress
+from src.services.earn.progress import tracking
 from src.services.earn.vault_service import (
     EARN_OP_DEPOSIT,
     EARN_STATUS_COMPLETED,
@@ -145,6 +147,7 @@ class EarnWorker:
                 (EARN_STATUS_EXECUTING, now, now, row["id"], EARN_STATUS_SCHEDULED),
             ).rowcount
             if changed:
+                progress.record_status(row["id"], EARN_STATUS_SCHEDULED, EARN_STATUS_EXECUTING)
                 claimed.append(dict(row))
                 seen.add(row["user_address"].lower())
         return claimed
@@ -161,14 +164,15 @@ class EarnWorker:
             service = get_vault_service()
             call = service.deposit if row["operation"] == EARN_OP_DEPOSIT else service.withdraw
             try:
-                await call(
-                    pool_id_hex=row["pool_id"],
-                    user_address=row["user_address"],
-                    amount=row["amount"],
-                    nonce=int(row["nonce"]),
-                    signature=row["signature"],
-                    scheduled_id=row["id"],
-                )
+                with tracking(row["id"]):
+                    await call(
+                        pool_id_hex=row["pool_id"],
+                        user_address=row["user_address"],
+                        amount=row["amount"],
+                        nonce=int(row["nonce"]),
+                        signature=row["signature"],
+                        scheduled_id=row["id"],
+                    )
             except Exception as exc:
                 # deposit/withdraw settle their own row once they have an
                 # on-chain outcome, so only claim the ones that never got that
@@ -185,6 +189,8 @@ class EarnWorker:
             "WHERE id = ? AND status = ?",
             (EARN_STATUS_FAILED, error, int(time.time()), tx_id, EARN_STATUS_EXECUTING),
         ).rowcount
+        if changed:
+            progress.record_status(tx_id, EARN_STATUS_EXECUTING, EARN_STATUS_FAILED)
         if not changed:
             logger.info(
                 "Earn %s already settled before the error was recorded; left as is", tx_id,

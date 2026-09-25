@@ -24,6 +24,7 @@ from src.clients.privana import (
     get_privana_client,
 )
 from src.core.config import load_settings
+from src.services.earn import progress
 from src.services.earn.strategies.base import ApyPoint, BaseStrategy
 from src.services.earn.strategies.defillama_history import defillama_apy_history
 
@@ -168,6 +169,7 @@ class AaveStrategy(BaseStrategy):
                 amount, on_hand,
             )
         else:
+            progress.update(progress.BRIDGING)
             await self._bridge_to_base(amount - on_hand)
             on_hand = await asyncio.to_thread(
                 self._client.get_erc20_balance, self._asset_address,
@@ -175,6 +177,7 @@ class AaveStrategy(BaseStrategy):
         # Everything on the account is pool money, so supply all of it: a bridge
         # a previous deposit gave up on would otherwise sit here earning nothing.
         deploy = max(amount, on_hand)
+        progress.update(progress.DEPLOYING)
 
         allowance = self._client.get_allowance(self._asset_address)
         if allowance < deploy:
@@ -212,6 +215,7 @@ class AaveStrategy(BaseStrategy):
         if amount <= 0:
             raise ValueError(f"withdraw_from_earn requires a positive amount, got {amount}")
 
+        progress.update(progress.RECLAIMING)
         pre_balance = await self._read_pool_balance()
         # Anything already sitting raw on the account is pool money that was
         # never supplied; spend it before touching the position.
@@ -259,6 +263,7 @@ class AaveStrategy(BaseStrategy):
             "get_deposit_address", _fetch_deposit_address
         )
 
+        progress.update(progress.RETURNING)
         transfer_tx = self._client.transfer_erc20(
             self._asset_address,
             deposit.deposit_address,
@@ -431,6 +436,7 @@ class AaveStrategy(BaseStrategy):
                 )
             )
         except Exception as exc:
+            progress.update_finality(exc)
             logger.warning(
                 "AaveStrategy.withdraw_from_earn: check_deposit not accepted yet "
                 "(%s); will retry",

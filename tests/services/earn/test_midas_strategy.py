@@ -935,3 +935,42 @@ async def test_min_deploy_amount_never_rounds_to_below_the_floor(strategy, midas
     midas_client.get_issuance_min_amount.return_value = 1_000_000_000_001
 
     assert await strategy.min_deploy_amount() == 2
+
+
+@pytest.mark.asyncio
+async def test_withdraw_reports_its_stages_in_order(strategy, midas_client, privana) -> None:
+    from privana.client.errors import NetworkError
+
+    midas_client.get_erc20_balance.side_effect = [0, 1_000_000]
+    privana.get_balance = AsyncMock(
+        side_effect=[
+            _Balance(user_address=POOL_ADDRESS, token_id=TOKEN_ID, balance=0),
+            _Balance(user_address=POOL_ADDRESS, token_id=TOKEN_ID, balance=0),
+            _Balance(user_address=POOL_ADDRESS, token_id=TOKEN_ID, balance=1_000_000),
+        ]
+    )
+    privana.check_deposit = AsyncMock(
+        side_effect=[
+            NetworkError("400 Bad Request: Insufficient finality: 9/32 confirmations"),
+            _DepositCheckResponse(status="accepted", deposit_id="dep-1"),
+        ]
+    )
+    with patch("src.services.earn.strategies.midas.progress") as progress:
+        await strategy.withdraw_from_earn(1_000_000)
+
+    calls = [c.args[0] for c in progress.update.call_args_list]
+    assert calls == [progress.RECLAIMING, progress.RETURNING]
+    progress.update_finality.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_deposit_reports_bridging_then_deploying(strategy, midas_client, privana) -> None:
+    midas_client.get_erc20_balance.side_effect = [0, 0, 1_000_000, 1_000_000]
+
+    with patch("src.services.earn.strategies.midas.progress") as progress:
+        await strategy.deposit_to_earn(1_000_000)
+
+    assert [c.args[0] for c in progress.update.call_args_list] == [
+        progress.BRIDGING,
+        progress.DEPLOYING,
+    ]

@@ -157,6 +157,31 @@ class TestUnsettledOperationsRoute:
         assert r.status_code == 200
         assert [op["operation_id"] for op in r.json()["operations"]] == ["newer"]
 
+    async def test_an_earn_operation_carries_its_stages(self, api_client, test_db):
+        import json
+
+        _insert_earn(test_db, "earn-running", operation="withdraw", status="executing")
+        stages = [
+            {"stage": "reclaiming", "at": 110, "detail": None},
+            {"stage": "finality", "at": 150, "detail": {"confirmations": 9, "required": 32}},
+        ]
+        db_write(
+            test_db,
+            "UPDATE earn_transactions SET history = ? WHERE id = ?",
+            (json.dumps(stages), "earn-running"),
+        )
+        _insert_swap(test_db, "swap-pending", status="pending", updated_at=90)
+
+        with patch("src.api._auth.get_accounting_client", return_value=_auth_client()):
+            r = await api_client.get(
+                "/v1/operations/unsettled",
+                headers={"Authorization": "Bearer user-jwt"},
+            )
+
+        ops = {op["operation_id"]: op for op in r.json()["operations"]}
+        assert ops["earn-running"]["stages"] == stages
+        assert ops["swap-pending"]["stages"] == []
+
     async def test_returns_empty_list_when_user_has_no_unsettled_operations(self, api_client):
         acct = _auth_client()
         with patch("src.api._auth.get_accounting_client", return_value=acct):

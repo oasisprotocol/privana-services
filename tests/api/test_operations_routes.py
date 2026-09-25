@@ -143,6 +143,18 @@ class TestUnsettledOperationsRoute:
         assert swap["to_amount_estimate"] == "990"
         assert swap["pool_id"] is None
 
+    async def test_lists_a_withdraw_waiting_for_liquidity(self, api_client, test_db):
+        _insert_earn(test_db, "earn-waiting", operation="withdraw", status="awaiting_liquidity")
+
+        with patch("src.api._auth.get_accounting_client", return_value=_auth_client()):
+            r = await api_client.get(
+                "/v1/operations/unsettled",
+                headers={"Authorization": "Bearer user-jwt"},
+            )
+
+        ops = {op["operation_id"]: op for op in r.json()["operations"]}
+        assert ops["earn-waiting"]["status"] == "awaiting_liquidity"
+
     async def test_applies_limit_after_ordering(self, api_client, test_db):
         _insert_swap(test_db, "older", updated_at=100)
         _insert_earn(test_db, "newer", updated_at=200)

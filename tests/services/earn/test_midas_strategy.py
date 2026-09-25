@@ -819,9 +819,13 @@ async def test_withdraw_from_earn_raises_typed_error_on_revert(
     )
     midas_client.redeem_instant.side_effect = RuntimeError("tx reverted (daily limit)")
 
-    with pytest.raises(MidasInstantUnavailableError, match="redeemInstant unavailable"):
+    with pytest.raises(MidasInstantUnavailableError, match="redeemInstant unavailable") as err:
         await strategy.withdraw_from_earn(1_000_000)
 
+    # Nothing moved, so the worker can hold the withdrawal instead of failing it.
+    from src.services.earn.strategies.base import LiquidityUnavailable
+
+    assert isinstance(err.value, LiquidityUnavailable)
     midas_client.transfer_erc20.assert_not_called()
     privana.check_deposit.assert_not_called()
 
@@ -974,3 +978,41 @@ async def test_deposit_reports_bridging_then_deploying(strategy, midas_client, p
         progress.BRIDGING,
         progress.DEPLOYING,
     ]
+
+
+@pytest.mark.asyncio
+async def test_withdraw_ready_when_raw_funds_cover_it(strategy, midas_client) -> None:
+    midas_client.get_erc20_balance.return_value = 2_000_000
+
+    assert await strategy.withdraw_ready(1_000_000) is True
+    midas_client.get_instant_redeem_remaining.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_withdraw_ready_compares_the_sized_redeem_with_todays_capacity(
+    strategy, midas_client,
+) -> None:
+    midas_client.get_erc20_balance.return_value = 0
+    midas_client.get_instant_redeem_remaining.return_value = 2 * 10**18
+    assert await strategy.withdraw_ready(1_000_000) is True
+
+    midas_client.get_instant_redeem_remaining.return_value = 10**17
+    assert await strategy.withdraw_ready(1_000_000) is False
+
+
+@pytest.mark.asyncio
+async def test_withdraw_ready_is_false_while_redemptions_are_paused(strategy, midas_client) -> None:
+    midas_client.get_erc20_balance.return_value = 0
+    midas_client.is_redemption_paused.return_value = True
+
+    assert await strategy.withdraw_ready(1_000_000) is False
+
+
+@pytest.mark.asyncio
+async def test_withdraw_ready_leaves_the_decision_to_the_redeem_when_reads_fail(
+    strategy, midas_client,
+) -> None:
+    midas_client.get_erc20_balance.return_value = 0
+    midas_client.get_instant_redeem_remaining.side_effect = RuntimeError("rpc down")
+
+    assert await strategy.withdraw_ready(1_000_000) is True

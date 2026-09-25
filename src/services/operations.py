@@ -10,7 +10,10 @@ from src.models.operations import UnsettledOperation
 # produce pending, completed, failed, and undeployed rows. "undeployed" is
 # unsettled by design: the shares exist but the funds still need an operator
 # to redeploy them into the strategy.
-UNSETTLED_STATUSES = ("pending", "scheduled", "executing", "refunding", "failed", "canceled", "undeployed")
+UNSETTLED_STATUSES = (
+    "pending", "scheduled", "executing", "refunding", "failed", "canceled", "undeployed",
+    "awaiting_liquidity",
+)
 
 
 _SWAP_SELECT = """

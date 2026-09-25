@@ -26,7 +26,7 @@ from src.clients.privana import (
 )
 from src.core.config import load_settings
 from src.services.earn import progress
-from src.services.earn.strategies.base import ApyPoint, BaseStrategy
+from src.services.earn.strategies.base import ApyPoint, BaseStrategy, LiquidityUnavailable
 from src.services.earn.strategies.defillama_history import defillama_apy_history
 
 logger = logging.getLogger(__name__)
@@ -67,6 +67,11 @@ class MidasInstantUnavailableError(RuntimeError):
     moment. Surfaces to callers as a transient condition so the API layer
     can return a structured 409 ("retry later") rather than a 500.
     """
+
+
+class MidasLiquidityUnavailable(MidasInstantUnavailableError, LiquidityUnavailable):
+    """The instant path cannot take this redeem right now: the daily limit is
+    spent or the vault reverted the redeem. Raised only before any funds move."""
 
 
 def _network_for_chain(chain_id: int) -> Network:
@@ -480,7 +485,9 @@ class MidasStrategy(BaseStrategy):
                 min_receive_usdc,
             )
         except RuntimeError as exc:
-            raise MidasInstantUnavailableError(
+            # The redeem reverted, so nothing moved: the withdrawal can wait
+            # for liquidity instead of failing.
+            raise MidasLiquidityUnavailable(
                 f"Midas redeemInstant unavailable (target_usdc={amount} "
                 f"mtbill_in={mtbill_to_redeem}): {exc}"
             ) from exc
@@ -573,6 +580,41 @@ class MidasStrategy(BaseStrategy):
             f"MidasStrategy: earlier bridge still in flight after "
             f"{self._max_bridge_poll_attempts} polls; aborting to release lock"
         )
+
+    async def withdraw_ready(self, amount: int) -> bool:
+        """Whether the instant path can take this withdrawal today. Raw USDC
+        already on the earn account is spent first and needs no redeem. A
+        failed read answers yes: the redeem itself is the final check, and
+        it holds the request the same way if it reverts."""
+        try:
+            on_hand = await asyncio.to_thread(
+                self._client.get_erc20_balance, self._asset_address,
+            )
+            shortfall = amount - on_hand
+            if shortfall <= 0:
+                return True
+            if await asyncio.to_thread(self._client.is_redemption_paused):
+                return False
+            price, decimals = await asyncio.to_thread(self._read_oracle_price)
+            fee_bps = await asyncio.to_thread(
+                self._client.get_redemption_fee_bps, self._asset_address,
+            )
+            if fee_bps >= 10_000:
+                return False
+            needed = self.size_redeem(shortfall, price, decimals, fee_bps)
+            minimum = await asyncio.to_thread(self._client.get_redemption_min_amount)
+            needed = max(needed, minimum)
+            remaining = await asyncio.to_thread(self._client.get_instant_redeem_remaining)
+        except Exception:
+            logger.warning("MidasStrategy.withdraw_ready: capacity read failed", exc_info=True)
+            return True
+        if remaining < needed:
+            logger.info(
+                "MidasStrategy.withdraw_ready: instant capacity %d below the %d needed",
+                remaining, needed,
+            )
+            return False
+        return True
 
     async def stranded_assets(self) -> int:
         return await asyncio.to_thread(

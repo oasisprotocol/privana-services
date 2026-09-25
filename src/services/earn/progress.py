@@ -32,6 +32,7 @@ RECLAIMING = "reclaiming"
 RETURNING = "returning"
 FINALITY = "finality"
 PAYING_OUT = "paying_out"
+AWAITING_LIQUIDITY = "awaiting_liquidity"
 
 _current: ContextVar[Optional[str]] = ContextVar("earn_operation", default=None)
 

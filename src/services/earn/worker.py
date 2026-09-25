@@ -9,8 +9,10 @@ from src.core.db import db_write, get_db
 from src.core.validation import sanitize_error
 from src.services.earn import progress
 from src.services.earn.progress import tracking
+from src.services.earn.strategies.base import LiquidityUnavailable
 from src.services.earn.vault_service import (
     EARN_OP_DEPOSIT,
+    EARN_STATUS_AWAITING_LIQUIDITY,
     EARN_STATUS_COMPLETED,
     EARN_STATUS_EXECUTING,
     EARN_STATUS_FAILED,
@@ -39,12 +41,15 @@ def _public_error(exc: Exception) -> str:
     return "Operation could not be completed; please retry"
 
 POLL_INTERVAL = 1.0
+# How often a withdrawal waiting for liquidity asks its strategy again.
+LIQUIDITY_RECHECK_SEC = 120
 
 
 class EarnWorker:
     def __init__(self) -> None:
         self._stop = asyncio.Event()
         self._task: Optional[asyncio.Task] = None
+        self._liquidity_checked_at = 0.0
 
     async def start(self) -> None:
         if self._task is not None:
@@ -157,6 +162,7 @@ class EarnWorker:
         # still in flight, which is the rule the internal swap pipeline keeps.
         if await self._recover():
             return
+        await self._release_awaiting_liquidity()
         # One row per pass. Claiming a batch would mark rows executing that this
         # pass never reaches, and a crash then reports them failed without
         # having attempted them.
@@ -173,6 +179,11 @@ class EarnWorker:
                         signature=row["signature"],
                         scheduled_id=row["id"],
                     )
+            except LiquidityUnavailable:
+                # Nothing moved and the user keeps their shares: hold the row
+                # with its signature and nonce instead of failing it.
+                logger.info("Earn %s %s waiting for liquidity", row["operation"], row["id"])
+                self._await_liquidity(row["id"])
             except Exception as exc:
                 # deposit/withdraw settle their own row once they have an
                 # on-chain outcome, so only claim the ones that never got that
@@ -180,6 +191,52 @@ class EarnWorker:
                 # succeeded as failed because some read after it threw.
                 logger.exception("Earn %s %s failed", row["operation"], row["id"])
                 self._fail_if_unsettled(row["id"], _public_error(exc))
+
+    @staticmethod
+    def _await_liquidity(tx_id: str) -> None:
+        changed = db_write(
+            get_db(),
+            "UPDATE earn_transactions SET status = ?, error = NULL, updated_at = ? "
+            "WHERE id = ? AND status = ?",
+            (EARN_STATUS_AWAITING_LIQUIDITY, int(time.time()), tx_id, EARN_STATUS_EXECUTING),
+        ).rowcount
+        if changed:
+            progress.record_status(tx_id, EARN_STATUS_EXECUTING, EARN_STATUS_AWAITING_LIQUIDITY)
+            with tracking(tx_id):
+                progress.update(progress.AWAITING_LIQUIDITY)
+
+    async def _release_awaiting_liquidity(self) -> None:
+        """Put held withdrawals back in the queue once their strategy can pay
+        them. They go back as scheduled, in their original order, so the normal
+        claim path runs them with the signature and nonce they came with."""
+        now = time.monotonic()
+        if now - self._liquidity_checked_at < LIQUIDITY_RECHECK_SEC:
+            return
+        self._liquidity_checked_at = now
+        rows = get_db().execute(
+            "SELECT id, pool_id, amount FROM earn_transactions WHERE status = ? "
+            "ORDER BY created_at, rowid",
+            (EARN_STATUS_AWAITING_LIQUIDITY,),
+        ).fetchall()
+        if not rows:
+            return
+        service = get_vault_service()
+        for row in rows:
+            try:
+                ready = await service._registry.get(row["pool_id"]).withdraw_ready(int(row["amount"]))
+            except Exception:
+                logger.warning("Earn %s liquidity check failed", row["id"], exc_info=True)
+                continue
+            if not ready:
+                continue
+            changed = db_write(
+                get_db(),
+                "UPDATE earn_transactions SET status = ?, updated_at = ? WHERE id = ? AND status = ?",
+                (EARN_STATUS_SCHEDULED, int(time.time()), row["id"], EARN_STATUS_AWAITING_LIQUIDITY),
+            ).rowcount
+            if changed:
+                logger.info("Earn withdraw %s liquidity is back; returning it to the queue", row["id"])
+                progress.record_status(row["id"], EARN_STATUS_AWAITING_LIQUIDITY, EARN_STATUS_SCHEDULED)
 
     @staticmethod
     def _fail_if_unsettled(tx_id: str, error: str) -> None:

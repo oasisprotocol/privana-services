@@ -163,6 +163,16 @@ class MidasClient:
     def get_redemption_min_amount(self) -> int:
         return int(self.redemption_vault.functions.minAmount().call())
 
+    def get_instant_redeem_remaining(self) -> int:
+        """mTBILL (base 18) the redemption vault will still redeem instantly
+        today. The vault meters instant redemptions per UTC day, keyed by
+        ``block.timestamp / 1 days``.
+        """
+        day = int(self.w3.eth.get_block("latest")["timestamp"]) // 86_400
+        limit = int(self.redemption_vault.functions.instantDailyLimit().call())
+        used = int(self.redemption_vault.functions.dailyLimits(day).call())
+        return max(limit - used, 0)
+
     def get_erc20_balance(
         self, asset_address: str, holder: Optional[str] = None, block: Optional[int] = None,
     ) -> int:

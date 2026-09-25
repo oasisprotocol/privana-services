@@ -179,3 +179,76 @@ async def test_nothing_new_is_claimed_while_a_row_is_still_in_flight(test_db):
 
     assert _status(test_db, "queued") == "scheduled"
     service.deposit.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_a_withdraw_short_of_liquidity_waits_instead_of_failing(test_db):
+    from src.services.earn.strategies.base import LiquidityUnavailable
+
+    _row(test_db, "t1", operation="withdraw")
+    service = MagicMock()
+    service.withdraw = AsyncMock(side_effect=LiquidityUnavailable("short"))
+
+    with patch("src.services.earn.worker.get_vault_service", return_value=service):
+        await EarnWorker().run_once()
+
+    row = test_db.execute(
+        "SELECT status, error, history FROM earn_transactions WHERE id = ?", ("t1",)
+    ).fetchone()
+    assert row["status"] == "awaiting_liquidity"
+    assert row["error"] is None
+    assert '"awaiting_liquidity"' in row["history"]
+
+
+@pytest.mark.asyncio
+async def test_a_waiting_withdraw_goes_back_on_the_queue_once_liquidity_is_back(test_db):
+    _row(test_db, "t1", operation="withdraw", status="awaiting_liquidity")
+    strategy = MagicMock()
+    strategy.withdraw_ready = AsyncMock(return_value=True)
+    service = MagicMock()
+    service._registry.get.return_value = strategy
+    service.withdraw = AsyncMock(return_value={})
+
+    with patch("src.services.earn.worker.get_vault_service", return_value=service):
+        await EarnWorker().run_once()
+
+    strategy.withdraw_ready.assert_awaited_once_with(1000)
+    # Released and claimed in the same pass, with its original signature.
+    service.withdraw.assert_awaited_once()
+    assert service.withdraw.await_args.kwargs["scheduled_id"] == "t1"
+
+
+@pytest.mark.asyncio
+async def test_a_waiting_withdraw_stays_put_while_liquidity_is_short(test_db):
+    _row(test_db, "t1", operation="withdraw", status="awaiting_liquidity")
+    strategy = MagicMock()
+    strategy.withdraw_ready = AsyncMock(return_value=False)
+    service = MagicMock()
+    service._registry.get.return_value = strategy
+    service.withdraw = AsyncMock()
+
+    with patch("src.services.earn.worker.get_vault_service", return_value=service):
+        worker = EarnWorker()
+        await worker.run_once()
+        await worker.run_once()
+
+    assert _status(test_db, "t1") == "awaiting_liquidity"
+    service.withdraw.assert_not_called()
+    # Rechecked on its own interval, not on every pass.
+    strategy.withdraw_ready.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_a_waiting_withdraw_does_not_block_other_users(test_db):
+    _row(test_db, "t1", operation="withdraw", status="awaiting_liquidity", created=100)
+    _row(test_db, "t2", user=USER_B, created=200)
+    strategy = MagicMock()
+    strategy.withdraw_ready = AsyncMock(return_value=False)
+    service = MagicMock()
+    service._registry.get.return_value = strategy
+    service.deposit = AsyncMock(return_value={})
+
+    with patch("src.services.earn.worker.get_vault_service", return_value=service):
+        await EarnWorker().run_once()
+
+    assert service.deposit.await_args.kwargs["scheduled_id"] == "t2"

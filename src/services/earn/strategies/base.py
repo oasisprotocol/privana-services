@@ -3,6 +3,11 @@ from dataclasses import dataclass
 from typing import Optional
 
 
+class LiquidityUnavailable(RuntimeError):
+    """The strategy cannot pay this withdrawal out right now, and nothing has
+    moved yet. Safe to hold the request and retry once liquidity is back."""
+
+
 @dataclass(frozen=True)
 class ApyPoint:
     """One sample of a strategy's APY over time.
@@ -83,6 +88,13 @@ class BaseStrategy(ABC):
         Counted in ``total_assets``; the idle sweep puts it to work.
         """
         return 0
+
+    async def withdraw_ready(self, amount: int) -> bool:
+        """Whether a withdrawal of `amount` can be paid out right now. Checked
+        before anything moves, so a short protocol holds the request instead
+        of failing it. Protocols without an instant-liquidity limit are
+        always ready."""
+        return True
 
     @abstractmethod
     async def idle_assets(self) -> int:

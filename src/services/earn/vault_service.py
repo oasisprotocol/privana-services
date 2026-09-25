@@ -33,7 +33,7 @@ from src.services.earn.earned import (
     earned_active,
 )
 from src.services.earn.registry import StrategyRegistry, get_strategy_registry
-from src.services.earn.strategies.base import ApyPoint
+from src.services.earn.strategies.base import ApyPoint, LiquidityUnavailable
 from src.services.user_queue import assert_nonce_free
 
 logger = logging.getLogger(__name__)
@@ -54,6 +54,9 @@ EARN_STATUS_FAILED = "failed"
 # the mint and the strategy routing, so a crash in that window leaves a row
 # an operator can find instead of a "completed" row hiding idle funds.
 EARN_STATUS_UNDEPLOYED = "undeployed"
+# A withdrawal the strategy cannot pay out right now. Nothing has moved and
+# the user keeps their shares; the worker releases it once liquidity is back.
+EARN_STATUS_AWAITING_LIQUIDITY = "awaiting_liquidity"
 
 SYNC_MAX_DROP_BPS = 100
 
@@ -771,9 +774,15 @@ class VaultService:
                     "Pool valuation could not be confirmed; withdraw refused. "
                     "Retry shortly."
                 )
+            if not await self._registry.get(pool_id_hex).withdraw_ready(int(amount)):
+                raise LiquidityUnavailable("The strategy cannot pay this withdrawal out right now")
             reclaim_tx_id = str(uuid.uuid4())
             try:
                 await self._reclaim_from_strategy(pool_id_hex, int(amount))
+            except LiquidityUnavailable:
+                # Nothing moved, so there is nothing to roll back: re-supplying
+                # here would push the pool's idle balance into the strategy.
+                raise
             except Exception as exc:
                 # A partial reclaim (redeemed from the protocol but never
                 # credited to the pool) must not escape the lock with the

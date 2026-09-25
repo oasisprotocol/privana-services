@@ -189,6 +189,25 @@ def test_get_issuance_min_amount_reads_issuance_vault():
     assert client.get_issuance_min_amount() == 1_000_000
 
 
+def test_get_instant_redeem_remaining_reads_todays_usage():
+    client, c = _make_client()
+    c["w3"].eth.get_block.return_value = {"timestamp": 86_400 * 20_000 + 5}
+    c["redemption"].functions.instantDailyLimit.return_value.call.return_value = 10 * 10**18
+    c["redemption"].functions.dailyLimits.return_value.call.return_value = 3 * 10**18
+
+    assert client.get_instant_redeem_remaining() == 7 * 10**18
+    c["redemption"].functions.dailyLimits.assert_called_once_with(20_000)
+
+
+def test_get_instant_redeem_remaining_never_goes_negative():
+    client, c = _make_client()
+    c["w3"].eth.get_block.return_value = {"timestamp": 0}
+    c["redemption"].functions.instantDailyLimit.return_value.call.return_value = 1
+    c["redemption"].functions.dailyLimits.return_value.call.return_value = 5
+
+    assert client.get_instant_redeem_remaining() == 0
+
+
 def test_get_redemption_min_amount_reads_redemption_vault():
     client, c = _make_client()
     c["redemption"].functions.minAmount.return_value.call.return_value = 5_000_000

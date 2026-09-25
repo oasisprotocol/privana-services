@@ -3,22 +3,29 @@ import logging
 import time
 import uuid
 from decimal import Decimal
+from functools import partial
 from typing import Optional
 
 from web3 import Web3
+from web3.exceptions import ContractLogicError, Web3RPCError
 
 from src.clients.accounting import get_accounting_client
 from src.clients.sapphire import get_pool_admin_sapphire_client
 from src.core.abi import load_abi
 from src.core.config import load_settings
 from src.core.db import db_write, get_db
-from src.core.eip712 import recover_withdraw_signer, sign_transfer
+from src.core.eip712 import (
+    recover_transfer_signer,
+    recover_withdraw_signer,
+    sign_transfer,
+)
 from src.core.validation import (
     sanitize_error,
     validate_address,
     validate_amount,
     validate_signature,
 )
+from src.services.earn import progress
 from src.services.earn.change import change_24h
 from src.services.earn.earned import (
     STATUS_LEDGER_INCOMPLETE,
@@ -27,6 +34,7 @@ from src.services.earn.earned import (
 )
 from src.services.earn.registry import StrategyRegistry, get_strategy_registry
 from src.services.earn.strategies.base import ApyPoint
+from src.services.user_queue import assert_nonce_free
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +42,8 @@ EARN_MANAGER_ABI = load_abi("EarnManager")
 
 EARN_OP_DEPOSIT = "deposit"
 EARN_OP_WITHDRAW = "withdraw"
+EARN_STATUS_SCHEDULED = "scheduled"
+EARN_STATUS_EXECUTING = "executing"
 EARN_STATUS_PENDING = "pending"
 EARN_STATUS_COMPLETED = "completed"
 EARN_STATUS_FAILED = "failed"
@@ -46,6 +56,20 @@ EARN_STATUS_FAILED = "failed"
 EARN_STATUS_UNDEPLOYED = "undeployed"
 
 SYNC_MAX_DROP_BPS = 100
+
+# Sapphire authenticates a read by wrapping it in a signed query whose leash
+# pins a recent block. The client reads the head and then the block before it
+# as two calls, so when the chain moves between them the node rejects the
+# leash. It is transient by nature: the next attempt builds a fresh one. The
+# query also carries the caller's account nonce, so a transaction from the same
+# account landing mid-read leaves it stale in the same way.
+_STALE_QUERY = ("base block not found", "stale nonce")
+READ_RETRY_ATTEMPTS = 5
+READ_RETRY_BACKOFF_SEC = 0.5
+
+# Protocol-owned principal only moves when an operator records or drops it,
+# so re-reading it on every quote buys nothing and costs a signed query.
+SEED_CACHE_TTL_SEC = 30
 
 
 def _exchange_rate(total_assets: int, total_shares: int) -> str:
@@ -61,6 +85,8 @@ class VaultService:
         self.accounting = get_accounting_client()
         self._pools_tx_lock = asyncio.Lock()
         self._registry = registry if registry is not None else get_strategy_registry()
+        self._seed_read_warned = False
+        self._seed_cache: dict[str, tuple[float, int]] = {}
         self.contract_address = Web3.to_checksum_address(
             self.settings.earn_manager_contract_address
         )
@@ -113,8 +139,29 @@ class VaultService:
                 tx_id, amount,
             )
 
+    def _assert_pool_custody(self, pool: dict) -> None:
+        """Refuse to touch a pool whose account is not the one this service
+        signs for.
+
+        Deposits land in `pool.poolAddress`, while a withdrawal is debited
+        from whoever signs the pool's accounting transfer, which is always
+        this service's earn account. When the two differ the money goes into
+        one account and the payout is attempted from another, so shares get
+        minted that can never be redeemed. `createPool` has no setter for the
+        address, so the only repair is a new pool; refusing here keeps funds
+        out of the old one until that happens.
+        """
+        expected = (self.settings.earn_pool_address or "").lower()
+        actual = (pool.get("pool_address") or "").lower()
+        if not expected or actual != expected:
+            raise ValueError(
+                "Pool is not served by this deployment: its account is "
+                f"{pool.get('pool_address')} but this service signs for "
+                f"{self.settings.earn_pool_address}"
+            )
+
     def get_pool(self, pool_id: bytes) -> dict:
-        pool = self.contract.functions.pools(pool_id).call()
+        pool = self._read_with_retry(self.contract.functions.pools(pool_id).call, "pools")
         return {
             "token_id": "0x" + pool[0].hex(),
             "pool_address": pool[1],
@@ -124,10 +171,14 @@ class VaultService:
         }
 
     def list_pools(self) -> list[dict]:
-        count = self.contract.functions.getPoolCount().call()
+        count = self._read_with_retry(
+            self.contract.functions.getPoolCount().call, "getPoolCount"
+        )
         pools = []
         for i in range(count):
-            pool_id = self.contract.functions.poolIds(i).call()
+            pool_id = self._read_with_retry(
+                self.contract.functions.poolIds(i).call, "poolIds"
+            )
             pool = self.get_pool(pool_id)
             pool["pool_id"] = "0x" + pool_id.hex()
             pools.append(pool)
@@ -142,7 +193,10 @@ class VaultService:
         balance and no one else's.
         """
         token_bytes = bytes.fromhex(token_hex.removeprefix("0x"))
-        return self.contract.functions.getUserShares(pool_id, token_bytes).call()
+        return self._read_with_retry(
+            self.contract.functions.getUserShares(pool_id, token_bytes).call,
+            "getUserShares",
+        )
 
     def get_withdraw_nonce_via_token(self, token_hex: str) -> int:
         """Read the caller's withdraw nonce via the SIWE auth-gated view.
@@ -151,13 +205,93 @@ class VaultService:
         supplied nonce matches storage at submission time.
         """
         token_bytes = bytes.fromhex(token_hex.removeprefix("0x"))
-        return self.contract.functions.getWithdrawNonce(token_bytes).call()
+        return self._read_with_retry(
+            self.contract.functions.getWithdrawNonce(token_bytes).call,
+            "getWithdrawNonce",
+        )
+
+    @staticmethod
+    def _read_with_retry(call, label: str):
+        """Run a contract read, retrying a stale signed-query leash.
+
+        Only that one error is retried. Anything else is the chain's real
+        answer and is left to the caller.
+        """
+        for attempt in range(1, READ_RETRY_ATTEMPTS + 1):
+            try:
+                return call()
+            except Web3RPCError as exc:
+                stale = any(marker in str(exc) for marker in _STALE_QUERY)
+                if not stale or attempt == READ_RETRY_ATTEMPTS:
+                    raise
+                logger.warning(
+                    "%s hit a stale signed-query leash (attempt %d/%d); retrying",
+                    label, attempt, READ_RETRY_ATTEMPTS,
+                )
+                time.sleep(READ_RETRY_BACKOFF_SEC * attempt)
+
+    def get_seeded_assets(self, pool_id: bytes, *, fresh: bool = False) -> int:
+        """Protocol-owned principal recorded against the pool.
+
+        Reverts against a contract that predates seeding, which has no such
+        function, and against any caller that is not the pool admin, since
+        how much of a pool is protocol capital is not public. Both say the
+        same thing about valuation: there is no seed to net out. Reading
+        them as zero is what lets the service run against a proxy that has
+        not been upgraded yet, rather than failing every quote until it is.
+        """
+        key = pool_id.hex()
+        cached = self._seed_cache.get(key)
+        if not fresh and cached is not None and time.time() - cached[0] < SEED_CACHE_TTL_SEC:
+            return cached[1]
+        try:
+            value = self._read_with_retry(
+                self.contract.functions.getSeededAssets(pool_id).call, "getSeededAssets",
+            )
+        except ContractLogicError:
+            if not self._seed_read_warned:
+                logger.warning(
+                    "getSeededAssets reverted; treating pools as unseeded. Expected "
+                    "before the EarnManager upgrade lands, otherwise check that this "
+                    "service signs as the pool admin."
+                )
+                self._seed_read_warned = True
+            value = 0
+        self._seed_cache[key] = (time.time(), value)
+        return value
+
+    def _net_of_seed(self, gross: int, seeded: int, total_shares: int) -> int:
+        """User-backed assets, given everything the pool holds.
+
+        Seed principal is senior: it comes off the top, so a shortfall lands
+        on the user tranche first and the clamp at zero is the point at which
+        the seed itself would have to be marked down by an operator. While no
+        shares exist there is nobody to earn, so the whole balance stays with
+        the seed and the first depositor does not find yield already on the
+        books.
+
+        A pool nobody has seeded is left exactly as it was before seeding
+        existed. Otherwise an unseeded pool sitting at zero shares would have
+        its idle balance reported as nothing, and the sync path would go on to
+        record that balance as protocol principal it never was.
+        """
+        if seeded == 0:
+            return gross
+        if total_shares == 0:
+            return 0
+        return max(gross - seeded, 0)
 
     def convert_to_shares(self, pool_id: bytes, assets: int) -> int:
-        return self.contract.functions.convertToShares(pool_id, assets).call()
+        return self._read_with_retry(
+            self.contract.functions.convertToShares(pool_id, assets).call,
+            "convertToShares",
+        )
 
     def convert_to_assets(self, pool_id: bytes, shares: int) -> int:
-        return self.contract.functions.convertToAssets(pool_id, shares).call()
+        return self._read_with_retry(
+            self.contract.functions.convertToAssets(pool_id, shares).call,
+            "convertToAssets",
+        )
 
     def get_user_balance_via_token(self, pool_id: bytes, token_hex: str) -> dict:
         shares = self.get_user_shares_via_token(pool_id, token_hex)
@@ -191,10 +325,12 @@ class VaultService:
         pool_id = bytes.fromhex(pool_id_hex.removeprefix("0x"))
         amount_int = int(amount)
 
-        pool, shares_estimate, strategy_aum, transfer_nonce = await asyncio.gather(
+        pool, shares_estimate, strategy_aum, idle, seeded, transfer_nonce = await asyncio.gather(
             asyncio.to_thread(self.get_pool, pool_id),
             asyncio.to_thread(self.convert_to_shares, pool_id, amount_int),
             self._strategy_total_assets_safe(pool_id_hex),
+            self._strategy_idle_assets_safe(pool_id_hex),
+            asyncio.to_thread(self.get_seeded_assets, pool_id),
             self.accounting.get_transfer_nonce(user_address),
         )
 
@@ -203,8 +339,14 @@ class VaultService:
         if not pool["active"]:
             raise ValueError("Pool is not active")
 
+        # The rate a deposit actually mints at is the one the sync writes, so
+        # the quote has to net the seed out the same way. Quoting the gross
+        # strategy balance would price every share as if the foundation's
+        # principal backed it.
+        gross = (strategy_aum or 0) + (idle or 0)
         effective_assets = (
-            strategy_aum if strategy_aum is not None and strategy_aum > 0 else pool["total_assets"]
+            self._net_of_seed(gross, seeded, pool["total_shares"])
+            if gross else pool["total_assets"]
         )
         exchange_rate = _exchange_rate(effective_assets, pool["total_shares"])
 
@@ -234,6 +376,22 @@ class VaultService:
         except Exception:
             logger.exception(
                 "_strategy_total_assets_safe failed pool=%s strategy=%s",
+                pool_id_hex, strategy.name,
+            )
+            return None
+
+    async def _strategy_idle_assets_safe(self, pool_id_hex: str) -> Optional[int]:
+        """Best-effort idle read, paired with ``_strategy_total_assets_safe``
+        so a quote values the same balance the sync does.
+        """
+        strategy = self._registry.get(pool_id_hex)
+        if strategy.name == "manual":
+            return None
+        try:
+            return await strategy.idle_assets()
+        except Exception:
+            logger.exception(
+                "_strategy_idle_assets_safe failed pool=%s strategy=%s",
                 pool_id_hex, strategy.name,
             )
             return None
@@ -275,6 +433,135 @@ class VaultService:
             )
             return 0
 
+    async def _submit_and_settle(self, tx_id: str, *, function_name: str, args: list) -> str:
+        """Broadcast, record the hash, then wait for the receipt.
+
+        Split the way the swap pipeline splits it: a receipt wait that times
+        out must leave a hash behind, or a transaction that later confirms is
+        indistinguishable from one that never went out, and the recovery pass
+        has nothing to reconcile against.
+        """
+        tx_hash = await asyncio.to_thread(
+            self.sapphire.submit_contract_call,
+            contract_address=self.contract_address,
+            abi=EARN_MANAGER_ABI,
+            function_name=function_name,
+            args=args,
+        )
+        self._update_transaction(tx_id, tx_hash=tx_hash)
+        receipt = await asyncio.to_thread(self.sapphire.wait_for_receipt, tx_hash)
+        if receipt["status"] != 1:
+            raise RuntimeError(f"Transaction reverted: {tx_hash}")
+        return tx_hash
+
+    def _schedule(
+        self,
+        *,
+        operation: str,
+        pool_id_hex: str,
+        user_address: str,
+        amount: str,
+        nonce: int,
+        signature: str,
+    ) -> dict:
+        """Record a request and hand it to the worker.
+
+        Admission mirrors ``schedule_swap``: an identical signed request
+        returns the operation it already created, the signer is recovered and
+        bound rather than trusted, and the checks that settle a request
+        outright still answer immediately. What is deferred is the part that
+        takes minutes — bridging and supplying on another chain — because a
+        request that waits for that is a request the gateway hangs up on.
+        """
+        validate_address(user_address, "user_address")
+        validate_amount(amount, "amount")
+        validate_signature(signature, "signature")
+        pool_id = bytes.fromhex(pool_id_hex.removeprefix("0x"))
+
+        # An HTTP retry returns the original operation rather than queueing a
+        # second one, which is also how a caller learns the outcome of a
+        # request whose response it lost.
+        existing = get_db().execute(
+            "SELECT id, status FROM earn_transactions WHERE operation = ? "
+            "AND LOWER(pool_id) = LOWER(?) AND user_address = ? "
+            "AND input_nonce = ? AND LOWER(input_signature) = LOWER(?)",
+            (operation, pool_id_hex, user_address.lower(), nonce, signature),
+        ).fetchone()
+        if existing is not None:
+            return {"id": existing["id"], "status": existing["status"]}
+
+        pool = self.get_pool(pool_id)
+        if pool["pool_address"] == "0x0000000000000000000000000000000000000000":
+            raise ValueError("Pool not found")
+        if not pool["active"]:
+            raise ValueError("Pool is not active")
+        self._assert_pool_custody(pool)
+
+        if operation == EARN_OP_WITHDRAW:
+            # A withdraw reclaims from the strategy before the contract ever
+            # checks consent, so an unverified one is a way to make the pool
+            # redeem and roll back on demand.
+            recovered = recover_withdraw_signer(
+                chain_id=self.settings.accounting_chain_id,
+                earn_manager_address=self.settings.earn_manager_contract_address,
+                pool_id=pool_id_hex,
+                amount=int(amount),
+                nonce=nonce,
+                signature=signature,
+            )
+        else:
+            recovered = recover_transfer_signer(
+                chain_id=self.settings.accounting_chain_id,
+                verifying_contract=self.settings.accounting_contract_address,
+                to_address=pool["pool_address"],
+                token_id=pool["token_id"],
+                amount=int(amount),
+                nonce=nonce,
+                signature=signature,
+            )
+        if recovered.lower() != user_address.lower():
+            raise ValueError(f"{operation} was not signed by user_address")
+        if operation == EARN_OP_DEPOSIT:
+            assert_nonce_free(user_address, nonce)
+
+        tx_id = str(uuid.uuid4())
+        now = int(time.time())
+        db_write(
+            get_db(),
+            """INSERT INTO earn_transactions
+               (id, operation, pool_id, user_address, token_id, amount,
+                signer_address, nonce, signature, input_nonce, input_signature,
+                status, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                tx_id, operation, pool_id_hex, user_address.lower(),
+                pool["token_id"], amount,
+                user_address.lower(), nonce, signature, nonce, signature,
+                EARN_STATUS_SCHEDULED, now, now,
+            ),
+        )
+        logger.info(
+            "earn %s %s scheduled: user=%s pool=%s amount=%s nonce=%s",
+            operation, tx_id, user_address, pool_id_hex, amount, nonce,
+        )
+        return {"id": tx_id, "status": EARN_STATUS_SCHEDULED}
+
+    def schedule_deposit(
+        self, *, pool_id_hex: str, user_address: str, amount: str, nonce: int, signature: str
+    ) -> dict:
+        return self._schedule(
+            operation=EARN_OP_DEPOSIT, pool_id_hex=pool_id_hex,
+            user_address=user_address, amount=amount, nonce=nonce, signature=signature,
+        )
+
+    def schedule_withdraw(
+        self, *, pool_id_hex: str, user_address: str, amount: str, nonce: int, signature: str
+    ) -> dict:
+        return self._schedule(
+            operation=EARN_OP_WITHDRAW, pool_id_hex=pool_id_hex,
+            user_address=user_address, amount=amount, nonce=nonce, signature=signature,
+        )
+
     async def deposit(
         self,
         pool_id_hex: str,
@@ -282,6 +569,7 @@ class VaultService:
         amount: str,
         nonce: int,
         signature: str,
+        scheduled_id: Optional[str] = None,
     ) -> dict:
         """Deposit user funds into an earn pool and mint shares.
 
@@ -302,6 +590,7 @@ class VaultService:
             raise ValueError("Pool not found")
         if not pool["active"]:
             raise ValueError("Pool is not active")
+        self._assert_pool_custody(pool)
 
         # Probe before minting anything: a paused vault or stale oracle means
         # the routing step is guaranteed to fail, and refusing here keeps the
@@ -333,6 +622,7 @@ class VaultService:
                 )
 
             tx_id = self._record_transaction(
+                existing_id=scheduled_id,
                 operation=EARN_OP_DEPOSIT,
                 pool_id_hex=pool_id_hex,
                 user_address=user_address,
@@ -345,11 +635,10 @@ class VaultService:
 
             shares_before = await self._total_shares_safe(pool_id)
 
+            progress.update(progress.RECORDING)
             try:
-                tx_hash = await asyncio.to_thread(
-                    self.sapphire.execute_contract_call,
-                    contract_address=self.contract_address,
-                    abi=EARN_MANAGER_ABI,
+                tx_hash = await self._submit_and_settle(
+                    tx_id,
                     function_name="deposit",
                     args=[
                         pool_id,
@@ -392,6 +681,7 @@ class VaultService:
                 self._update_transaction(tx_id, error=deploy_error)
             else:
                 self._update_transaction(tx_id, status=EARN_STATUS_COMPLETED)
+                await self._complete_undeployed_if_clear(pool_id_hex)
 
         deploy_status = EARN_STATUS_UNDEPLOYED if deploy_error else EARN_STATUS_COMPLETED
 
@@ -430,6 +720,7 @@ class VaultService:
         amount: str,
         nonce: int,
         signature: str,
+        scheduled_id: Optional[str] = None,
     ) -> dict:
         """Burn user shares and return the underlying assets.
 
@@ -458,12 +749,28 @@ class VaultService:
         if pool["pool_address"] == "0x0000000000000000000000000000000000000000":
             raise ValueError("Pool not found")
         # No active check — users must always be able to exit paused pools.
+        # Custody still has to line up: the payout is debited from the account
+        # this service signs for, so a mismatch would revert on accounting
+        # after the reclaim had already moved funds.
+        self._assert_pool_custody(pool)
 
         async with self._pools_tx_lock:
             # Sync inside the lock, before moving any strategy assets, so a
             # concurrent deposit can never sync the transient balance this
             # reclaim is about to create.
-            await self.sync_total_assets(pool_id_hex)
+            synced = await self.sync_total_assets(pool_id_hex)
+            # Burning against a stale denominator cannot inflate an unseeded
+            # pool, so those exits stay best-effort. A seeded pool is
+            # different: the seed is senior, so a withdrawal priced on a
+            # denominator that no longer holds would pay the user out of
+            # foundation principal.
+            if synced is None and await asyncio.to_thread(
+                partial(self.get_seeded_assets, pool_id, fresh=True)
+            ):
+                raise ValueError(
+                    "Pool valuation could not be confirmed; withdraw refused. "
+                    "Retry shortly."
+                )
             reclaim_tx_id = str(uuid.uuid4())
             try:
                 await self._reclaim_from_strategy(pool_id_hex, int(amount))
@@ -513,6 +820,7 @@ class VaultService:
                 consent_signer = None
 
             tx_id = self._record_transaction(
+                existing_id=scheduled_id,
                 operation=EARN_OP_WITHDRAW,
                 pool_id_hex=pool_id_hex,
                 user_address=user_address,
@@ -526,11 +834,10 @@ class VaultService:
 
             shares_before = await self._total_shares_safe(pool_id)
 
+            progress.update(progress.PAYING_OUT)
             try:
-                tx_hash = await asyncio.to_thread(
-                    self.sapphire.execute_contract_call,
-                    contract_address=self.contract_address,
-                    abi=EARN_MANAGER_ABI,
+                tx_hash = await self._submit_and_settle(
+                    tx_id,
                     function_name="withdraw",
                     args=[
                         pool_id,
@@ -598,6 +905,60 @@ class VaultService:
                 "error": None,
             }
 
+    async def deploy_idle(self, pool_id_hex: str) -> int:
+        """Move whatever is sitting in the pool's accounting balance into the
+        pool's strategy, and return how much moved.
+
+        Seed principal is paid into the pool account from outside and then
+        recorded, so it arrives idle and earns nothing until it is deployed.
+        The same is true of a deposit whose routing failed and of a reclaim
+        left over from a withdrawal that reverted, so this deploys the whole
+        idle balance rather than tracking which part is which.
+
+        Net assets do not change: the funds move from one side of the backing
+        figure to the other. The lock is what makes that safe, since it holds
+        across the whole bridge, so no deposit or withdrawal can read the
+        balance while the funds are in flight and no withdrawal can have its
+        reclaim deployed out from under it.
+        """
+        strategy = self._registry.get(pool_id_hex)
+        if strategy.name == "manual":
+            return 0
+
+        async with self._pools_tx_lock:
+            # A bridge still listed as pending may or may not have landed, so
+            # the balances below cannot be trusted until it clears. The next
+            # sweep sees the settled picture.
+            if await strategy.in_flight_assets() > 0:
+                return 0
+            idle = await strategy.idle_assets()
+            stranded = await strategy.stranded_assets()
+            minimum = await strategy.min_deploy_amount()
+            # The strategy bridges only what is not already on the earn
+            # account, so idle and stranded funds deploy together.
+            amount = idle + stranded
+            if amount <= 0 or amount < minimum:
+                if amount == 0:
+                    self._complete_undeployed(pool_id_hex)
+                return 0
+            if not await strategy.is_healthy():
+                logger.info(
+                    "Idle deploy pool=%s: %d idle but the strategy is unhealthy; leaving it",
+                    pool_id_hex, amount,
+                )
+                return 0
+            logger.info("Idle deploy pool=%s: routing %d into %s",
+                        pool_id_hex, amount, strategy.name)
+            await self._route_to_strategy(pool_id_hex, amount)
+            # Backing is unchanged, but totalAssets is written from a reading
+            # taken before the move, so refresh it while the lock still
+            # guarantees nothing else is mid-flight.
+            await self.sync_total_assets(pool_id_hex)
+            left = await strategy.idle_assets()
+            if (left == 0 or left < minimum) and await strategy.stranded_assets() == 0:
+                self._complete_undeployed(pool_id_hex)
+            return amount
+
     async def effective_total_assets(self, pool_id_hex: str, on_chain_total: int) -> int:
         """Live AUM for a pool, derived from the strategy when available.
 
@@ -621,10 +982,26 @@ class VaultService:
                 pool_id_hex, strategy.name,
             )
             return on_chain_total
-        total = external + idle
-        return total if total > 0 else on_chain_total
+        gross = external + idle
+        if gross == 0:
+            return on_chain_total
+        pool_id = bytes.fromhex(pool_id_hex.removeprefix("0x"))
+        try:
+            seeded = await asyncio.to_thread(self.get_seeded_assets, pool_id)
+            shares = self.get_pool(pool_id)["total_shares"]
+        except Exception:
+            logger.exception(
+                "seed read failed pool=%s; falling back to on-chain", pool_id_hex
+            )
+            return on_chain_total
+        return self._net_of_seed(gross, seeded, shares)
 
-    async def strict_total_assets(self, pool_id_hex: str, on_chain_total: int) -> Optional[int]:
+    async def strict_total_assets(
+        self,
+        pool_id_hex: str,
+        on_chain_total: int,
+        total_shares: Optional[int] = None,
+    ) -> Optional[int]:
         """Every asset the pool's shares are backed by, or None.
 
         ``effective_total_assets`` degrades to the on-chain principal when the
@@ -651,8 +1028,21 @@ class VaultService:
                 pool_id_hex, strategy.name,
             )
             return None
-        total = external + idle
-        return total if total > 0 else on_chain_total
+        gross = external + idle
+        if gross == 0:
+            return on_chain_total
+        pool_id = bytes.fromhex(pool_id_hex.removeprefix("0x"))
+        try:
+            seeded = await asyncio.to_thread(self.get_seeded_assets, pool_id)
+            shares = (
+                total_shares
+                if total_shares is not None
+                else self.get_pool(pool_id)["total_shares"]
+            )
+        except Exception:
+            logger.exception("seed read failed pool=%s; no rate snapshot", pool_id_hex)
+            return None
+        return self._net_of_seed(gross, seeded, shares)
 
     async def rate_snapshot(self, pool_id_hex: str) -> Optional[tuple[int, int]]:
         """A coherent ``(total_assets, total_shares)`` pair, or None.
@@ -666,7 +1056,9 @@ class VaultService:
         """
         pool_id = bytes.fromhex(pool_id_hex.removeprefix("0x"))
         before = await asyncio.to_thread(self.get_pool, pool_id)
-        assets = await self.strict_total_assets(pool_id_hex, before["total_assets"])
+        assets = await self.strict_total_assets(
+            pool_id_hex, before["total_assets"], total_shares=int(before["total_shares"])
+        )
         if assets is None:
             return None
         after = await asyncio.to_thread(self.get_pool, pool_id)
@@ -685,8 +1077,9 @@ class VaultService:
 
         Backing is strategy assets PLUS idle assets (funds credited to the
         pool but not yet deployed, e.g. an undeployed deposit or a reclaim
-        awaiting redeploy). Counting only the strategy would understate the
-        denominator whenever funds sit idle — including right after a failed
+        awaiting redeploy) MINUS protocol-owned seed principal, which sits in
+        the same balance but backs no shares. Counting only the strategy would
+        understate the denominator whenever funds sit idle — including right after a failed
         withdrawal rollback — and let the next deposit mint against a false,
         low denominator.
 
@@ -715,7 +1108,33 @@ class VaultService:
             )
             return None
 
-        backing = external + idle
+        gross = external + idle
+        pool = self.get_pool(pool_id)
+        seeded = await asyncio.to_thread(partial(self.get_seeded_assets, pool_id, fresh=True))
+
+        if seeded > 0 and pool["total_shares"] == 0:
+            # Nobody holds a claim yet, so everything the pool holds is still
+            # the seed's, yield included. Roll it into the baseline instead of
+            # leaving it as user assets the first depositor would arrive to
+            # find already on the books.
+            if gross != seeded:
+                try:
+                    await asyncio.to_thread(
+                        self.sapphire.execute_contract_call,
+                        contract_address=self.contract_address,
+                        abi=EARN_MANAGER_ABI,
+                        function_name="setSeededAssets",
+                        args=[pool_id, gross],
+                    )
+                except Exception:
+                    logger.exception(
+                        "setSeededAssets tx failed pool=%s old=%d new=%d",
+                        pool_id_hex, seeded, gross,
+                    )
+                    return None
+            return 0 if on_chain == 0 else await self._write_total_assets(pool_id, pool_id_hex, on_chain, 0)
+
+        backing = self._net_of_seed(gross, seeded, pool["total_shares"])
         if backing == on_chain:
             return on_chain
         if backing < on_chain and (on_chain - backing) * 10_000 > on_chain * SYNC_MAX_DROP_BPS:
@@ -733,25 +1152,30 @@ class VaultService:
             )
             return None
 
+        return await self._write_total_assets(pool_id, pool_id_hex, on_chain, backing)
+
+    async def _write_total_assets(
+        self, pool_id: bytes, pool_id_hex: str, on_chain: int, target: int
+    ) -> Optional[int]:
         try:
             await asyncio.to_thread(
                 self.sapphire.execute_contract_call,
                 contract_address=self.contract_address,
                 abi=EARN_MANAGER_ABI,
                 function_name="syncTotalAssets",
-                args=[pool_id, backing],
+                args=[pool_id, target],
             )
         except Exception:
             logger.exception(
                 "syncTotalAssets tx failed pool=%s old=%d new=%d",
-                pool_id_hex, on_chain, backing,
+                pool_id_hex, on_chain, target,
             )
             return None
         logger.info(
             "syncTotalAssets succeeded pool=%s old=%d new=%d",
-            pool_id_hex, on_chain, backing,
+            pool_id_hex, on_chain, target,
         )
-        return backing
+        return target
 
     def _record_transaction(
         self,
@@ -765,7 +1189,30 @@ class VaultService:
         nonce: int,
         signature: str,
         consent_signer: Optional[str] = None,
+        existing_id: Optional[str] = None,
     ) -> str:
+        if existing_id is not None:
+            # Queued path: the row was written when the request came in. Fill in
+            # what execution settled on — a withdraw signs with the pool's key,
+            # not the caller's — and move it out of the queue.
+            self._update_transaction(
+                existing_id,
+                # token_id is only knowable from the pool, which scheduling does
+                # not read. Fill it here or the row stays blank for every
+                # consumer that keys on it, the unsettled feed included.
+                token_id=token_id,
+                signer_address=signer_address.lower(),
+                nonce=nonce,
+                signature=signature,
+                consent_signer=consent_signer.lower() if consent_signer else None,
+                status=EARN_STATUS_PENDING,
+            )
+            logger.info(
+                "earn %s %s signed: signer=%s to=%s token=%s amount=%s nonce=%s",
+                operation, existing_id, signer_address, user_address, token_id,
+                amount, nonce,
+            )
+            return existing_id
         tx_id = str(uuid.uuid4())
         now = int(time.time())
         db = get_db()
@@ -839,12 +1286,51 @@ class VaultService:
             settled_at=int(time.time()),
         )
 
+    async def _complete_undeployed_if_clear(self, pool_id_hex: str) -> None:
+        """A routed deposit sweeps whatever was left raw on the earn account, so
+        once the pool has nothing idle either, earlier undeployed deposits
+        have been put to work along with it. Bookkeeping only: a failed read
+        here must not fail the deposit that just succeeded.
+        """
+        try:
+            strategy = self._registry.get(pool_id_hex)
+            if (
+                strategy.name != "manual"
+                and await strategy.idle_assets() == 0
+                and await strategy.stranded_assets() == 0
+                and await strategy.in_flight_assets() == 0
+            ):
+                self._complete_undeployed(pool_id_hex)
+        except Exception:
+            logger.warning("undeployed-row reconcile skipped pool=%s", pool_id_hex, exc_info=True)
+
+    def _complete_undeployed(self, pool_id_hex: str) -> None:
+        """Deposits whose routing failed sit as ``undeployed`` with their funds
+        idle in the pool. Once the idle balance has been deployed those funds
+        are working, so the rows have nothing left to wait for. ``updated_at``
+        is left alone: value history reads it as the deposit's settlement time.
+        """
+        db_write(
+            get_db(),
+            "UPDATE earn_transactions SET status = ?, error = NULL "
+            "WHERE lower(pool_id) = ? AND operation = ? AND status = ?",
+            (EARN_STATUS_COMPLETED, pool_id_hex.lower(), EARN_OP_DEPOSIT, EARN_STATUS_UNDEPLOYED),
+        )
+
     def _update_transaction(self, tx_id: str, **fields) -> None:
         db = get_db()
+        old_status = None
+        if "status" in fields:
+            row = db.execute(
+                "SELECT status FROM earn_transactions WHERE id = ?", (tx_id,)
+            ).fetchone()
+            old_status = row["status"] if row else None
         fields["updated_at"] = int(time.time())
         set_clause = ", ".join(f"{k} = ?" for k in fields)
         values = list(fields.values()) + [tx_id]
         db_write(db, f"UPDATE earn_transactions SET {set_clause} WHERE id = ?", tuple(values))
+        if "status" in fields and fields["status"] != old_status:
+            progress.record_status(tx_id, old_status, fields["status"])
 
     async def get_all_balances(
         self, token_hex: str, user_address: Optional[str] = None

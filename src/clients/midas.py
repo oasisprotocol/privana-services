@@ -8,6 +8,7 @@ from web3.exceptions import ContractLogicError
 
 from src.core.abi import load_abi
 from src.core.config import load_settings
+from src.models.settings import Settings
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +24,34 @@ ESTIMATE_REVERT_BACKOFF_SEC = 2.0
 GAS_HEADROOM_NUM, GAS_HEADROOM_DEN = 13, 10
 RECEIPT_RETRY_ATTEMPTS = 3
 RECEIPT_RETRY_BACKOFF_SEC = 2.0
+
+# Ethereum's base fee can rise sharply between building a transaction and
+# mining it. A legacy gasPrice fixed at build time then drops out of the
+# mempool and the transaction is simply never mined. Send EIP-1559 instead,
+# with a cap several base fees high: the cap is a ceiling, not what gets
+# paid, so it costs nothing in the normal case and survives a spike.
+FEE_CAP_BASE_MULTIPLIER = 4
+MIN_PRIORITY_FEE_WEI = 100_000
 ZERO_REFERRER_ID = b"\x00" * 32
+
+ETHEREUM_CHAIN_ID = 1
+BASE_CHAIN_ID = 8453
+
+
+def _rpc_url_for_chain(settings: Settings, chain_id: int) -> str:
+    urls = {
+        ETHEREUM_CHAIN_ID: (settings.ethereum_rpc_url, "ETHEREUM_RPC_URL"),
+        BASE_CHAIN_ID: (settings.base_rpc_url, "BASE_RPC_URL"),
+    }
+    if chain_id not in urls:
+        raise ValueError(
+            f"MidasClient: unsupported MIDAS_CHAIN_ID={chain_id}; "
+            f"expected one of {sorted(urls)}"
+        )
+    url, var = urls[chain_id]
+    if not url:
+        raise ValueError(f"MidasClient: MIDAS_CHAIN_ID={chain_id} requires {var} to be set")
+    return url
 
 
 class MidasClient:
@@ -31,10 +59,10 @@ class MidasClient:
     depositInstant / redeemInstant / approve / ERC20 transfer.
 
     Reads are free (no signer). Writes use the LP EOA via standard web3
-    signing — same shape as AaveClient. The strategy holds the business
-    logic; this class is a thin protocol wrapper. Midas only exists on Base
-    mainnet, so this client only gets constructed on deploys where
-    BASE_RPC_URL points there (testnet leaves MIDAS_POOL_ASSETS empty).
+    signing, same shape as AaveClient. The strategy holds the business
+    logic; this class is a thin protocol wrapper. Midas is deployed on
+    several chains and keeps its instant redemption liquidity on Ethereum,
+    so MIDAS_CHAIN_ID picks which chain RPC this client dials.
 
     Four contracts are bound at construction so the strategy never reaches
     for raw addresses: issuance vault, redemption vault, mTBILL token,
@@ -43,7 +71,9 @@ class MidasClient:
 
     def __init__(self) -> None:
         settings = load_settings()
-        self.w3 = Web3(Web3.HTTPProvider(settings.base_rpc_url))
+        self.w3 = Web3(
+            Web3.HTTPProvider(_rpc_url_for_chain(settings, settings.midas_chain_id))
+        )
 
         self.issuance_vault_address = Web3.to_checksum_address(
             settings.midas_issuance_vault_address
@@ -84,11 +114,14 @@ class MidasClient:
         return self._account.address
 
     def get_oracle_answer(self) -> int:
-        """Raw `latestAnswer` from Chronicle MTBILL/USD. Caller must normalize
-        with `get_oracle_decimals()` because Chronicle feeds on Base are not
-        guaranteed 18-decimal.
+        """Raw MTBILL/USD answer from the feed's `latestRoundData`. Caller
+        must normalize with `get_oracle_decimals()`, since the feeds are not
+        guaranteed 18-decimal. `latestRoundData` rather than `latestAnswer`:
+        the Ethereum feed reverts on the latter for every caller, and the
+        health probe already reads the former.
         """
-        return self.oracle.functions.latestAnswer().call()
+        answer, _ = self.get_oracle_round()
+        return answer
 
     def get_oracle_decimals(self) -> int:
         return self.oracle.functions.decimals().call()
@@ -103,9 +136,9 @@ class MidasClient:
         )
         return int(answer), int(updated_at)
 
-    def get_mtbill_balance(self, holder: str) -> int:
+    def get_mtbill_balance(self, holder: str, block: Optional[int] = None) -> int:
         holder = Web3.to_checksum_address(holder)
-        return self.mtbill.functions.balanceOf(holder).call()
+        return self.mtbill.functions.balanceOf(holder).call(block_identifier=block if block is not None else "latest")
 
     def is_issuance_paused(self) -> bool:
         return bool(self.issuance_vault.functions.paused().call())
@@ -113,11 +146,16 @@ class MidasClient:
     def is_redemption_paused(self) -> bool:
         return bool(self.redemption_vault.functions.paused().call())
 
-    def get_redemption_instant_fee_bps(self) -> int:
-        """`instantFee` is stored in basis-points on the redemption vault.
-        Strategy uses it to over-redeem just enough to cover the fee.
+    def get_redemption_fee_bps(self, token_out: str) -> int:
+        """The fee the redemption vault takes on an instant redeem into
+        `token_out`, in basis points: the per-token fee plus `instantFee`,
+        which is how the vault itself adds them up. Strategy sizes the
+        redeem against it.
         """
-        return int(self.redemption_vault.functions.instantFee().call())
+        token = Web3.to_checksum_address(token_out)
+        _, token_fee, _, _ = self.redemption_vault.functions.tokensConfig(token).call()
+        instant_fee = self.redemption_vault.functions.instantFee().call()
+        return int(token_fee) + int(instant_fee)
 
     def get_issuance_min_amount(self) -> int:
         return int(self.issuance_vault.functions.minAmount().call())
@@ -125,11 +163,13 @@ class MidasClient:
     def get_redemption_min_amount(self) -> int:
         return int(self.redemption_vault.functions.minAmount().call())
 
-    def get_erc20_balance(self, asset_address: str, holder: Optional[str] = None) -> int:
+    def get_erc20_balance(
+        self, asset_address: str, holder: Optional[str] = None, block: Optional[int] = None,
+    ) -> int:
         asset = Web3.to_checksum_address(asset_address)
         account = Web3.to_checksum_address(holder) if holder else self.account_address
         contract = self.w3.eth.contract(address=asset, abi=ERC20_ABI)
-        return contract.functions.balanceOf(account).call()
+        return contract.functions.balanceOf(account).call(block_identifier=block if block is not None else "latest")
 
     def get_allowance(self, asset_address: str, spender: str, owner: Optional[str] = None) -> int:
         asset = Web3.to_checksum_address(asset_address)
@@ -256,6 +296,24 @@ class MidasClient:
                     time.sleep(RECEIPT_RETRY_BACKOFF_SEC * attempt)
         raise last_exc
 
+    def _fee_params(self) -> dict:
+        """Fee fields for a write, EIP-1559 where the chain supports it.
+
+        Falls back to the node's legacy gasPrice on a chain that reports no
+        base fee, so this stays correct if the client is ever pointed at one.
+        """
+        base = self.w3.eth.get_block("latest").get("baseFeePerGas")
+        if base is None:
+            return {"gasPrice": self.w3.eth.gas_price}
+        try:
+            tip = max(self.w3.eth.max_priority_fee, MIN_PRIORITY_FEE_WEI)
+        except Exception:
+            tip = MIN_PRIORITY_FEE_WEI
+        return {
+            "maxFeePerGas": base * FEE_CAP_BASE_MULTIPLIER + tip,
+            "maxPriorityFeePerGas": tip,
+        }
+
     def _send_write_tx(self, to_address: str, contract, function_name: str, args: list) -> str:
         if self._account is None:
             raise RuntimeError("MidasClient has no signer configured")
@@ -266,8 +324,8 @@ class MidasClient:
             "from": self._account.address,
             "nonce": nonce,
             "gas": gas_limit,
-            "gasPrice": self.w3.eth.gas_price,
             "chainId": self.w3.eth.chain_id,
+            **self._fee_params(),
         })
         signed = self._account.sign_transaction(tx)
         tx_hash = self.w3.eth.send_raw_transaction(signed.raw_transaction)

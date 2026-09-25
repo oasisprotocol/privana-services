@@ -47,6 +47,14 @@ class BaseStrategy(ABC):
         """
         return []
 
+    async def min_deploy_amount(self) -> int:
+        """Smallest amount worth moving into the protocol, in token base
+        units. Below it the protocol would reject the deposit or the bridge
+        would cost more than the position earns. Zero where the protocol
+        takes any amount.
+        """
+        return 0
+
     @abstractmethod
     async def deposit_to_earn(self, amount: int) -> None:
         """Move idle pool funds into the external earn protocol."""
@@ -62,6 +70,19 @@ class BaseStrategy(ABC):
         balance for Aave). Returns 0 for strategies that don't hold funds
         externally (e.g. manual).
         """
+
+    async def in_flight_assets(self) -> int:
+        """Pool money accounting has debited for a bridge that has not landed
+        on the earn account yet. Nothing is settled while this is non-zero.
+        """
+        return 0
+
+    async def stranded_assets(self) -> int:
+        """Pool money sitting raw on the earn account: bridged in for a
+        deposit whose protocol leg never ran, or left behind by a redeem.
+        Counted in ``total_assets``; the idle sweep puts it to work.
+        """
+        return 0
 
     @abstractmethod
     async def idle_assets(self) -> int:

@@ -119,7 +119,8 @@ def midas_client():
     client.get_mtbill_balance.return_value = 0
     client.is_issuance_paused.return_value = False
     client.is_redemption_paused.return_value = False
-    client.get_redemption_instant_fee_bps.return_value = 0
+    client.get_redemption_fee_bps.return_value = 0
+    client.get_redemption_min_amount.return_value = 0
     return client
 
 
@@ -467,9 +468,7 @@ async def test_deposit_to_earn_bridges_approves_and_mints(
             pending_withdrawals=[_PendingWithdrawal(index=42, amount=1_000_000)],
         ),
     ]
-    privana.get_withdrawal_info.return_value = _WithdrawalInfo(
-        index=42, resolved=True, tx_identifier="0xresolved",
-    )
+    midas_client.get_erc20_balance.side_effect = [0, 0, 1_000_000, 1_000_000]
     midas_client.get_allowance.return_value = 0
     midas_client.get_oracle_answer.return_value = 10**18
     midas_client.get_oracle_decimals.return_value = 18
@@ -504,13 +503,120 @@ async def test_deposit_to_earn_skips_approve_when_allowance_sufficient(
             pending_withdrawals=[_PendingWithdrawal(index=1, amount=500_000)],
         ),
     ]
-    privana.get_withdrawal_info.return_value = _WithdrawalInfo(index=1, resolved=True)
+    midas_client.get_erc20_balance.side_effect = [0, 0, 500_000, 500_000]
     midas_client.get_allowance.return_value = 10**12
 
     await strategy.deposit_to_earn(500_000)
 
     midas_client.approve.assert_not_called()
     midas_client.deposit_instant.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_bridge_lands_even_when_accounting_never_lists_it_pending(
+    strategy, midas_client, privana,
+) -> None:
+    privana.get_pending_withdrawals = AsyncMock(
+        return_value=_PendingWithdrawalsResponse(user_address=POOL_ADDRESS, pending_withdrawals=[]),
+    )
+    privana.get_withdrawal_info = AsyncMock(side_effect=AssertionError("must not be consulted"))
+    midas_client.get_erc20_balance.side_effect = [0, 0, 0, 0, 1_000_000, 1_000_000]
+
+    await strategy.deposit_to_earn(1_000_000)
+
+    privana.request_withdrawal.assert_awaited_once()
+    midas_client.deposit_instant.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_bridge_keeps_polling_through_a_failed_balance_read(
+    strategy, midas_client, privana,
+) -> None:
+    midas_client.get_erc20_balance.side_effect = [0, 0, RuntimeError("rpc down"), 1_000_000, 1_000_000]
+
+    await strategy.deposit_to_earn(1_000_000)
+
+    midas_client.deposit_instant.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_deposit_to_earn_mints_everything_on_the_eoa(
+    strategy, midas_client, privana,
+) -> None:
+    midas_client.get_erc20_balance.side_effect = [0, 0, 1_500_000, 1_500_000]
+    midas_client.get_oracle_answer.return_value = 10**18
+    midas_client.get_oracle_decimals.return_value = 18
+
+    await strategy.deposit_to_earn(1_000_000)
+
+    assert midas_client.approve.call_args.args[2] == 1_500_000
+    assert midas_client.deposit_instant.call_args.args[1] == 1_500_000 * 10**12
+
+
+@pytest.mark.asyncio
+async def test_deposit_to_earn_uses_funds_already_on_the_eoa(
+    strategy, midas_client, privana,
+) -> None:
+    midas_client.get_erc20_balance.return_value = 1_000_000
+
+    await strategy.deposit_to_earn(1_000_000)
+
+    privana.request_withdrawal.assert_not_awaited()
+    midas_client.deposit_instant.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_withdraw_from_earn_spends_raw_funds_before_the_position(
+    strategy, midas_client, privana,
+) -> None:
+    midas_client.get_erc20_balance.return_value = 1_000_000
+    privana.get_balance = AsyncMock(
+        side_effect=[
+            _Balance(user_address=POOL_ADDRESS, token_id=TOKEN_ID, balance=0),
+            _Balance(user_address=POOL_ADDRESS, token_id=TOKEN_ID, balance=1_000_000),
+        ]
+    )
+    privana.check_deposit = AsyncMock(
+        return_value=_DepositCheckResponse(status="accepted", deposit_id="dep-1")
+    )
+
+    await strategy.withdraw_from_earn(1_000_000)
+
+    midas_client.redeem_instant.assert_not_called()
+    midas_client.transfer_erc20.assert_called_once_with(ASSET_ADDRESS, DEPOSIT_ADDRESS_BASE, 1_000_000)
+
+
+@pytest.mark.asyncio
+async def test_withdraw_from_earn_redeems_at_least_the_vault_minimum(
+    strategy, midas_client, privana,
+) -> None:
+    midas_client.get_redemption_min_amount.return_value = 10**18
+    midas_client.get_erc20_balance.side_effect = [0, 1_100_000]
+    privana.get_balance = AsyncMock(
+        side_effect=[
+            _Balance(user_address=POOL_ADDRESS, token_id=TOKEN_ID, balance=0),
+            _Balance(user_address=POOL_ADDRESS, token_id=TOKEN_ID, balance=1_100_000),
+        ]
+    )
+    privana.check_deposit = AsyncMock(
+        return_value=_DepositCheckResponse(status="accepted", deposit_id="dep-1")
+    )
+
+    await strategy.withdraw_from_earn(500_000)
+
+    assert midas_client.redeem_instant.call_args.args[1] == 10**18
+    assert midas_client.redeem_instant.call_args.args[2] == 500_000 * 10**12
+    midas_client.transfer_erc20.assert_called_once_with(ASSET_ADDRESS, DEPOSIT_ADDRESS_BASE, 1_100_000)
+
+
+@pytest.mark.asyncio
+async def test_total_assets_counts_usdc_still_on_the_eoa(strategy, midas_client) -> None:
+    midas_client.get_erc20_balance.return_value = 5_000_000
+    midas_client.get_mtbill_balance.return_value = 20 * 10**18
+    midas_client.get_oracle_answer.return_value = 10**18
+    midas_client.get_oracle_decimals.return_value = 18
+
+    assert await strategy.total_assets() == 25_000_000
 
 
 @pytest.mark.asyncio
@@ -533,25 +639,30 @@ async def test_withdraw_from_earn_redeems_forwards_and_polls(
     midas_client.get_erc20_balance.side_effect = [0, 1_002_300]
     midas_client.get_oracle_answer.return_value = 10**18
     midas_client.get_oracle_decimals.return_value = 18
-    midas_client.get_redemption_instant_fee_bps.return_value = 25
+    midas_client.get_redemption_fee_bps.return_value = 25
 
     await strategy.withdraw_from_earn(1_000_000)
 
     midas_client.redeem_instant.assert_called_once()
     redeem_args = midas_client.redeem_instant.call_args.args
     assert redeem_args[0] == ASSET_ADDRESS
-    # baseline_mtbill at price=1.0 is 10**18; with 25bps fee buffer:
-    # mtbill_to_redeem = 10**18 * 10025 / 10000 = 1_002_500_000_000_000_000
-    assert redeem_args[1] == 1_002_500_000_000_000_000
+    # At price=1.0 with a 25bps fee, sized against the vault's own arithmetic
+    # (fee taken in mTBILL, remainder converted and floored) the smallest
+    # amount that clears 1_000_000 is 1002507000000000000, paying 1000000. The old
+    # (1 + fee) sizing came to 1_002_500_000_000_000_000 and paid only
+    # 999_994, which is what made the payout transfer revert.
+    assert redeem_args[1] == 1002507000000000000
     # min_receive_usdc = 1_000_000 * 9950 / 10000 = 995_000, scaled to base-18
-    assert redeem_args[2] == 995_000 * 10**12
+    # The pool must receive at least the amount it then transfers on, so the
+    # floor is the target itself rather than a slippage band below it.
+    assert redeem_args[2] == 1_000_000 * 10**12
 
     # The redemption vault pulls mTBILL via transferFrom, so the allowance
     # (fixture returns 0) must be topped up before redeeming.
     midas_client.approve.assert_called_once_with(
         midas_client.mtbill_address,
         midas_client.redemption_vault_address,
-        1_002_500_000_000_000_000,
+        1002507000000000000,
     )
 
     # The realized USDC delta is forwarded, not the requested target amount.
@@ -585,7 +696,7 @@ async def test_withdraw_from_earn_renudges_check_deposit_until_accepted(
     midas_client.get_erc20_balance.side_effect = [0, 1_002_300]
     midas_client.get_oracle_answer.return_value = 10**18
     midas_client.get_oracle_decimals.return_value = 18
-    midas_client.get_redemption_instant_fee_bps.return_value = 25
+    midas_client.get_redemption_fee_bps.return_value = 25
 
     await strategy.withdraw_from_earn(1_000_000)
 
@@ -603,13 +714,98 @@ async def test_withdraw_from_earn_skips_approve_when_allowance_sufficient(
     midas_client.get_erc20_balance.side_effect = [0, 1_002_300]
     midas_client.get_oracle_answer.return_value = 10**18
     midas_client.get_oracle_decimals.return_value = 18
-    midas_client.get_redemption_instant_fee_bps.return_value = 25
+    midas_client.get_redemption_fee_bps.return_value = 25
     midas_client.get_allowance.return_value = 10**19
 
     await strategy.withdraw_from_earn(1_000_000)
 
     midas_client.approve.assert_not_called()
     midas_client.redeem_instant.assert_called_once()
+
+
+def test_redemption_payout_reproduces_the_mainnet_vault_to_the_unit():
+    """Observed 2026-09-22 on the RedemptionVaultWithUSTB: the fee-grossed
+    sizing asked for 4571502133084924585 mTBILL and the vault paid 4_899_999
+    against a 4_900_000 target. Fee taken in mTBILL first explains the unit."""
+    from src.services.earn.strategies.midas import MidasStrategy
+
+    price, decimals, fee_bps = 107_260_849, 8, 7
+    assert MidasStrategy.redemption_payout(4571502133084924585, price, decimals, fee_bps) == 4_899_999
+
+
+def test_size_redeem_clears_the_target_the_vault_rejected():
+    """The same mainnet case: the corrected sizing is what the vault accepted
+    with the floor set to the full amount, paying exactly the target."""
+    from src.services.earn.strategies.midas import MidasStrategy
+
+    price, decimals, fee_bps = 107_260_849, 8, 7
+    sized = MidasStrategy.size_redeem(4_900_000, price, decimals, fee_bps)
+    assert sized == 4571503065391548412
+    assert MidasStrategy.redemption_payout(sized, price, decimals, fee_bps) == 4_900_000
+
+
+def test_size_redeem_never_falls_short_and_never_overshoots_by_a_unit():
+    from src.services.earn.strategies.midas import MidasStrategy
+
+    for price, decimals in ((107_260_849, 8), (10**18, 18), (99_512_345, 8)):
+        for fee_bps in (0, 7, 25, 100):
+            for target in range(1_000_000, 30_000_001, 271_733):
+                sized = MidasStrategy.size_redeem(target, price, decimals, fee_bps)
+                paid = MidasStrategy.redemption_payout(sized, price, decimals, fee_bps)
+                assert paid >= target, (price, fee_bps, target, paid)
+                unit = MidasStrategy.convert_usdc_to_mtbill_amount(1, price, decimals, round_up=True)
+                assert MidasStrategy.redemption_payout(sized - unit, price, decimals, fee_bps) < target
+
+
+def test_the_redeem_is_sized_to_cover_the_payout_after_the_instant_fee():
+    """The vault takes its fee out of the USDC it pays, so a redeem sized by
+    multiplying by (1 + fee) lands a few base units short and the transfer
+    that follows cannot be covered."""
+    from src.services.earn.strategies.midas import MidasStrategy
+
+    price, decimals, fee_bps = 107_239_415, 8, 7
+    scale = 10 ** (decimals + 12)
+
+    def vault_pays(mtbill: int) -> int:
+        before_fee = (mtbill * price) // scale
+        return before_fee - (before_fee * fee_bps) // 10_000
+
+    def sized(amount: int) -> int:
+        gross = amount * 10_000 // (10_000 - fee_bps)
+        return MidasStrategy.convert_usdc_to_mtbill_amount(
+            gross, price, decimals, round_up=True,
+        )
+
+    for amount in (1_000_000, 4_899_997, 4_999_999, 5_000_000, 17_000_003):
+        assert vault_pays(sized(amount)) >= amount, amount
+
+    # The old (1 + fee) sizing is what shipped and what fell short.
+    old = MidasStrategy.convert_usdc_to_mtbill_amount(4_999_999, price, decimals)
+    old = old * (10_000 + fee_bps) // 10_000
+    assert vault_pays(old) < 4_999_999
+
+    # And when the conversion comes out exact it asks for nothing extra: a pool
+    # being emptied has no spare base unit, so a flat +1 would revert there.
+    assert MidasStrategy.convert_usdc_to_mtbill_amount(
+        1_000_000, 10**18, 18, round_up=True,
+    ) == 10**18
+
+
+@pytest.mark.asyncio
+async def test_withdraw_from_earn_refuses_an_absurd_instant_fee(
+    strategy, midas_client, privana,
+) -> None:
+    from src.services.earn.strategies.midas import MidasInstantUnavailableError
+
+    privana.get_balance.return_value = _Balance(
+        user_address=POOL_ADDRESS, token_id=TOKEN_ID, balance=0,
+    )
+    midas_client.get_redemption_fee_bps.return_value = 10_000
+
+    with pytest.raises(MidasInstantUnavailableError, match="refusing to redeem"):
+        await strategy.withdraw_from_earn(1_000_000)
+
+    midas_client.redeem_instant.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -639,13 +835,33 @@ async def test_withdraw_from_earn_raises_when_no_usdc_realized(
     privana.get_balance.return_value = _Balance(
         user_address=POOL_ADDRESS, token_id=TOKEN_ID, balance=0,
     )
-    midas_client.get_erc20_balance.side_effect = [500_000, 500_000]
+    midas_client.get_erc20_balance.return_value = 500_000
 
-    with pytest.raises(MidasInstantUnavailableError, match="produced no USDC"):
-        await strategy.withdraw_from_earn(1_000_000)
+    with patch("src.services.earn.strategies.midas.asyncio.sleep", new=AsyncMock()):
+        with pytest.raises(MidasInstantUnavailableError, match="produced no USDC"):
+            await strategy.withdraw_from_earn(1_000_000)
 
     midas_client.transfer_erc20.assert_not_called()
     privana.check_deposit.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_withdraw_from_earn_rereads_a_lagging_balance(
+    strategy, midas_client, privana,
+) -> None:
+    privana.get_balance.side_effect = [
+        _Balance(user_address=POOL_ADDRESS, token_id=TOKEN_ID, balance=0),
+        _Balance(user_address=POOL_ADDRESS, token_id=TOKEN_ID, balance=1_000_000),
+    ]
+    midas_client.get_erc20_balance.side_effect = [0, 0, 0, 1_000_000]
+    privana.check_deposit.return_value = _DepositCheckResponse(
+        status="credited", deposit_id="0xdep",
+    )
+
+    with patch("src.services.earn.strategies.midas.asyncio.sleep", new=AsyncMock()):
+        await strategy.withdraw_from_earn(1_000_000)
+
+    midas_client.transfer_erc20.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -703,3 +919,58 @@ async def test_bridge_raises_after_max_poll_attempts(midas_client, privana) -> N
         await strategy.deposit_to_earn(1_000_000)
 
     midas_client.deposit_instant.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_min_deploy_amount_rounds_the_vault_floor_up(strategy, midas_client) -> None:
+    # The issuance vault states its floor in Midas base-18; rounding down
+    # would hand it an amount just under its own minimum.
+    midas_client.get_issuance_min_amount.return_value = 1_500_000_000_000_000_000
+
+    assert await strategy.min_deploy_amount() == 1_500_000
+
+
+@pytest.mark.asyncio
+async def test_min_deploy_amount_never_rounds_to_below_the_floor(strategy, midas_client) -> None:
+    midas_client.get_issuance_min_amount.return_value = 1_000_000_000_001
+
+    assert await strategy.min_deploy_amount() == 2
+
+
+@pytest.mark.asyncio
+async def test_withdraw_reports_its_stages_in_order(strategy, midas_client, privana) -> None:
+    from privana.client.errors import NetworkError
+
+    midas_client.get_erc20_balance.side_effect = [0, 1_000_000]
+    privana.get_balance = AsyncMock(
+        side_effect=[
+            _Balance(user_address=POOL_ADDRESS, token_id=TOKEN_ID, balance=0),
+            _Balance(user_address=POOL_ADDRESS, token_id=TOKEN_ID, balance=0),
+            _Balance(user_address=POOL_ADDRESS, token_id=TOKEN_ID, balance=1_000_000),
+        ]
+    )
+    privana.check_deposit = AsyncMock(
+        side_effect=[
+            NetworkError("400 Bad Request: Insufficient finality: 9/32 confirmations"),
+            _DepositCheckResponse(status="accepted", deposit_id="dep-1"),
+        ]
+    )
+    with patch("src.services.earn.strategies.midas.progress") as progress:
+        await strategy.withdraw_from_earn(1_000_000)
+
+    calls = [c.args[0] for c in progress.update.call_args_list]
+    assert calls == [progress.RECLAIMING, progress.RETURNING]
+    progress.update_finality.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_deposit_reports_bridging_then_deploying(strategy, midas_client, privana) -> None:
+    midas_client.get_erc20_balance.side_effect = [0, 0, 1_000_000, 1_000_000]
+
+    with patch("src.services.earn.strategies.midas.progress") as progress:
+        await strategy.deposit_to_earn(1_000_000)
+
+    assert [c.args[0] for c in progress.update.call_args_list] == [
+        progress.BRIDGING,
+        progress.DEPLOYING,
+    ]

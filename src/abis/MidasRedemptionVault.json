@@ -21,6 +21,20 @@
       "type": "function"
     },
     {
+      "inputs": [
+        {"internalType": "address", "name": "", "type": "address"}
+      ],
+      "name": "tokensConfig",
+      "outputs": [
+        {"internalType": "address", "name": "dataFeed", "type": "address"},
+        {"internalType": "uint256", "name": "fee", "type": "uint256"},
+        {"internalType": "uint256", "name": "allowance", "type": "uint256"},
+        {"internalType": "bool", "name": "stable", "type": "bool"}
+      ],
+      "stateMutability": "view",
+      "type": "function"
+    },
+    {
       "inputs": [],
       "name": "instantDailyLimit",
       "outputs": [

@@ -5,10 +5,28 @@ EIP712_DOMAIN_TYPE = {
     "EIP712Domain": [
         {"name": "name", "type": "string"},
         {"name": "version", "type": "string"},
-        {"name": "chainId", "type": "uint256"},
         {"name": "verifyingContract", "type": "address"},
+        {"name": "salt", "type": "bytes32"},
     ]
 }
+
+
+def _salted_domain(name: str, chain_id: int, verifying_contract: str) -> dict:
+    """Build the salted EIP-712 domain (fields bitmap 0x1b on-chain).
+
+    The domain omits ``chainId`` — wallets refuse eth_signTypedData_v4 when
+    it differs from their connected network, which forced users onto
+    Sapphire for every signature. The chain binding rides in ``salt`` as
+    bytes32(chain id) instead, which wallets do not validate but which still
+    makes signatures unreplayable across deployments.
+    """
+    return {
+        "name": name,
+        "version": "1",
+        "verifyingContract": verifying_contract,
+        "salt": chain_id.to_bytes(32, "big"),
+    }
+
 
 TRANSFER_TYPES = {
     "Transfer": [
@@ -51,12 +69,7 @@ def sign_transfer(
     to sign with the right key; accounting binds the recovered address to
     ``transferNonces[user]`` for replay protection.
     """
-    domain_data = {
-        "name": "AccountingModule",
-        "version": "1",
-        "chainId": chain_id,
-        "verifyingContract": verifying_contract,
-    }
+    domain_data = _salted_domain("AccountingModule", chain_id, verifying_contract)
 
     message_data = {
         "toAddress": to_address,
@@ -90,12 +103,7 @@ def recover_transfer_signer(
     than trusting a caller-supplied address, so the API does the same:
     whoever signed the input transfer IS the user.
     """
-    domain_data = {
-        "name": "AccountingModule",
-        "version": "1",
-        "chainId": chain_id,
-        "verifyingContract": verifying_contract,
-    }
+    domain_data = _salted_domain("AccountingModule", chain_id, verifying_contract)
 
     message_data = {
         "toAddress": to_address,
@@ -126,12 +134,7 @@ def recover_withdraw_signer(
     payout recipient, so anything that attributes a withdrawal to a user must
     key on this address.
     """
-    domain_data = {
-        "name": "EarnManager",
-        "version": "1",
-        "chainId": chain_id,
-        "verifyingContract": earn_manager_address,
-    }
+    domain_data = _salted_domain("EarnManager", chain_id, earn_manager_address)
 
     message_data = {
         "poolId": _to_bytes32(pool_id),
@@ -168,12 +171,7 @@ def sign_withdraw_consent(
     the user's behalf without the contract ever needing to be told who the
     user is.
     """
-    domain_data = {
-        "name": "EarnManager",
-        "version": "1",
-        "chainId": chain_id,
-        "verifyingContract": earn_manager_address,
-    }
+    domain_data = _salted_domain("EarnManager", chain_id, earn_manager_address)
 
     message_data = {
         "poolId": _to_bytes32(pool_id),

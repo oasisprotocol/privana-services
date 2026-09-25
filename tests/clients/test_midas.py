@@ -18,6 +18,8 @@ def _make_client(with_signer: bool = False):
     settings = replace(
         load_settings(),
         base_rpc_url="http://localhost:8545",
+        ethereum_rpc_url="http://localhost:8546",
+        midas_chain_id=1,
         midas_issuance_vault_address=TEST_ISSUANCE_VAULT,
         midas_redemption_vault_address=TEST_REDEMPTION_VAULT,
         midas_mtbill_token_address=TEST_MTBILL,
@@ -73,16 +75,44 @@ def _wire_write_chain(w3, tx_hash_byte: int = 0xAB, status: int = 1) -> None:
     w3.eth.get_transaction_count.return_value = 7
     w3.eth.gas_price = 10**9
     w3.eth.chain_id = 8453
+    w3.eth.get_block.return_value = {"baseFeePerGas": 10**9}
+    w3.eth.max_priority_fee = 10**6
     w3.eth.send_raw_transaction.return_value = bytes([tx_hash_byte] * 32)
     w3.eth.wait_for_transaction_receipt.return_value = {"status": status}
 
 
-def test_get_oracle_answer_returns_latestAnswer():
+def test_writes_are_priced_with_a_cap_above_the_base_fee():
+    from src.clients.midas import FEE_CAP_BASE_MULTIPLIER, MIN_PRIORITY_FEE_WEI
+
     client, c = _make_client()
-    c["oracle"].functions.latestAnswer.return_value.call.return_value = 1_002_345_678_901
+    _attach_signer(client)
+    _wire_write_chain(client.w3)
+
+    params = client._fee_params()
+
+    assert params["maxPriorityFeePerGas"] == max(10**6, MIN_PRIORITY_FEE_WEI)
+    assert params["maxFeePerGas"] == 10**9 * FEE_CAP_BASE_MULTIPLIER + params["maxPriorityFeePerGas"]
+    assert "gasPrice" not in params
+
+
+def test_writes_fall_back_to_legacy_pricing_without_a_base_fee():
+    client, c = _make_client()
+    _attach_signer(client)
+    _wire_write_chain(client.w3)
+    client.w3.eth.get_block.return_value = {}
+
+    assert client._fee_params() == {"gasPrice": 10**9}
+
+
+def test_get_oracle_answer_reads_the_answer_from_latestRoundData():
+    client, c = _make_client()
+    c["oracle"].functions.latestRoundData.return_value.call.return_value = (
+        12345, 1_002_345_678_901, 1_700_000_000, 1_700_086_400, 12345,
+    )
 
     assert client.get_oracle_answer() == 1_002_345_678_901
-    c["oracle"].functions.latestAnswer.assert_called_once_with()
+    # The Ethereum feed reverts on latestAnswer for every caller.
+    c["oracle"].functions.latestAnswer.assert_not_called()
 
 
 def test_get_oracle_decimals_returns_uint8():
@@ -141,11 +171,15 @@ def test_is_redemption_paused_reflects_contract(paused_value):
     assert client.is_redemption_paused() is paused_value
 
 
-def test_get_redemption_instant_fee_bps_reads_redemption_vault():
+def test_get_redemption_fee_bps_adds_the_token_fee_to_the_instant_fee():
     client, c = _make_client()
     c["redemption"].functions.instantFee.return_value.call.return_value = 25
+    c["redemption"].functions.tokensConfig.return_value.call.return_value = (
+        "0xfeed", 5, 0, True,
+    )
 
-    assert client.get_redemption_instant_fee_bps() == 25
+    assert client.get_redemption_fee_bps(TEST_USDC) == 30
+    c["redemption"].functions.tokensConfig.assert_called_once_with(TEST_USDC)
 
 
 def test_get_issuance_min_amount_reads_issuance_vault():
@@ -291,3 +325,59 @@ def test_write_tx_raises_on_reverted_receipt():
 
     with pytest.raises(RuntimeError, match="depositInstant tx reverted"):
         client.deposit_instant(TEST_USDC, 1_000_000, 950_000_000_000_000_000)
+
+
+def _settings_for_chain(chain_id: int):
+    return replace(
+        load_settings(),
+        base_rpc_url="http://base.example",
+        ethereum_rpc_url="http://ethereum.example",
+        midas_chain_id=chain_id,
+        midas_issuance_vault_address=TEST_ISSUANCE_VAULT,
+        midas_redemption_vault_address=TEST_REDEMPTION_VAULT,
+        midas_mtbill_token_address=TEST_MTBILL,
+        midas_oracle_address=TEST_ORACLE,
+    )
+
+
+def _construct_with(settings):
+    with patch("src.clients.midas.load_settings") as mock_settings, \
+         patch("src.clients.midas.Web3") as mock_web3_cls:
+        mock_settings.return_value = settings
+        mock_web3_cls.return_value = MagicMock()
+        mock_web3_cls.HTTPProvider = MagicMock()
+        mock_web3_cls.to_checksum_address = lambda a: a
+
+        from src.clients.midas import MidasClient
+        MidasClient()
+
+    return mock_web3_cls.HTTPProvider
+
+
+@pytest.mark.parametrize(
+    "chain_id,expected_url",
+    [(1, "http://ethereum.example"), (8453, "http://base.example")],
+)
+def test_dials_the_rpc_for_the_configured_midas_chain(chain_id, expected_url):
+    provider = _construct_with(_settings_for_chain(chain_id))
+    provider.assert_called_once_with(expected_url)
+
+
+def test_rejects_a_chain_with_no_rpc_configured():
+    settings = replace(_settings_for_chain(1), ethereum_rpc_url="")
+
+    with patch("src.clients.midas.load_settings") as mock_settings:
+        mock_settings.return_value = settings
+        from src.clients.midas import MidasClient
+
+        with pytest.raises(ValueError, match="requires ETHEREUM_RPC_URL"):
+            MidasClient()
+
+
+def test_rejects_an_unsupported_midas_chain():
+    with patch("src.clients.midas.load_settings") as mock_settings:
+        mock_settings.return_value = _settings_for_chain(999)
+        from src.clients.midas import MidasClient
+
+        with pytest.raises(ValueError, match="unsupported MIDAS_CHAIN_ID=999"):
+            MidasClient()

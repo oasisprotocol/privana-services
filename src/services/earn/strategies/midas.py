@@ -25,6 +25,7 @@ from src.clients.privana import (
     get_privana_client,
 )
 from src.core.config import load_settings
+from src.services.earn import progress
 from src.services.earn.strategies.base import ApyPoint, BaseStrategy
 from src.services.earn.strategies.defillama_history import defillama_apy_history
 
@@ -39,6 +40,13 @@ _NETWORK_BY_CHAIN_ID: dict[int, Network] = {
 
 DEFAULT_POLL_INTERVAL_SEC = 3.0
 DEFAULT_MAX_BRIDGE_POLL_ATTEMPTS = 200
+
+# A confirmed redeem receipt does not guarantee the next balanceOf sees it:
+# a load-balanced RPC can serve the read from a node still a block behind,
+# reporting the pre-redeem balance. Re-read a few times before concluding
+# the redeem produced nothing.
+REDEEM_BALANCE_POLL_ATTEMPTS = 10
+REDEEM_BALANCE_POLL_INTERVAL_SEC = 3.0
 
 _ACCEPTED_SUBMISSION_STATUSES = frozenset({"success", "pending", "accepted", "ok", "submitted"})
 
@@ -73,7 +81,7 @@ def _network_for_chain(chain_id: int) -> Network:
 
 class MidasStrategy(BaseStrategy):
     """Midas mTBILL strategy. Bridges pool USDC from the privana accounting
-    layer on Sapphire to the LP EOA on Base, mints mTBILL via the Midas
+    layer on Sapphire to the earn account on Base, mints mTBILL via the Midas
     Issuance Vault, and redeems via the Instant Redemption Vault on the way
     out.
 
@@ -132,7 +140,7 @@ class MidasStrategy(BaseStrategy):
 
         settings = load_settings()
         self._pool_address = pool_address or settings.earn_pool_address
-        self._lp_secret_key = settings.earn_pool_secret_key
+        self._ep_secret_key = settings.earn_pool_secret_key
         self._accounting_contract = settings.accounting_contract_address
         self._network = _network_for_chain(settings.accounting_chain_id)
         self._slippage_bps = (
@@ -195,6 +203,7 @@ class MidasStrategy(BaseStrategy):
         usdc_amount: int,
         oracle_price: int,
         oracle_decimals: int,
+        round_up: bool = False,
     ) -> int:
         """Convert USDC base units (6 decimals) to the equivalent mTBILL
         base units (18 decimals) at the given MTBILL/USD oracle price.
@@ -218,7 +227,43 @@ class MidasStrategy(BaseStrategy):
         is_healthy() upstream.
         """
         scale = 10 ** (oracle_decimals + _DECIMAL_BALANCE)
+        if round_up:
+            # Sizing a redeem rounds up: landing a base unit short means the
+            # payout that follows cannot be covered.
+            return -(-usdc_amount * scale // oracle_price)
         return (usdc_amount * scale) // oracle_price
+
+    @staticmethod
+    def redemption_payout(
+        mtbill_amount: int, oracle_price: int, oracle_decimals: int, fee_bps: int
+    ) -> int:
+        """USDC base units the redemption vault pays for ``mtbill_amount``.
+
+        Mirrors the contract: the instant fee is taken in mTBILL, and the
+        remainder is converted at the oracle price with the result floored.
+        Reproduces the mainnet vault to the base unit.
+        """
+        net = mtbill_amount - mtbill_amount * fee_bps // 10_000
+        return (net * oracle_price) // (10 ** (oracle_decimals + _DECIMAL_BALANCE))
+
+    @classmethod
+    def size_redeem(
+        cls, usdc_target: int, oracle_price: int, oracle_decimals: int, fee_bps: int
+    ) -> int:
+        """Smallest mTBILL amount whose vault payout covers ``usdc_target``.
+
+        Starts from the fee-grossed estimate and steps up by one USDC base
+        unit of mTBILL until the vault's own payout clears the target, so the
+        redeem never asks for a base unit more than it needs.
+        """
+        gross = usdc_target * 10_000 // (10_000 - fee_bps)
+        mtbill = cls.convert_usdc_to_mtbill_amount(
+            gross, oracle_price, oracle_decimals, round_up=True
+        )
+        unit = cls.convert_usdc_to_mtbill_amount(1, oracle_price, oracle_decimals, round_up=True)
+        while cls.redemption_payout(mtbill, oracle_price, oracle_decimals, fee_bps) < usdc_target:
+            mtbill += unit
+        return mtbill
 
     @staticmethod
     def convert_mtbill_to_usdc_amount(
@@ -240,7 +285,7 @@ class MidasStrategy(BaseStrategy):
         return (mtbill_amount * oracle_price) // scale
 
     async def deposit_to_earn(self, amount: int) -> None:
-        """Bridge `amount` USDC from accounting on Sapphire to the LP EOA on
+        """Bridge `amount` USDC from accounting on Sapphire to the earn account on
         Base, then mint mTBILL via the Midas Issuance Vault.
 
         Steps:
@@ -249,45 +294,64 @@ class MidasStrategy(BaseStrategy):
           3. Price the deposit: read oracle, compute expected mTBILL out,
              apply slippage tolerance to derive min_receive_amount.
           4. depositInstant(USDC, amount in base-18, min_receive,
-             referrerId=0). mTBILL is minted to the LP EOA on success; vault
+             referrerId=0). mTBILL is minted to the earn account on success; vault
              sweeps USDC to its configured tokensReceiver atomically.
         """
         if amount <= 0:
             raise ValueError(f"deposit_to_earn requires a positive amount, got {amount}")
 
-        await self._bridge_to_base(amount)
+        await self._await_bridges_in_flight()
+        on_hand = await asyncio.to_thread(
+            self._client.get_erc20_balance, self._asset_address,
+        )
+        if on_hand >= amount:
+            logger.info(
+                "MidasStrategy.deposit_to_earn: %d already on the earn account (balance=%d); "
+                "skipping the bridge",
+                amount, on_hand,
+            )
+        else:
+            progress.update(progress.BRIDGING)
+            await self._bridge_to_base(amount - on_hand)
+            on_hand = await asyncio.to_thread(
+                self._client.get_erc20_balance, self._asset_address,
+            )
+        # Everything on the account is pool money, so mint all of it: a bridge
+        # a previous deposit gave up on would otherwise sit here earning nothing.
+        deploy = max(amount, on_hand)
+        progress.update(progress.DEPLOYING)
 
         allowance = await asyncio.to_thread(
             self._client.get_allowance,
             self._asset_address,
             self._client.issuance_vault_address,
         )
-        if allowance < amount:
+        if allowance < deploy:
             logger.info(
                 "MidasStrategy.deposit_to_earn: topping up allowance asset=%s current=%d needed=%d",
-                self._asset_address, allowance, amount,
+                self._asset_address, allowance, deploy,
             )
             await asyncio.to_thread(
                 self._client.approve,
                 self._asset_address,
                 self._client.issuance_vault_address,
-                amount,
+                deploy,
             )
 
         price, decimals = await asyncio.to_thread(self._read_oracle_price)
-        expected_mtbill = self.convert_usdc_to_mtbill_amount(amount, price, decimals)
+        expected_mtbill = self.convert_usdc_to_mtbill_amount(deploy, price, decimals)
         min_receive = expected_mtbill * (10_000 - self._slippage_bps) // 10_000
 
         tx_hash = await asyncio.to_thread(
             self._client.deposit_instant,
             self._asset_address,
-            amount * _BASE18_SCALE,
+            deploy * _BASE18_SCALE,
             min_receive,
         )
         logger.info(
             "MidasStrategy.deposit_to_earn: minted via Midas asset=%s amount=%d "
             "expected_mtbill=%d min_receive=%d tx=%s",
-            self._asset_address, amount, expected_mtbill, min_receive, tx_hash,
+            self._asset_address, deploy, expected_mtbill, min_receive, tx_hash,
         )
 
     async def withdraw_from_earn(self, amount: int) -> None:
@@ -297,7 +361,7 @@ class MidasStrategy(BaseStrategy):
 
         Steps:
           1. Snapshot the pool's accounting balance (for the credit poll).
-          2. Read oracle and the redemption-side instantFee. Compute the
+          2. Read oracle and the redemption-side fee. Compute the
              mTBILL amount to redeem, including a fee-rate buffer so that
              post-fee USDC out >= target. Compute min_receive_usdc in
              base-18. Top up the vault's mTBILL allowance if short.
@@ -314,15 +378,81 @@ class MidasStrategy(BaseStrategy):
         if amount <= 0:
             raise ValueError(f"withdraw_from_earn requires a positive amount, got {amount}")
 
+        progress.update(progress.RECLAIMING)
         pre_balance = await self._read_pool_balance()
 
-        price, decimals = await asyncio.to_thread(self._read_oracle_price)
-        fee_bps = await asyncio.to_thread(self._client.get_redemption_instant_fee_bps)
-        baseline_mtbill = self.convert_usdc_to_mtbill_amount(amount, price, decimals)
-        mtbill_to_redeem = baseline_mtbill * (10_000 + fee_bps) // 10_000
-        min_receive_usdc = (
-            amount * (10_000 - self._slippage_bps) // 10_000 * _BASE18_SCALE
+        # Anything already sitting raw on the account is pool money that was
+        # never minted; spend it before touching the position.
+        lp_usdc_before = await asyncio.to_thread(
+            self._client.get_erc20_balance, self._asset_address,
         )
+        from_raw = min(lp_usdc_before, amount)
+        realized_usdc = 0
+        if amount > from_raw:
+            realized_usdc = await self._redeem(amount - from_raw, lp_usdc_before)
+        realized_usdc += from_raw
+
+        # Acquired right before each authed call, not once for the flow: the
+        # getter refreshes the bearer token near expiry, and the redeem legs
+        # above can outlive a token that was fresh at the start.
+        async def _fetch_deposit_address():
+            client = await self._get_authed_privana()
+            return await client.get_deposit_address(
+                DepositAddressRequest(chain_type="evm")
+            )
+
+        deposit = await self._retry_on_network_error(
+            "get_deposit_address", _fetch_deposit_address
+        )
+
+        progress.update(progress.RETURNING)
+        transfer_tx = await asyncio.to_thread(
+            self._client.transfer_erc20,
+            self._asset_address,
+            deposit.deposit_address,
+            realized_usdc,
+        )
+        logger.info(
+            "MidasStrategy.withdraw_from_earn: forwarded to deposit_address=%s amount=%d tx=%s",
+            deposit.deposit_address, realized_usdc, transfer_tx,
+        )
+
+        target_balance = pre_balance + realized_usdc
+        await self._poll_until_credited(target_balance, transfer_tx, realized_usdc)
+        logger.info(
+            "MidasStrategy.withdraw_from_earn: pool balance credited pool=%s token=%s amount=%d",
+            self._pool_address, self._token_id, realized_usdc,
+        )
+
+    async def _redeem(self, amount: int, lp_usdc_before: int) -> int:
+        """Redeem enough mTBILL for `amount` USDC through the Instant
+        Redemption Vault and return the USDC that actually arrived.
+        """
+        price, decimals = await asyncio.to_thread(self._read_oracle_price)
+        fee_bps = await asyncio.to_thread(
+            self._client.get_redemption_fee_bps, self._asset_address,
+        )
+        if fee_bps >= 10_000:
+            raise MidasInstantUnavailableError(
+                f"Midas redemption fee is {fee_bps} bps; refusing to redeem"
+            )
+        # Sized against the vault's own arithmetic rather than an approximation
+        # of it. The redemption vault takes its fee in mTBILL first and then
+        # converts what is left, flooring once more on the way out. Sizing in
+        # USDC and grossing up for the fee lands one base unit under that on
+        # mainnet, and the transfer to the user then cannot be covered.
+        mtbill_to_redeem = self.size_redeem(amount, price, decimals, fee_bps)
+        # A shortfall left after spending raw funds can be smaller than the
+        # vault's minimum redeem. Redeem the minimum then; the surplus USDC
+        # is forwarded with the rest and sits idle until redeployed.
+        min_mtbill = await asyncio.to_thread(self._client.get_redemption_min_amount)
+        mtbill_to_redeem = max(mtbill_to_redeem, min_mtbill)
+        # The pool has to hand `amount` on to the user straight after this, so
+        # anything less is unusable. Floor the redeem at the target rather than
+        # at a slippage band below it: reverting here is recoverable, whereas a
+        # short fill leaves the payout to revert with the funds already out of
+        # the protocol.
+        min_receive_usdc = amount * _BASE18_SCALE
 
         mtbill_allowance = await asyncio.to_thread(
             self._client.get_allowance,
@@ -342,10 +472,6 @@ class MidasStrategy(BaseStrategy):
                 mtbill_to_redeem,
             )
 
-        lp_usdc_before = await asyncio.to_thread(
-            self._client.get_erc20_balance, self._asset_address,
-        )
-
         try:
             redeem_tx = await asyncio.to_thread(
                 self._client.redeem_instant,
@@ -359,9 +485,21 @@ class MidasStrategy(BaseStrategy):
                 f"mtbill_in={mtbill_to_redeem}): {exc}"
             ) from exc
 
-        lp_usdc_after = await asyncio.to_thread(
-            self._client.get_erc20_balance, self._asset_address,
-        )
+        lp_usdc_after = lp_usdc_before
+        for attempt in range(1, REDEEM_BALANCE_POLL_ATTEMPTS + 1):
+            lp_usdc_after = await asyncio.to_thread(
+                self._client.get_erc20_balance, self._asset_address,
+            )
+            if lp_usdc_after > lp_usdc_before:
+                break
+            if attempt < REDEEM_BALANCE_POLL_ATTEMPTS:
+                logger.warning(
+                    "MidasStrategy.withdraw_from_earn: redeem tx=%s confirmed but the "
+                    "USDC balance still reads %d (attempt %d/%d); re-reading",
+                    redeem_tx, lp_usdc_after, attempt, REDEEM_BALANCE_POLL_ATTEMPTS,
+                )
+                await asyncio.sleep(REDEEM_BALANCE_POLL_INTERVAL_SEC)
+
         realized_usdc = lp_usdc_after - lp_usdc_before
         if realized_usdc <= 0:
             raise MidasInstantUnavailableError(
@@ -374,50 +512,72 @@ class MidasStrategy(BaseStrategy):
             "min_usdc=%d realized_usdc=%d tx=%s",
             mtbill_to_redeem, min_receive_usdc, realized_usdc, redeem_tx,
         )
+        return realized_usdc
 
-        # Acquired right before each authed call, not once for the flow: the
-        # getter refreshes the bearer token near expiry, and the redeem legs
-        # above can outlive a token that was fresh at the start.
-        async def _fetch_deposit_address():
-            client = await self._get_authed_privana()
-            return await client.get_deposit_address(
-                DepositAddressRequest(chain_type="evm")
-            )
-
-        deposit = await self._retry_on_network_error(
-            "get_deposit_address", _fetch_deposit_address
-        )
-
-        transfer_tx = await asyncio.to_thread(
-            self._client.transfer_erc20,
-            self._asset_address,
-            deposit.deposit_address,
-            realized_usdc,
-        )
-        logger.info(
-            "MidasStrategy.withdraw_from_earn: forwarded to deposit_address=%s amount=%d tx=%s",
-            deposit.deposit_address, realized_usdc, transfer_tx,
-        )
-
-        target_balance = pre_balance + realized_usdc
-        await self._poll_until_credited(target_balance, transfer_tx, realized_usdc)
-        logger.info(
-            "MidasStrategy.withdraw_from_earn: pool balance credited pool=%s token=%s amount=%d",
-            self._pool_address, self._token_id, realized_usdc,
-        )
+    async def min_deploy_amount(self) -> int:
+        """The issuance vault's own minimum, converted from Midas base-18 to
+        token units and rounded up so the converted figure never lands just
+        under the vault's floor.
+        """
+        base18 = await asyncio.to_thread(self._client.get_issuance_min_amount)
+        return -(-base18 // _BASE18_SCALE)
 
     async def total_assets(self) -> int:
-        """Live AUM held by the pool address, in USDC base units. mTBILL
-        balance times the oracle price. Returns 0 when the pool holds no
-        mTBILL so callers fall back to the on-chain pool snapshot.
+        """Live AUM held by the pool address, in USDC base units: mTBILL
+        balance times the oracle price, plus any USDC sitting on the address
+        itself. That raw balance is pool money mid-flight, bridged in but not
+        yet minted; leaving it out would show the pool as short. Returns 0
+        when the address holds nothing so callers fall back to the on-chain
+        pool snapshot.
         """
+        # Both sides at one block, so a mint or redeem landing between the
+        # reads cannot show up on both of them.
+        block = await asyncio.to_thread(lambda: self._client.w3.eth.block_number)
         mtbill_bal = await asyncio.to_thread(
-            self._client.get_mtbill_balance, self._pool_address,
+            self._client.get_mtbill_balance, self._pool_address, block,
+        )
+        raw_usdc = await asyncio.to_thread(
+            self._client.get_erc20_balance, self._asset_address, None, block,
         )
         if mtbill_bal == 0:
-            return 0
+            return raw_usdc
         price, decimals = await asyncio.to_thread(self._read_oracle_price)
-        return self.convert_mtbill_to_usdc_amount(mtbill_bal, price, decimals)
+        return raw_usdc + self.convert_mtbill_to_usdc_amount(mtbill_bal, price, decimals)
+
+    async def in_flight_assets(self) -> int:
+        return sum(int(w.amount) for w in await self._pending_bridges())
+
+    async def _pending_bridges(self) -> list:
+        client = self._get_privana()
+        pending = await self._retry_on_network_error(
+            "get_pending_withdrawals",
+            lambda: client.get_pending_withdrawals(self._pool_address),
+        )
+        token = self._token_id.lower()
+        return [w for w in pending.pending_withdrawals if w.token_id.lower() == token]
+
+    async def _await_bridges_in_flight(self) -> None:
+        """An earlier bridge still on its way would land on the same account
+        and be mistaken for ours, so wait for the account to settle first.
+        """
+        for attempt in range(1, self._max_bridge_poll_attempts + 1):
+            pending = await self._pending_bridges()
+            if not pending:
+                return
+            logger.info(
+                "MidasStrategy: %d earlier bridge(s) still in flight (attempt %d/%d); waiting",
+                len(pending), attempt, self._max_bridge_poll_attempts,
+            )
+            await asyncio.sleep(self._poll_interval_sec)
+        raise RuntimeError(
+            f"MidasStrategy: earlier bridge still in flight after "
+            f"{self._max_bridge_poll_attempts} polls; aborting to release lock"
+        )
+
+    async def stranded_assets(self) -> int:
+        return await asyncio.to_thread(
+            self._client.get_erc20_balance, self._asset_address,
+        )
 
     async def idle_assets(self) -> int:
         """The pool's accounting balance: deposits whose issuance never
@@ -494,30 +654,29 @@ class MidasStrategy(BaseStrategy):
                 await asyncio.sleep(self._poll_interval_sec)
 
     async def _bridge_to_base(self, amount: int) -> None:
-        """Submit an accounting Withdraw signed by the LP key and block
-        until accounting reports the request resolved. Mirrors
-        AaveStrategy._bridge_to_base verbatim; the underlying flow is
-        protocol-agnostic. When both strategies are stable this can be
-        lifted into a shared helper module.
+        """Submit an accounting Withdraw signed by the earn pool key and block
+        until the funds land on the earn account.
+
+        Landing is judged by the asset balance on the EOA, not by
+        accounting's pending list. A withdrawal the relay resolves before
+        this loop first observes it pending never shows up in that list,
+        and waiting on the list then runs until the poll cap with the funds
+        already here. The poll reads the chain only, so no accounting outage
+        can stretch the cap.
         """
         client = self._get_privana()
-        lp_account = Account.from_key(self._lp_secret_key)
-
-        pre = await self._retry_on_network_error(
-            "get_pending_withdrawals",
-            lambda: client.get_pending_withdrawals(self._pool_address),
+        ep_account = Account.from_key(self._ep_secret_key)
+        balance_before = await asyncio.to_thread(
+            self._client.get_erc20_balance, self._asset_address,
         )
-        pre_indices: set[int] = {w.index for w in pre.pending_withdrawals}
-
         nonce_resp = await self._retry_on_network_error(
             "get_withdrawal_nonce",
             lambda: client.get_withdrawal_nonce(self._pool_address),
         )
         nonce = nonce_resp.nonce
-
         signature = sign_withdraw_message(
             SignWithdrawParams(
-                account=lp_account,
+                account=ep_account,
                 network=self._network,
                 verifying_contract=self._accounting_contract,
                 message=WithdrawMessage(
@@ -546,41 +705,31 @@ class MidasStrategy(BaseStrategy):
                 f"Withdrawal request rejected: status={submission.status} "
                 f"detail={submission.detail}"
             )
-
-        own_index: Optional[int] = None
         attempts = 0
         while True:
             attempts += 1
-            if attempts > self._max_bridge_poll_attempts:
+            try:
+                balance = await asyncio.to_thread(
+                self._client.get_erc20_balance, self._asset_address,
+            )
+            except Exception as exc:
+                logger.warning(
+                    "MidasStrategy._bridge_to_base: balance read failed (attempt %d/%d); retrying: %s",
+                    attempts, self._max_bridge_poll_attempts, exc,
+                )
+                balance = -1
+            if balance >= balance_before + amount:
+                logger.info(
+                    "MidasStrategy._bridge_to_base: withdrawal landed nonce=%d amount=%d balance=%d",
+                    nonce, amount, balance,
+                )
+                return
+            if attempts >= self._max_bridge_poll_attempts:
                 raise RuntimeError(
-                    f"MidasStrategy._bridge_to_base: withdrawal unresolved after "
+                    f"MidasStrategy._bridge_to_base: withdrawal not landed after "
                     f"{self._max_bridge_poll_attempts} polls (pool={self._pool_address} "
                     f"token={self._token_id} amount={amount}); aborting to release lock"
                 )
-            pending = await self._retry_on_network_error(
-                "get_pending_withdrawals",
-                lambda: client.get_pending_withdrawals(self._pool_address),
-            )
-            current_indices = {w.index for w in pending.pending_withdrawals}
-
-            if own_index is None:
-                new_indices = current_indices - pre_indices
-                if new_indices:
-                    own_index = min(new_indices)
-
-            if own_index is not None:
-                idx = own_index
-                info = await self._retry_on_network_error(
-                    "get_withdrawal_info",
-                    lambda: client.get_withdrawal_info(idx),
-                )
-                if info.resolved:
-                    logger.info(
-                        "MidasStrategy._bridge_to_base: withdrawal resolved index=%d tx=%s",
-                        own_index, info.tx_identifier,
-                    )
-                    return
-
             await asyncio.sleep(self._poll_interval_sec)
 
     async def _read_pool_balance(self) -> int:
@@ -607,6 +756,7 @@ class MidasStrategy(BaseStrategy):
                 )
             )
         except Exception as exc:
+            progress.update_finality(exc)
             logger.warning(
                 "MidasStrategy.withdraw_from_earn: check_deposit not accepted yet "
                 "(%s); will retry",

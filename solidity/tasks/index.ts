@@ -1,4 +1,5 @@
 import "./deploy";
-import "./pool";
+import "./earn";
 import "./show";
+import "./swap";
 import "./verify";

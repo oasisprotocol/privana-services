@@ -4,6 +4,7 @@ from typing import Optional
 
 import httpx
 from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi.responses import JSONResponse
 
 from src.api._auth import auth_error, bearer_token, jwt_identity, resolve_via_accounting
 from src.clients.accounting import get_accounting_client
@@ -17,14 +18,15 @@ from src.models.earn import (
     DepositResponse,
     PoolDetailResponse,
     PoolListResponse,
-    PoolResponse,
     WithdrawRequest,
     WithdrawResponse,
 )
 from src.models.history import EarnHistoryPoint, EarnHistoryResponse, usd_string
+from src.services.earn.cache import get_pool_list_cache
 from src.services.earn.registry import get_strategy_registry
 from src.services.earn.vault_service import get_vault_service
 from src.services.portfolio.history_service import MAX_HISTORY_DAYS, earn_history
+from src.services.user_queue import OperationPendingError
 
 logger = logging.getLogger(__name__)
 
@@ -85,36 +87,10 @@ async def _private_read_token(request: Request) -> str:
 
 @router.get("/pools", response_model=PoolListResponse)
 async def list_pools() -> PoolListResponse:
-    try:
-        service = get_vault_service()
-        pools = await asyncio.to_thread(service.list_pools)
-        # AUM and APY reads are independent per pool, so fan them out together
-        # to keep tail latency at max(slowest read) instead of sum-of-reads.
-        results = await asyncio.gather(
-            *[
-                asyncio.gather(
-                    service.effective_total_assets(p["pool_id"], p["total_assets"]),
-                    service.strategy_apy_bps_safe(p["pool_id"]),
-                )
-                for p in pools
-            ]
-        )
-        responses = [
-            PoolResponse(
-                pool_id=p["pool_id"],
-                token_id=p["token_id"],
-                strategy=get_strategy_registry().get(p["pool_id"]).name,
-                total_assets=str(effective),
-                apy_bps=apy_bps,
-                status="active" if p["active"] else "paused",
-                pool_address=p["pool_address"],
-            )
-            for p, (effective, apy_bps) in zip(pools, results)
-        ]
-        return PoolListResponse(pools=responses)
-    except Exception as exc:
-        logger.exception("Failed to list earn pools")
-        raise HTTPException(status_code=500, detail="Failed to list pools") from exc
+    snapshot = get_pool_list_cache().get()
+    if snapshot is None:
+        raise HTTPException(status_code=503, detail="Earn pools are loading")
+    return snapshot
 
 
 @router.get("/pools/{pool_id}", response_model=PoolDetailResponse)
@@ -194,20 +170,28 @@ async def get_deposit_quote(
 
 
 @router.post("/deposit", response_model=DepositResponse)
-async def deposit(payload: DepositRequest) -> DepositResponse:
+async def deposit(payload: DepositRequest) -> DepositResponse | JSONResponse:
     _pool_id_bytes(payload.pool_id)
     try:
         service = get_vault_service()
-        result = await service.deposit(
+        # Queued, not executed: the strategy leg bridges and supplies on another
+        # chain and routinely outlives the gateway's patience. The client polls
+        # GET /v1/operations/unsettled for the outcome, keyed by deposit_id.
+        scheduled = service.schedule_deposit(
             pool_id_hex=payload.pool_id,
             user_address=payload.user_address,
             amount=payload.amount,
             nonce=payload.nonce,
             signature=payload.signature,
         )
-        # An on-chain revert is a settled outcome, reported as status="failed" on a
-        # 200. Only a request we could not act on at all is an HTTP error.
-        return DepositResponse(**result)
+        return DepositResponse(
+            deposit_id=scheduled["id"],
+            pool_id=payload.pool_id,
+            amount=payload.amount,
+            status=scheduled["status"],
+        )
+    except OperationPendingError as exc:
+        return JSONResponse(status_code=409, content=exc.payload())
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -217,14 +201,19 @@ async def withdraw(payload: WithdrawRequest) -> WithdrawResponse:
     _pool_id_bytes(payload.pool_id)
     try:
         service = get_vault_service()
-        result = await service.withdraw(
+        scheduled = service.schedule_withdraw(
             pool_id_hex=payload.pool_id,
             user_address=payload.user_address,
             amount=payload.amount,
             nonce=payload.nonce,
             signature=payload.signature,
         )
-        return WithdrawResponse(**result)
+        return WithdrawResponse(
+            withdraw_id=scheduled["id"],
+            pool_id=payload.pool_id,
+            amount=payload.amount,
+            status=scheduled["status"],
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

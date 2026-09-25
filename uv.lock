@@ -150,15 +150,15 @@ wheels = [
 
 [[package]]
 name = "anyio"
-version = "4.13.0"
+version = "4.14.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "idna" },
     { name = "typing-extensions", marker = "python_full_version < '3.13'" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/19/14/2c5dd9f512b66549ae92767a9c7b330ae88e1932ca57876909410251fe13/anyio-4.13.0.tar.gz", hash = "sha256:334b70e641fd2221c1505b3890c69882fe4a2df910cba14d97019b90b24439dc", size = 231622, upload-time = "2026-03-24T12:59:09.671Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/61/cc/a381afa6efea9f496eff839d4a6a1aed3bfafc7b3ab4b0d1b243a12573dd/anyio-4.14.2.tar.gz", hash = "sha256:cfa139f3ed1a23ee8f88a145ddb5ac7605b8bbfd8592baacd7ce3d8bb4313c7f", size = 260176, upload-time = "2026-07-12T20:29:07.082Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/da/42/e921fccf5015463e32a3cf6ee7f980a6ed0f395ceeaa45060b61d86486c2/anyio-4.13.0-py3-none-any.whl", hash = "sha256:08b310f9e24a9594186fd75b4f73f4a4152069e3853f1ed8bfbf58369f4ad708", size = 114353, upload-time = "2026-03-24T12:59:08.246Z" },
+    { url = "https://files.pythonhosted.org/packages/da/35/f2287558c17e29fafc8ef3daf819bb9834061cfa43bff8014f7df7f63bdc/anyio-4.14.2-py3-none-any.whl", hash = "sha256:9f505dda5ac9f0c8309b5e8bd445a8c2bf7246f3ce950121e45ea15bc41d1494", size = 125813, upload-time = "2026-07-12T20:29:05.763Z" },
 ]
 
 [[package]]
@@ -1301,7 +1301,7 @@ wheels = [
 
 [[package]]
 name = "oasis-privana"
-version = "0.3.1"
+version = "0.4.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "eth-account" },
@@ -1309,9 +1309,9 @@ dependencies = [
     { name = "httpx" },
     { name = "pydantic" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/d1/89/a24b99ec99b593a020b03b2dda332835687d3aea9e050222a532b3e07660/oasis_privana-0.3.1.tar.gz", hash = "sha256:24b89ca6dd6030c769870df4f29e120fbbecb6ad71388690e411d7167dd7eff7", size = 111161, upload-time = "2026-09-07T15:47:54.41Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/eb/a9/ee96bc542822ba27ea29083e8c69c18fbc094b24dba9a08cc21918d29819/oasis_privana-0.4.0.tar.gz", hash = "sha256:0c6733382edcbfbd0999a15b414257ecc73e9913ec448f089a5e0f2d07e31f0f", size = 111412, upload-time = "2026-09-17T07:24:56.12Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/31/6e/2d6751d67b5dd987ed098c6f1ad81bac839c73a2840b220bf815532287dc/oasis_privana-0.3.1-py3-none-any.whl", hash = "sha256:d5482e5dadf516b12483b25447125bed448f6ac4051445ffaef594f1aae5dfdf", size = 28756, upload-time = "2026-09-07T15:47:53.176Z" },
+    { url = "https://files.pythonhosted.org/packages/13/e6/b3309c400f5ebab46cd35f5e3804fa50b2235eaafcadc69f461b175838b4/oasis_privana-0.4.0-py3-none-any.whl", hash = "sha256:eafb96656ae2e202e38b013ab90f71cb689e90fae61cc97cf550a01f2de61156", size = 28933, upload-time = "2026-09-17T07:24:54.898Z" },
 ]
 
 [[package]]
@@ -1395,7 +1395,7 @@ requires-dist = [
     { name = "eth-account", specifier = ">=0.13,<0.14" },
     { name = "fastapi", specifier = ">=0.135,<0.137" },
     { name = "httpx", specifier = ">=0.28,<0.30" },
-    { name = "oasis-privana", specifier = ">=0.3.1,<0.4" },
+    { name = "oasis-privana", specifier = ">=0.4.0,<0.5" },
     { name = "oasis-sapphire-py", specifier = ">=0.4.2,<0.5" },
     { name = "pydantic", specifier = ">=2.12,<3" },
     { name = "python-dotenv", specifier = ">=1.0,<2" },

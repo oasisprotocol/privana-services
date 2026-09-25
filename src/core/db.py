@@ -39,7 +39,7 @@ MIGRATIONS = [
         from_amount TEXT NOT NULL,
         to_amount_estimate TEXT NOT NULL,
         to_amount_actual TEXT,
-        status TEXT NOT NULL DEFAULT 'pending',
+        status TEXT NOT NULL DEFAULT 'scheduled',
         swap_tx_hash TEXT,
         error TEXT,
         created_at INTEGER NOT NULL,
@@ -127,6 +127,23 @@ MIGRATIONS = [
     "ON earn_transactions(LOWER(pool_id), user_address);",
     "CREATE INDEX IF NOT EXISTS idx_earn_tx_pool_signer "
     "ON earn_transactions(LOWER(pool_id), consent_signer);",
+    "ALTER TABLE swaps ADD COLUMN input_nonce TEXT;",
+    "ALTER TABLE swaps ADD COLUMN input_signature TEXT;",
+    "UPDATE swaps SET status = 'executing' WHERE status = 'pending';",
+    # Earn deposits and withdrawals are queued the way swaps are: the request
+    # records the row and returns, a worker executes it. Rows the old inline
+    # path left behind keep their status and settle on their own.
+    "ALTER TABLE earn_transactions ADD COLUMN claimed_at INTEGER;",
+    # The caller's own nonce and signature, kept apart from the ones execution
+    # settles on: a withdraw signs the payout with the pool's key, and
+    # overwriting the consent would leave a crashed row unreconstructable.
+    "ALTER TABLE earn_transactions ADD COLUMN input_nonce INTEGER;",
+    "ALTER TABLE earn_transactions ADD COLUMN input_signature TEXT;",
+    # Timeline of an operation: the steps it passed through and its status
+    # changes, as a JSON list of {stage, at, detail}, so the feed can say more
+    # than "pending".
+    "ALTER TABLE earn_transactions ADD COLUMN history TEXT;",
+
 ]
 
 

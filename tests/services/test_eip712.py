@@ -78,8 +78,8 @@ class TestSignTransfer:
         domain_data = {
             "name": "AccountingModule",
             "version": "1",
-            "chainId": settings.accounting_chain_id,
             "verifyingContract": settings.accounting_contract_address,
+            "salt": settings.accounting_chain_id.to_bytes(32, "big"),
         }
         message_types = {
             "Transfer": [

@@ -958,9 +958,9 @@ async def test_withdraw_reports_its_stages_in_order(strategy, midas_client, priv
     with patch("src.services.earn.strategies.midas.progress") as progress:
         await strategy.withdraw_from_earn(1_000_000)
 
-    calls = [c.args[0] for c in progress.report.call_args_list]
+    calls = [c.args[0] for c in progress.update.call_args_list]
     assert calls == [progress.RECLAIMING, progress.RETURNING]
-    progress.report_finality.assert_called_once()
+    progress.update_finality.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -970,7 +970,7 @@ async def test_deposit_reports_bridging_then_deploying(strategy, midas_client, p
     with patch("src.services.earn.strategies.midas.progress") as progress:
         await strategy.deposit_to_earn(1_000_000)
 
-    assert [c.args[0] for c in progress.report.call_args_list] == [
+    assert [c.args[0] for c in progress.update.call_args_list] == [
         progress.BRIDGING,
         progress.DEPLOYING,
     ]

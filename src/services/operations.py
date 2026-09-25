@@ -55,7 +55,7 @@ _EARN_SELECT = """
         token_id,
         amount,
         CAST(input_nonce AS TEXT) AS nonce,
-        stages
+        history AS stages
     FROM earn_transactions
     WHERE user_address = ?"""
 

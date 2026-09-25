@@ -7,6 +7,7 @@ from typing import Optional
 
 from src.core.db import db_write, get_db
 from src.core.validation import sanitize_error
+from src.services.earn import progress
 from src.services.earn.progress import tracking
 from src.services.earn.vault_service import (
     EARN_OP_DEPOSIT,
@@ -146,6 +147,7 @@ class EarnWorker:
                 (EARN_STATUS_EXECUTING, now, now, row["id"], EARN_STATUS_SCHEDULED),
             ).rowcount
             if changed:
+                progress.record_status(row["id"], EARN_STATUS_SCHEDULED, EARN_STATUS_EXECUTING)
                 claimed.append(dict(row))
                 seen.add(row["user_address"].lower())
         return claimed
@@ -187,6 +189,8 @@ class EarnWorker:
             "WHERE id = ? AND status = ?",
             (EARN_STATUS_FAILED, error, int(time.time()), tx_id, EARN_STATUS_EXECUTING),
         ).rowcount
+        if changed:
+            progress.record_status(tx_id, EARN_STATUS_EXECUTING, EARN_STATUS_FAILED)
         if not changed:
             logger.info(
                 "Earn %s already settled before the error was recorded; left as is", tx_id,

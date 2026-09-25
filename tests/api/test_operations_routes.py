@@ -167,7 +167,7 @@ class TestUnsettledOperationsRoute:
         ]
         db_write(
             test_db,
-            "UPDATE earn_transactions SET stages = ? WHERE id = ?",
+            "UPDATE earn_transactions SET history = ? WHERE id = ?",
             (json.dumps(stages), "earn-running"),
         )
         _insert_swap(test_db, "swap-pending", status="pending", updated_at=90)

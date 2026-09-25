@@ -17,16 +17,16 @@ def _row(db, tx_id: str = "tx-1") -> None:
 
 
 def _stages(db, tx_id: str = "tx-1") -> list[dict]:
-    raw = db.execute("SELECT stages FROM earn_transactions WHERE id = ?", (tx_id,)).fetchone()[0]
+    raw = db.execute("SELECT history FROM earn_transactions WHERE id = ?", (tx_id,)).fetchone()[0]
     return json.loads(raw) if raw else []
 
 
 def test_records_each_stage_in_order_for_the_tracked_operation(test_db):
     _row(test_db)
     with progress.tracking("tx-1"):
-        progress.report(progress.RECLAIMING)
-        progress.report(progress.RETURNING)
-        progress.report(progress.PAYING_OUT)
+        progress.update(progress.RECLAIMING)
+        progress.update(progress.RETURNING)
+        progress.update(progress.PAYING_OUT)
 
     assert [s["stage"] for s in _stages(test_db)] == ["reclaiming", "returning", "paying_out"]
 
@@ -34,8 +34,8 @@ def test_records_each_stage_in_order_for_the_tracked_operation(test_db):
 def test_a_repeated_stage_updates_its_detail_instead_of_adding_an_entry(test_db):
     _row(test_db)
     with progress.tracking("tx-1"):
-        progress.report_finality("400 Bad Request: Insufficient finality: 9/32 confirmations")
-        progress.report_finality("400 Bad Request: Insufficient finality: 20/32 confirmations")
+        progress.update_finality("400 Bad Request: Insufficient finality: 9/32 confirmations")
+        progress.update_finality("400 Bad Request: Insufficient finality: 20/32 confirmations")
 
     stages = _stages(test_db)
     assert len(stages) == 1
@@ -45,7 +45,7 @@ def test_a_repeated_stage_updates_its_detail_instead_of_adding_an_entry(test_db)
 
 def test_reports_nothing_outside_a_tracked_operation(test_db):
     _row(test_db)
-    progress.report(progress.BRIDGING)
+    progress.update(progress.BRIDGING)
 
     assert _stages(test_db) == []
 
@@ -53,6 +53,16 @@ def test_reports_nothing_outside_a_tracked_operation(test_db):
 def test_an_error_without_a_confirmation_count_is_ignored(test_db):
     _row(test_db)
     with progress.tracking("tx-1"):
-        progress.report_finality("connection reset")
+        progress.update_finality("connection reset")
 
     assert _stages(test_db) == []
+
+
+def test_a_status_change_is_recorded_in_the_same_timeline(test_db):
+    _row(test_db)
+    progress.record_status("tx-1", "executing", "completed")
+
+    stages = _stages(test_db)
+    assert len(stages) == 1
+    assert stages[0]["stage"] == "status"
+    assert stages[0]["detail"] == {"from": "executing", "to": "completed"}

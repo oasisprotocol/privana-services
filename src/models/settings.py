@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict
 
 
@@ -61,3 +61,8 @@ class Settings:
     # liquidity provider prices deposits against swap float.
     earn_pool_secret_key: str = ""
     earn_pool_address: str = ""
+
+    # Net shares each pool moved on chain without going through this service
+    # (pool id -> signed share count), so its recorded history can still be
+    # reconciled against the chain's totalShares.
+    earn_unrecorded_shares: Dict[str, int] = field(default_factory=dict)

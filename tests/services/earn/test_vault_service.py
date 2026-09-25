@@ -12,6 +12,7 @@ POOL_ADDRESS = "0x152E6a7125665764a4F1F1df80E8f5D49Bf0239c"
 USER_ADDRESS = "0xd8991364507FAfC256EafF950d28618735753476"
 USER_WITHDRAW_SIG = "0x" + "cc" * 65
 SIWE_TOKEN = "0x" + "ee" * 32
+BLOCK = 500
 
 
 def _make_service(registry=None):
@@ -37,6 +38,7 @@ def _make_service(registry=None):
         contract = MagicMock()
         w3.eth.contract.return_value = contract
         saph.w3 = w3
+        saph.w3_unwrapped = w3
         saph.execute_contract_call = MagicMock(return_value="0x" + "ff" * 32)
         # The earn flows broadcast and wait separately so a receipt timeout
         # still leaves a hash behind for the recovery pass to reconcile.
@@ -45,7 +47,8 @@ def _make_service(registry=None):
         saph.submit_contract_call = MagicMock(
             side_effect=lambda **kwargs: saph.execute_contract_call(**kwargs)
         )
-        saph.wait_for_receipt = MagicMock(return_value={"status": 1})
+        saph.wait_for_receipt = MagicMock(return_value={"status": 1, "blockNumber": BLOCK})
+        w3.eth.get_block.side_effect = lambda n: {"timestamp": 1_000_000 + n}
         mock_saph.return_value = saph
 
         acct = MagicMock()
@@ -1439,78 +1442,47 @@ class TestGetAllBalancesChange:
         assert balances[0]["change_24h_pct"] is None
 
 
-class TestShareDeltaCapture:
-    """Bracketing totalShares across a cashflow is the only way to learn a
-    user's share movement: per-user state is confidential on the contract."""
+class TestReceiptUnknown:
+    """An unread receipt leaves the row pending for recovery."""
 
-    async def test_deposit_records_positive_delta_and_rate(self, test_db):
-        service, contract, _, _ = _make_service()
-        # pools() reads: pre-check, sync, shares_before (all pre-tx, 1000),
-        # then shares_after and post-tx (1100).
-        contract.functions.pools.return_value.call.side_effect = [
-            (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1000, 1050, True),
-            (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1000, 1050, True),
-            (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1000, 1050, True),
-            (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1100, 1155, True),
-            (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1100, 1155, True),
-        ]
-        await service.deposit(POOL_ID_HEX, USER_ADDRESS, "105", 5, "0x" + "aa" * 65)
-
-        row = test_db.execute("SELECT * FROM earn_transactions").fetchone()
-        assert row["shares_delta"] == "100"
-        assert row["exchange_rate"] == "1.05"
-
-    async def test_failed_deposit_records_no_delta(self, test_db):
+    async def test_deposit_is_left_pending_with_its_hash(self, test_db):
         service, contract, saph, _ = _make_service()
         contract.functions.pools.return_value.call.return_value = (
             bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1000, 1050, True,
         )
-        saph.execute_contract_call.side_effect = RuntimeError("reverted")
+        saph.wait_for_receipt.side_effect = TimeoutError("receipt wait timed out")
 
-        await service.deposit(POOL_ID_HEX, USER_ADDRESS, "105", 5, "0x" + "aa" * 65)
+        result = await service.deposit(POOL_ID_HEX, USER_ADDRESS, "105", 5, "0x" + "aa" * 65)
 
+        assert result["status"] == "pending"
         row = test_db.execute("SELECT * FROM earn_transactions").fetchone()
-        assert row["status"] == "failed"
-        assert row["shares_delta"] is None
+        assert row["status"] == "pending"
+        assert row["tx_hash"] == "0x" + "ff" * 32
+        assert row["error"] is None
 
-    async def test_delta_is_null_when_pre_read_fails(self, test_db):
-        service, contract, _, _ = _make_service()
-        contract.functions.pools.return_value.call.side_effect = [
-            (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1000, 1050, True),
-            (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1000, 1050, True),
-            RuntimeError("rpc down"),
-            (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1100, 1155, True),
-            (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1100, 1155, True),
-        ]
-        result = await service.deposit(
-            POOL_ID_HEX, USER_ADDRESS, "105", 5, "0x" + "aa" * 65
+    async def test_withdraw_is_left_pending_without_a_rollback(self, test_db):
+        service, contract, saph, _ = _make_service()
+        contract.functions.pools.return_value.call.return_value = (
+            bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1000, 1050, True,
         )
-
-        # The deposit itself still settles; only the earned figure is lost.
-        assert result["status"] == "completed"
-        row = test_db.execute("SELECT * FROM earn_transactions").fetchone()
-        assert row["shares_delta"] is None
-
-    async def test_withdraw_records_negative_delta(self, test_db):
-        service, contract, _, _ = _make_service()
-        contract.functions.pools.return_value.call.side_effect = [
-            (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1000, 1050, True),
-            (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1000, 1050, True),
-            (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1000, 1050, True),
-            (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 600, 630, True),
-            (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 600, 630, True),
-            (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 600, 630, True),
-        ]
+        saph.wait_for_receipt.side_effect = TimeoutError("receipt wait timed out")
+        service._rollback_reclaim = AsyncMock()
 
         with patch(
             "src.services.earn.vault_service.sign_transfer",
             return_value="0x" + "bb" * 65,
         ):
-            await service.withdraw(POOL_ID_HEX, USER_ADDRESS, "420", 0, USER_WITHDRAW_SIG)
+            result = await service.withdraw(
+                POOL_ID_HEX, USER_ADDRESS, "420", 0, USER_WITHDRAW_SIG
+            )
 
-        row = test_db.execute("SELECT * FROM earn_transactions").fetchone()
-        assert row["shares_delta"] == "-400"
-        assert row["exchange_rate"] == "1.05"
+        assert result["status"] == "pending"
+        service._rollback_reclaim.assert_not_awaited()
+        row = test_db.execute(
+            "SELECT * FROM earn_transactions WHERE operation = 'withdraw'"
+        ).fetchone()
+        assert row["status"] == "pending"
+        assert row["tx_hash"] == "0x" + "ff" * 32
 
 
 class TestGetAllBalancesEarned:
@@ -1575,69 +1547,6 @@ class TestGetAllBalancesEarned:
         )
         assert balances[0]["earned_active"] is None
         assert balances[0]["earned_active_status"] == "ledger_incomplete"
-
-    async def test_settlement_rate_comes_from_the_cashflow_not_a_later_read(
-        self, test_db
-    ):
-        # syncTotalAssets runs outside the earn lock, so a post-tx pool read
-        # can show a ratio the cashflow never settled at. The stored rate is
-        # derived from the amount and shares that actually moved.
-        service, contract, _, _ = _make_service()
-        contract.functions.pools.return_value.call.side_effect = [
-            (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1000, 1050, True),
-            (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1000, 1050, True),
-            (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1000, 1050, True),
-            # Assets jumped between settlement and this read.
-            (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1100, 9_999_999, True),
-            (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1100, 9_999_999, True),
-        ]
-        await service.deposit(POOL_ID_HEX, USER_ADDRESS, "105", 5, "0x" + "aa" * 65)
-
-        row = test_db.execute("SELECT * FROM earn_transactions").fetchone()
-        assert row["shares_delta"] == "100"
-        assert row["exchange_rate"] == "1.05"  # 105 paid for 100 shares
-        assert row["settled_at"] is not None
-
-    async def test_delta_is_null_when_post_read_fails(self, test_db):
-        service, contract, _, _ = _make_service()
-        contract.functions.pools.return_value.call.side_effect = [
-            (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1000, 1050, True),
-            (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1000, 1050, True),
-            RuntimeError("rpc down"),
-            (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1100, 1155, True),
-        ]
-        result = await service.deposit(
-            POOL_ID_HEX, USER_ADDRESS, "105", 5, "0x" + "aa" * 65
-        )
-
-        assert result["status"] == "completed"
-        row = test_db.execute("SELECT * FROM earn_transactions").fetchone()
-        assert row["shares_delta"] is None
-
-    async def test_concurrent_mint_before_post_read_is_misattributed(self, test_db):
-        # Documents a known limitation: EarnManager.deposit is externally
-        # callable, so a mint landing between settlement and the post-read is
-        # absorbed into this row's delta. The pool-level completeness check is
-        # what stops a wrong delta from being reported as a real figure.
-        service, contract, _, _ = _make_service()
-        contract.functions.pools.return_value.call.side_effect = [
-            (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1000, 1050, True),
-            (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1000, 1050, True),
-            (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1000, 1050, True),
-            # Our +100 plus somebody else's +200 landed before we looked.
-            (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1300, 1365, True),
-            (bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1300, 1365, True),
-        ]
-        await service.deposit(POOL_ID_HEX, USER_ADDRESS, "105", 5, "0x" + "aa" * 65)
-
-        row = test_db.execute("SELECT * FROM earn_transactions").fetchone()
-        assert row["shares_delta"] == "300"
-
-        from src.services.earn.earned import earned_active
-        # The user really holds 100 shares, so the inflated delta cannot pass.
-        assert earned_active(
-            USER_ADDRESS, POOL_ID_HEX, 100, 105, pool_total_shares=1300
-        ).status == "ledger_incomplete"
 
 
 class TestSeedAwareQuotesAndExits:
@@ -1747,6 +1656,64 @@ class TestDeployIdle:
         assert await service.deploy_idle(POOL_ID_HEX) == 100_000
 
         strategy.deposit_to_earn.assert_awaited_once_with(100_000)
+
+    @pytest.mark.parametrize("status,waits", [
+        ("executing", True), ("pending", True), ("failed", False),
+    ])
+    async def test_waits_for_unresolved_rows_in_this_pool(self, test_db, status, waits):
+        from src.core.db import db_write
+        service, strategy = self._service(idle=100_000)
+        db_write(
+            test_db,
+            """INSERT INTO earn_transactions
+               (id, operation, pool_id, user_address, token_id, amount,
+                signer_address, nonce, signature, status, created_at, updated_at)
+               VALUES ('w1', 'withdraw', ?, 'user', 'token', '100', 'signer', 0, '', ?, 1, 2)""",
+            ("0x" + POOL_ID_HEX[2:].upper(), status),
+        )
+        assert await service.deploy_idle(POOL_ID_HEX) == (0 if waits else 100_000)
+        assert strategy.deposit_to_earn.await_count == (0 if waits else 1)
+
+    async def test_a_reverted_withdraw_found_by_recovery_is_redeployed(self, test_db):
+        """Timeout, then recovery reads the revert and fails the row; the
+        reclaim it left idle goes back to the strategy on the next deploy,
+        under the usual conditions, and the pool is resynced."""
+        from src.core.db import db_write, get_db
+        from src.services.earn.worker import EarnWorker
+        service, strategy = self._service(idle=100_000)
+        service.sync_total_assets = AsyncMock(return_value=1000)
+        db_write(
+            get_db(),
+            """INSERT INTO earn_transactions
+               (id, operation, pool_id, user_address, token_id, amount,
+                signer_address, nonce, signature, status, created_at, updated_at, tx_hash)
+               VALUES ('w1', 'withdraw', ?, '0xuser', ?, '100000', ?, 1, '0xsig',
+                       'pending', 0, 0, '0xw1')""",
+            (POOL_ID_HEX, USDC_TOKEN_ID, POOL_ADDRESS),
+        )
+        service.sapphire.w3.eth.get_transaction_receipt = MagicMock(
+            side_effect=[
+                TimeoutError("timed out"),
+                {"status": 0, "blockNumber": 7, "to": service.contract_address},
+            ]
+        )
+
+        with patch("src.services.earn.worker.get_vault_service", return_value=service):
+            await EarnWorker()._recover()
+            assert self._status(test_db, "w1") == "pending"
+            await EarnWorker()._recover()
+        assert self._status(test_db, "w1") == "failed"
+        strategy.deposit_to_earn.assert_not_awaited()
+
+        assert await service.deploy_idle(POOL_ID_HEX) == 100_000
+        strategy.deposit_to_earn.assert_awaited_once_with(100_000)
+        service.sync_total_assets.assert_awaited()
+
+    @staticmethod
+    def _status(test_db, tx_id):
+        return test_db.execute(
+            "SELECT status FROM earn_transactions WHERE id = ?", (tx_id,)
+        ).fetchone()["status"]
 
     async def test_completes_undeployed_deposits_once_their_funds_are_working(self, test_db):
         from src.core.db import db_write, get_db

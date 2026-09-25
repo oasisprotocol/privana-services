@@ -197,4 +197,14 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
             if "duplicate column name" in str(exc).lower():
                 continue
             raise
-    conn.commit()
+    # MIGRATIONS runs on every startup. Reset legacy share metadata once, in
+    # the same transaction as its marker, so the worker re-reads it from chain.
+    with conn:
+        conn.execute("CREATE TABLE IF NOT EXISTS data_migrations (name TEXT PRIMARY KEY)")
+        if conn.execute(
+            "INSERT OR IGNORE INTO data_migrations (name) VALUES ('earn_receipt_shares_v1')"
+        ).rowcount:
+            conn.execute(
+                "UPDATE earn_transactions SET shares_delta = NULL, exchange_rate = NULL, "
+                "settled_at = NULL WHERE tx_hash IS NOT NULL"
+            )

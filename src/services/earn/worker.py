@@ -5,10 +5,13 @@ import logging
 import time
 from typing import Optional
 
+from web3.exceptions import TransactionNotFound
+
 from src.core.db import db_write, get_db
 from src.core.validation import sanitize_error
 from src.services.earn import progress
 from src.services.earn.progress import tracking
+from src.services.earn.settlement import read_share_settlement
 from src.services.earn.strategies.base import LiquidityUnavailable
 from src.services.earn.vault_service import (
     EARN_OP_DEPOSIT,
@@ -18,6 +21,7 @@ from src.services.earn.vault_service import (
     EARN_STATUS_FAILED,
     EARN_STATUS_PENDING,
     EARN_STATUS_SCHEDULED,
+    EARN_STATUS_UNDEPLOYED,
     get_vault_service,
 )
 from src.services.user_queue import users_with_inflight_work
@@ -68,18 +72,20 @@ class EarnWorker:
 
     async def _recover(self) -> bool:
         """Reconcile rows a restart left mid-flight, the way the internal swap
-        pipeline does it.
+        pipeline does it, and settle every row whose receipt was never read.
 
         Three outcomes, and which one applies turns on how far the row got:
-        a recorded hash can be settled from its receipt; a row that reached
-        the contract call without recording one has an unknown outcome and
-        must never be replayed, because its accounting transfer may already
-        be on chain; anything before that never left, so it is safe to queue
-        again. Returns whether anything is still in flight, so a recovery
-        pass never runs alongside a fresh claim.
+        a recorded hash is settled from its receipt; a row that reached the
+        contract call without recording one has an unknown outcome and must
+        never be replayed, because its accounting transfer may already be on
+        chain; anything before that never left, so it is safe to queue again.
+        Returns whether anything is still in flight, so a recovery pass never
+        runs alongside a fresh claim. Settled rows awaiting their share read
+        do not count.
         """
         rows = get_db().execute(
-            "SELECT * FROM earn_transactions WHERE status IN (?, ?)",
+            "SELECT * FROM earn_transactions WHERE status IN (?, ?) "
+            "OR (tx_hash IS NOT NULL AND settled_at IS NULL) ORDER BY created_at, rowid",
             (EARN_STATUS_EXECUTING, EARN_STATUS_PENDING),
         ).fetchall()
         if not rows:
@@ -88,7 +94,15 @@ class EarnWorker:
         for raw in rows:
             row = dict(raw)
             if row["tx_hash"]:
-                await self._settle(service, row)
+                try:
+                    await self._settle(service, row)
+                except Exception as exc:
+                    # Retried every pass, so no traceback. The type alone: a
+                    # provider error can carry its endpoint's credentials.
+                    logger.warning(
+                        "Earn %s settlement read failed; will retry: %s",
+                        row["id"], type(exc).__name__,
+                    )
             elif row["status"] == EARN_STATUS_PENDING:
                 logger.warning(
                     "Earn %s %s submission outcome unknown; manual recovery required",
@@ -104,28 +118,63 @@ class EarnWorker:
                     row["operation"], row["id"],
                 )
                 service._update_transaction(row["id"], status=EARN_STATUS_SCHEDULED)
-        return True
+        return get_db().execute(
+            "SELECT 1 FROM earn_transactions WHERE status IN (?, ?) LIMIT 1",
+            (EARN_STATUS_EXECUTING, EARN_STATUS_PENDING),
+        ).fetchone() is not None
 
     @staticmethod
     async def _settle(service, row: dict) -> None:
+        """Record the receipt outcome, then capture its share metadata once."""
         try:
-            receipt = await asyncio.to_thread(service.sapphire.wait_for_receipt, row["tx_hash"])
-        except Exception as exc:
-            # A timeout is not a revert. Keep the hash and reconcile it on the
-            # next pass; never rebroadcast an uncertain transaction.
-            logger.warning("Earn %s receipt still unknown: %s", row["id"], exc)
-            service._update_transaction(row["id"], error=sanitize_error(str(exc)))
+            receipt = await asyncio.to_thread(
+                service.sapphire.w3.eth.get_transaction_receipt, row["tx_hash"]
+            )
+        except TransactionNotFound:
+            # Old failed rows may have landed despite a timeout. Absence at
+            # this RPC is not evidence that their transaction never landed.
+            logger.debug("Earn %s receipt not available yet", row["id"])
             return
-        if receipt["status"] == 1:
-            logger.info("Earn %s %s recovered as completed", row["operation"], row["id"])
+
+        landed = receipt["status"] == 1
+        block = receipt["blockNumber"]
+        block_info = await asyncio.to_thread(service.sapphire.w3_unwrapped.eth.get_block, block)
+        settled_at = int(block_info["timestamp"])
+        status = row["status"]
+        if not landed:
+            status = EARN_STATUS_FAILED
             service._update_transaction(
-                row["id"], status=EARN_STATUS_COMPLETED, error=None,
+                row["id"], status=status, error=f"Transaction reverted: {row['tx_hash']}",
+                updated_at=row["updated_at"],
             )
-        else:
+        elif status not in (EARN_STATUS_COMPLETED, EARN_STATUS_UNDEPLOYED):
+            status = EARN_STATUS_UNDEPLOYED if row["operation"] == EARN_OP_DEPOSIT else EARN_STATUS_COMPLETED
+            # Resolve the financial outcome, dated by its block, before any
+            # historical share read.
             service._update_transaction(
-                row["id"], status=EARN_STATUS_FAILED,
-                error=f"Transaction reverted: {row['tx_hash']}",
+                row["id"], status=status, error=None, updated_at=settled_at,
             )
+
+        if row["settled_at"] is not None:
+            return
+        # A tx to an earlier EarnManager deployment is outside this contract's
+        # history, so its shares stay unknown instead of failing every read.
+        ours = (receipt["to"] or "").lower() == service.contract_address.lower()
+        fields = {"shares_delta": None, "exchange_rate": None}
+        if landed and ours:
+            fields = await asyncio.to_thread(
+                read_share_settlement, service._history,
+                bytes.fromhex(row["pool_id"].removeprefix("0x")), block,
+                row["operation"], row["amount"],
+            )
+        elif landed:
+            logger.warning("Earn %s tx was not sent to this EarnManager", row["id"])
+        db_write(
+            get_db(),
+            "UPDATE earn_transactions SET shares_delta = ?, exchange_rate = ?, "
+            "settled_at = ? WHERE id = ? AND settled_at IS NULL",
+            (fields["shares_delta"], fields["exchange_rate"], settled_at, row["id"]),
+        )
 
     @staticmethod
     def _claim(limit: int) -> list[dict]:

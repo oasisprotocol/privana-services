@@ -141,44 +141,172 @@ async def test_a_row_that_never_reached_the_contract_goes_back_on_the_queue(test
     service._update_transaction.assert_called_once_with("t1", status="scheduled")
 
 
-@pytest.mark.asyncio
-async def test_a_row_with_a_hash_is_settled_from_its_receipt(test_db):
-    _row(test_db, "t1", status="executing")
-    db_write(test_db, "UPDATE earn_transactions SET tx_hash = ? WHERE id = ?", ("0xabc", "t1"))
-    service = MagicMock()
-    service.sapphire.wait_for_receipt = MagicMock(return_value={"status": 1})
+_EARN_MANAGER = "0x1111111111111111111111111111111111111111"
 
+
+def _settlement_service(*, operation="deposit", assets_moved=None):
+    from src.services.earn.vault_service import VaultService
+
+    service = MagicMock()
+    service._update_transaction.side_effect = lambda tx_id, **fields: (
+        VaultService._update_transaction(service, tx_id, **fields)
+    )
+    sign = 1 if operation == "deposit" else -1
+    assets_moved = sign * 1000 if assets_moved is None else assets_moved
+    service.contract_address = _EARN_MANAGER
+    service.sapphire.w3.eth.get_transaction_receipt.return_value = {
+        "status": 1, "blockNumber": 42, "to": _EARN_MANAGER,
+    }
+    service.sapphire.w3.eth.get_block.return_value = {"timestamp": 1234}
+    service.sapphire.w3_unwrapped = service.sapphire.w3
+
+    def pool(block_identifier):
+        if block_identifier == 41:
+            return (b"", "", 1000, 10000, True)
+        assert block_identifier == 42
+        return (b"", "", 1000 + sign * 100, 10000 + assets_moved, True)
+
+    service._history.functions.pools.return_value.call.side_effect = pool
+    return service
+
+
+def _hashed_row(db, tx_id="t1", *, status="pending", operation="deposit"):
+    _row(db, tx_id, status=status, operation=operation, created=100)
+    db_write(db, "UPDATE earn_transactions SET tx_hash = ? WHERE id = ?", ("0x" + tx_id, tx_id))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation,status,expected", [
+    ("deposit", "pending", "undeployed"), ("deposit", "failed", "undeployed"),
+    ("deposit", "completed", "completed"), ("withdraw", "pending", "completed"),
+])
+async def test_one_path_records_outcome_shares_and_time_once(test_db, operation, status, expected):
+    _hashed_row(test_db, status=status, operation=operation)
+    service = _settlement_service(operation=operation)
+    with patch("src.services.earn.worker.get_vault_service", return_value=service):
+        assert await EarnWorker()._recover() is False
+        service.sapphire.w3.eth.get_transaction_receipt.reset_mock()
+        assert await EarnWorker()._recover() is False
+    result = test_db.execute("SELECT * FROM earn_transactions").fetchone()
+    assert result["status"] == expected
+    assert result["shares_delta"] == ("100" if operation == "deposit" else "-100")
+    assert result["exchange_rate"] == "10"
+    assert result["settled_at"] == 1234
+    assert result["updated_at"] == (100 if status == expected else 1234)
+    service.sapphire.w3.eth.get_transaction_receipt.assert_not_called()
+    service.sapphire.wait_for_receipt.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_migrated_wrong_non_null_shares_are_rebuilt_by_the_worker(test_db):
+    from src.core.db import _run_migrations
+
+    _hashed_row(test_db, status="completed")
+    db_write(test_db, "UPDATE earn_transactions SET shares_delta = '999', exchange_rate = '1', settled_at = 100")
+    db_write(test_db, "DELETE FROM data_migrations")
+    _run_migrations(test_db)
+    service = _settlement_service()
+    with patch("src.services.earn.worker.get_vault_service", return_value=service):
+        assert await EarnWorker()._recover() is False
+    result = test_db.execute("SELECT * FROM earn_transactions").fetchone()
+    assert (result["shares_delta"], result["settled_at"], result["updated_at"]) == ("100", 1234, 100)
+    _run_migrations(test_db)
+    service.sapphire.w3.eth.get_transaction_receipt.reset_mock()
     with patch("src.services.earn.worker.get_vault_service", return_value=service):
         await EarnWorker()._recover()
-
-    assert service._update_transaction.call_args.kwargs["status"] == "completed"
+    service.sapphire.w3.eth.get_transaction_receipt.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_a_submitted_row_without_a_hash_is_never_replayed(test_db):
-    """Its accounting transfer may already be on chain, so replaying it could
-    pay twice. Surface it for manual recovery instead."""
-    _row(test_db, "t1", status="pending")
-    service = MagicMock()
+@pytest.mark.parametrize("status,blocks", [("pending", True), ("failed", False)])
+async def test_missing_receipt_is_not_proof_of_failure(test_db, status, blocks):
+    from web3.exceptions import TransactionNotFound
 
+    _hashed_row(test_db, status=status)
+    service = _settlement_service()
+    service.sapphire.w3.eth.get_transaction_receipt.side_effect = TransactionNotFound("not indexed")
     with patch("src.services.earn.worker.get_vault_service", return_value=service):
+        assert await EarnWorker()._recover() is blocks
+        result = test_db.execute("SELECT * FROM earn_transactions").fetchone()
+        assert result["status"] == status
+        assert result["settled_at"] is None
+        assert result["updated_at"] == 100
+        service.sapphire.w3.eth.get_transaction_receipt.side_effect = None
+        assert await EarnWorker()._recover() is False
+    assert _status(test_db, "t1") == "undeployed"
+
+
+@pytest.mark.asyncio
+async def test_archive_failure_does_not_hold_outcome_or_prevent_other_rows(test_db):
+    _hashed_row(test_db, "t1")
+    _hashed_row(test_db, "t2", status="completed")
+    service = _settlement_service()
+    read_pool = service._history.functions.pools.return_value.call.side_effect
+    service._history.functions.pools.return_value.call.side_effect = [
+        ConnectionError("archive unavailable"), read_pool(42), read_pool(41),
+    ]
+    with patch("src.services.earn.worker.get_vault_service", return_value=service):
+        assert await EarnWorker()._recover() is False
+        rows = test_db.execute("SELECT * FROM earn_transactions ORDER BY id").fetchall()
+        assert rows[0]["status"] == "undeployed"
+        assert rows[0]["settled_at"] is None
+        assert rows[0]["updated_at"] == 1234
+        assert rows[1]["shares_delta"] == "100"
+        service._history.functions.pools.return_value.call.side_effect = read_pool
+        assert await EarnWorker()._recover() is False
+    assert test_db.execute("SELECT shares_delta FROM earn_transactions WHERE id = 't1'").fetchone()[0] == "100"
+
+
+@pytest.mark.asyncio
+async def test_reverted_receipt_is_final_and_is_not_polled_again(test_db):
+    _hashed_row(test_db)
+    service = _settlement_service()
+    service.sapphire.w3.eth.get_transaction_receipt.return_value = {
+        "status": 0, "blockNumber": 42, "to": _EARN_MANAGER,
+    }
+    with patch("src.services.earn.worker.get_vault_service", return_value=service):
+        assert await EarnWorker()._recover() is False
+        service.sapphire.w3.eth.get_transaction_receipt.reset_mock()
         await EarnWorker()._recover()
-
-    assert service._update_transaction.call_args.kwargs["status"] == "failed"
-    assert "manual recovery" in service._update_transaction.call_args.kwargs["error"]
+    result = test_db.execute("SELECT * FROM earn_transactions").fetchone()
+    assert result["status"] == "failed"
+    assert result["settled_at"] == 1234
+    assert result["shares_delta"] is None
+    service._history.functions.pools.assert_not_called()
+    service.sapphire.w3.eth.get_transaction_receipt.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_nothing_new_is_claimed_while_a_row_is_still_in_flight(test_db):
-    _row(test_db, "inflight", user=USER_B, status="executing")
-    _row(test_db, "queued", user=USER_A)
-    service = MagicMock()
-
+async def test_ambiguous_block_records_no_delta_and_is_not_polled_again(test_db):
+    _hashed_row(test_db, status="failed")
+    service = _settlement_service(assets_moved=1500)
     with patch("src.services.earn.worker.get_vault_service", return_value=service):
-        await EarnWorker().run_once()
+        assert await EarnWorker()._recover() is False
+        service.sapphire.w3.eth.get_transaction_receipt.reset_mock()
+        await EarnWorker()._recover()
+    result = test_db.execute("SELECT * FROM earn_transactions").fetchone()
+    assert result["status"] == "undeployed"
+    assert result["settled_at"] == 1234
+    assert result["shares_delta"] is result["exchange_rate"] is None
+    service.sapphire.w3.eth.get_transaction_receipt.assert_not_called()
 
-    assert _status(test_db, "queued") == "scheduled"
-    service.deposit.assert_not_called()
+
+@pytest.mark.asyncio
+async def test_a_tx_to_another_contract_settles_without_shares(test_db):
+    _hashed_row(test_db, status="failed")
+    service = _settlement_service()
+    service.sapphire.w3.eth.get_transaction_receipt.return_value = {
+        "status": 1, "blockNumber": 42, "to": "0x" + "22" * 20,
+    }
+    with patch("src.services.earn.worker.get_vault_service", return_value=service):
+        assert await EarnWorker()._recover() is False
+        service.sapphire.w3.eth.get_transaction_receipt.reset_mock()
+        await EarnWorker()._recover()
+    result = test_db.execute("SELECT * FROM earn_transactions").fetchone()
+    assert (result["status"], result["settled_at"], result["updated_at"]) == ("undeployed", 1234, 1234)
+    assert result["shares_delta"] is None
+    service._history.functions.pools.assert_not_called()
+    service.sapphire.w3.eth.get_transaction_receipt.assert_not_called()
 
 
 @pytest.mark.asyncio

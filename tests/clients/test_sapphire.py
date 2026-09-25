@@ -138,3 +138,38 @@ class TestTransactionSubmission:
             hashes = [f.result() for f in futures]
         assert submitted == [9, 10, 11, 12, 13]
         assert len(set(hashes)) == 5
+
+
+class _RecordingProvider(Web3.HTTPProvider):
+    def __init__(self):
+        super().__init__("http://localhost:1")
+        self.calls = []
+
+    def make_request(self, method, params):
+        self.calls.append((method, params))
+        result = hex(23294) if method == "eth_chainId" else "0x" + "00" * 32
+        return {"jsonrpc": "2.0", "id": 1, "result": result}
+
+
+def test_the_reader_sends_historical_calls_unsigned():
+    # Sapphire rejects signed queries pinned to a past block.
+    settings = _settings()
+    settings.accounting_chain_id = 23294
+    providers = []
+
+    def provider(*_args):
+        providers.append(_RecordingProvider())
+        return providers[-1]
+
+    with patch.object(sapphire_module, "load_settings", return_value=settings), \
+         patch.object(sapphire_module, "sapphire_http_provider", side_effect=provider):
+        client = sapphire_module.SapphireClient()
+
+    call = {"to": "0x" + "33" * 20, "data": "0x1234"}
+    client.w3_unwrapped.eth.call(call, 100)
+
+    method, params = next(c for p in providers for c in p.calls if c[0] == "eth_call")
+    assert method == "eth_call"
+    assert "from" not in params[0]
+    assert params[0]["data"] == "0x1234"
+    assert params[1] == hex(100)

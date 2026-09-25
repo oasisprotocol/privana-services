@@ -227,7 +227,10 @@ async def test_a_waiting_withdraw_stays_put_while_liquidity_is_short(test_db):
     service._registry.get.return_value = strategy
     service.withdraw = AsyncMock()
 
-    with patch("src.services.earn.worker.get_vault_service", return_value=service):
+    # A freshly booted host: the monotonic clock is still below the interval.
+    with patch("src.services.earn.worker.get_vault_service", return_value=service), patch(
+        "src.services.earn.worker.time.monotonic", return_value=5.0
+    ):
         worker = EarnWorker()
         await worker.run_once()
         await worker.run_once()

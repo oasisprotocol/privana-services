@@ -49,7 +49,7 @@ class EarnWorker:
     def __init__(self) -> None:
         self._stop = asyncio.Event()
         self._task: Optional[asyncio.Task] = None
-        self._liquidity_checked_at = 0.0
+        self._liquidity_checked_at: Optional[float] = None
 
     async def start(self) -> None:
         if self._task is not None:
@@ -210,7 +210,9 @@ class EarnWorker:
         them. They go back as scheduled, in their original order, so the normal
         claim path runs them with the signature and nonce they came with."""
         now = time.monotonic()
-        if now - self._liquidity_checked_at < LIQUIDITY_RECHECK_SEC:
+        # The monotonic clock counts from boot, so a zero start would skip the
+        # first check on a host that has been up for less than the interval.
+        if self._liquidity_checked_at is not None and now - self._liquidity_checked_at < LIQUIDITY_RECHECK_SEC:
             return
         self._liquidity_checked_at = now
         rows = get_db().execute(

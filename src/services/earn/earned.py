@@ -29,6 +29,7 @@ import logging
 from dataclasses import dataclass
 from typing import Optional
 
+from src.core.config import load_settings
 from src.core.db import get_db
 
 logger = logging.getLogger(__name__)
@@ -63,6 +64,10 @@ def _pool_shares_accounted(pool_id: str) -> Optional[int]:
     contract (``EarnManager.deposit`` is externally callable) paired with a
     withdrawal this service could not attribute. Comparing the pool's whole
     recorded movement against the chain's ``totalShares`` closes that gap.
+
+    Share movements known to have happened outside this service are added
+    from configuration: they are real, but no row can ever record them, and
+    without them one such movement hides every holder's figure for good.
     """
     rows = get_db().execute(
         """SELECT shares_delta FROM earn_transactions
@@ -73,7 +78,7 @@ def _pool_shares_accounted(pool_id: str) -> Optional[int]:
     # overflows on a WETH or large USDC pool, which would make the completeness
     # check unusable for exactly the pools that need it. A single NULL means a
     # cashflow went unrecorded, so the history is incomplete.
-    total = 0
+    total = load_settings().earn_unrecorded_shares.get(pool_id.lower(), 0)
     for row in rows:
         if row["shares_delta"] is None:
             return None

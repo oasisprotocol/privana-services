@@ -54,6 +54,15 @@ def _build_sapphire_rpc_headers() -> Dict[str, str]:
     return parsed
 
 
+def _parse_unrecorded_shares(raw: str) -> Dict[str, int]:
+    if not raw.strip():
+        return {}
+    parsed = json.loads(raw)
+    if not isinstance(parsed, dict):
+        raise ValueError("EARN_UNRECORDED_SHARES must be a JSON object of pool id to share count")
+    return {pool.lower(): int(shares) for pool, shares in parsed.items()}
+
+
 def load_settings(refresh: bool = False) -> Settings:
     global _settings
     if _settings is None or refresh:
@@ -102,6 +111,7 @@ def load_settings(refresh: bool = False) -> Settings:
             midas_pool_assets=os.getenv("MIDAS_POOL_ASSETS"),
             defillama_pool_ids=os.getenv("DEFILLAMA_POOL_IDS", ""),
             coingecko_token_ids=os.getenv("COINGECKO_TOKEN_IDS", ""),
+            earn_unrecorded_shares=_parse_unrecorded_shares(os.getenv("EARN_UNRECORDED_SHARES", "")),
             lifi_execution_enabled=os.getenv("LIFI_EXECUTION_ENABLED", "false").lower() == "true",
             lifi_max_swap_amount_usd=int(os.getenv("LIFI_MAX_SWAP_AMOUNT_USD", "0")),
             pool_admin_secret_key=os.getenv("POOL_ADMIN_SECRET_KEY", ""),

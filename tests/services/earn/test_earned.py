@@ -240,6 +240,77 @@ class TestPoolLevelCompleteness:
         assert result.status == STATUS_OK
 
 
+class TestUnrecordedShares:
+    """Share movements made on chain outside this service can never get a row.
+    Configured per pool, they let the pool history reconcile again."""
+
+    @staticmethod
+    def _settings(shares):
+        from unittest.mock import MagicMock
+        settings = MagicMock()
+        settings.earn_unrecorded_shares = shares
+        return settings
+
+    def test_an_unrecorded_burn_no_longer_hides_every_holder(self, test_db):
+        from unittest.mock import patch
+
+        # The ledger has both deposits, but a withdrawal of 40 shares went
+        # straight to the contract, so the chain holds 110 against a history of 150.
+        _cashflow(amount="100", shares_delta="100")
+        _cashflow(amount="50", shares_delta="50", user=OTHER)
+        assert earned_active(USER, POOL, 100, 105, pool_total_shares=110).status == (
+            STATUS_LEDGER_INCOMPLETE
+        )
+
+        with patch("src.services.earn.earned.load_settings", return_value=self._settings({POOL: -40})):
+            result = earned_active(USER, POOL, 100, 105, pool_total_shares=110)
+        assert result.status == STATUS_OK
+        assert result.active == "5"
+
+    def test_the_adjustment_only_applies_to_its_own_pool(self, test_db):
+        from unittest.mock import patch
+
+        _cashflow(amount="100", shares_delta="100")
+        other_pool = "0x" + "12" * 32
+        with patch(
+            "src.services.earn.earned.load_settings", return_value=self._settings({other_pool: -40})
+        ):
+            result = earned_active(USER, POOL, 100, 105, pool_total_shares=60)
+        assert result.status == STATUS_LEDGER_INCOMPLETE
+
+    def test_mainnet_midas_pool_reconciles_with_its_adjustment(self, test_db):
+        from unittest.mock import patch
+
+        # The live figures: the recorded history sums to 35595311072341 while
+        # the chain holds 30693594001022, the difference being the 4.9 USDC
+        # withdrawal sent straight to the contract at Sapphire block 15794990.
+        _cashflow(amount="1000000", shares_delta="1000000")
+        _cashflow(amount="1", shares_delta=str(35595311072341 - 1000000), user=OTHER)
+        with patch(
+            "src.services.earn.earned.load_settings",
+            return_value=self._settings({POOL: -4901717071319}),
+        ):
+            result = earned_active(USER, POOL, 1000000, 1000500, pool_total_shares=30693594001022)
+        assert result.status == STATUS_OK
+        assert result.active == "500"
+
+
+class TestUnrecordedSharesConfig:
+    def test_parses_pool_ids_case_insensitively(self):
+        from src.core.config import _parse_unrecorded_shares
+
+        assert _parse_unrecorded_shares('{"0xABC": -5}') == {"0xabc": -5}
+        assert _parse_unrecorded_shares("") == {}
+
+    def test_rejects_anything_but_an_object(self):
+        import pytest
+
+        from src.core.config import _parse_unrecorded_shares
+
+        with pytest.raises(ValueError):
+            _parse_unrecorded_shares("[1, 2]")
+
+
 class TestRoundingBehaviour:
     def test_partial_withdrawal_dust_favours_understating_active(self, test_db):
         # Codex's counterexample: deposit 10 for 3 shares, withdraw 1 share

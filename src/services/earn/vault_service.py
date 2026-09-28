@@ -90,7 +90,7 @@ class VaultService:
         self.settings = load_settings()
         self.sapphire = get_pool_admin_sapphire_client()
         self.accounting = get_accounting_client()
-        self._pools_tx_lock = asyncio.Lock()
+        self._pool_locks: dict[str, asyncio.Lock] = {}
         self._registry = registry if registry is not None else get_strategy_registry()
         self._seed_read_warned = False
         self._seed_cache: dict[str, tuple[float, int]] = {}
@@ -105,6 +105,15 @@ class VaultService:
             address=self.contract_address,
             abi=EARN_MANAGER_ABI,
         )
+
+    def _pool_lock(self, pool_id_hex: str) -> asyncio.Lock:
+        """Serializes everything that reads or moves one pool's assets.
+
+        Pools do not share a denominator, so a bridge into one pool's strategy
+        has no reason to hold up a deposit into another. Sapphire submissions
+        from the admin key stay ordered by the client's own submission lock.
+        """
+        return self._pool_locks.setdefault(pool_id_hex.lower(), asyncio.Lock())
 
     async def _route_to_strategy(self, pool_id_hex: str, amount: int) -> None:
         """After a successful EarnManager.deposit, push the same amount into
@@ -620,7 +629,7 @@ class VaultService:
 
         sig_bytes = bytes.fromhex(signature.removeprefix("0x"))
 
-        async with self._pools_tx_lock:
+        async with self._pool_lock(pool_id_hex):
             # Sync under the lock: it reads the strategy's live AUM and writes
             # it as the contract's share-math denominator, so it must not run
             # while another op has assets in flight. Outside the lock a deposit
@@ -779,7 +788,7 @@ class VaultService:
         # after the reclaim had already moved funds.
         self._assert_pool_custody(pool)
 
-        async with self._pools_tx_lock:
+        async with self._pool_lock(pool_id_hex):
             # Sync inside the lock, before moving any strategy assets, so a
             # concurrent deposit can never sync the transient balance this
             # reclaim is about to create.
@@ -962,7 +971,7 @@ class VaultService:
         if strategy.name == "manual":
             return 0
 
-        async with self._pools_tx_lock:
+        async with self._pool_lock(pool_id_hex):
             # A pending withdrawal still needs its reclaimed funds after the
             # original call releases the lock.
             if get_db().execute(

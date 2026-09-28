@@ -591,7 +591,7 @@ class TestStrategyRouting:
         held = []
 
         async def spy(pool_id_hex):
-            held.append(service._pools_tx_lock.locked())
+            held.append(service._pool_lock(POOL_ID_HEX).locked())
             return 1050
 
         service.sync_total_assets = spy
@@ -1814,14 +1814,29 @@ class TestDeployIdle:
         service, strategy = self._service(idle=100_000)
         held = []
         strategy.deposit_to_earn = AsyncMock(
-            side_effect=lambda _a: held.append(service._pools_tx_lock.locked())
+            side_effect=lambda _a: held.append(service._pool_lock(POOL_ID_HEX).locked())
         )
 
         await service.deploy_idle(POOL_ID_HEX)
 
         # A withdrawal's reclaim must not be deployed out from under it.
         assert held == [True]
-        assert not service._pools_tx_lock.locked()
+        assert not service._pool_lock(POOL_ID_HEX).locked()
+
+    async def test_a_bridge_in_one_pool_leaves_other_pools_unlocked(self, test_db):
+        other_pool = "0x" + "cd" * 32
+        service, strategy = self._service(idle=100_000)
+        held = []
+        strategy.deposit_to_earn = AsyncMock(
+            side_effect=lambda _a: held.append(
+                (service._pool_lock(POOL_ID_HEX).locked(), service._pool_lock(other_pool).locked())
+            )
+        )
+
+        await service.deploy_idle(POOL_ID_HEX)
+
+        assert held == [(True, False)]
+        assert service._pool_lock(POOL_ID_HEX.upper().replace("0X", "0x")) is service._pool_lock(POOL_ID_HEX)
 
     async def test_does_nothing_when_there_is_nothing_idle(self, test_db):
         service, strategy = self._service(idle=0)

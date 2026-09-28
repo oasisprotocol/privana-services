@@ -2,11 +2,10 @@ import asyncio
 import logging
 from typing import Optional
 
+from src.core.config import load_settings
 from src.services.earn.vault_service import VaultService, get_vault_service
 
 logger = logging.getLogger(__name__)
-
-DEPLOY_INTERVAL_SEC = 300
 
 
 class IdleDeployer:
@@ -55,7 +54,7 @@ class IdleDeployer:
             return
         self._running = True
         self._task = asyncio.create_task(self._run())
-        logger.info("Idle deployer started (every %ds)", DEPLOY_INTERVAL_SEC)
+        logger.info("Idle deployer started (every %ds)", load_settings().earn_batch_interval_sec)
 
     async def stop(self) -> None:
         self._running = False
@@ -78,7 +77,7 @@ class IdleDeployer:
                 await self.deploy_once()
             except Exception:
                 logger.exception("Idle deploy round failed; retrying next interval")
-            await asyncio.sleep(DEPLOY_INTERVAL_SEC)
+            await asyncio.sleep(load_settings().earn_batch_interval_sec)
 
 
 _deployer_instance: Optional[IdleDeployer] = None

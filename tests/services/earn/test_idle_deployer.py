@@ -56,3 +56,25 @@ async def test_a_failed_pool_listing_is_not_fatal():
     service.list_pools = MagicMock(side_effect=RuntimeError("rpc down"))
 
     assert await deployer.deploy_once() == 0
+
+
+@pytest.mark.asyncio
+async def test_rounds_run_on_the_configured_batch_interval(monkeypatch):
+    import src.services.earn.idle_deployer as module
+
+    deployer, _ = _deployer([])
+    slept = []
+
+    async def fake_sleep(seconds):
+        slept.append(seconds)
+        deployer._running = False
+
+    monkeypatch.setattr(module.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(
+        module, "load_settings", lambda: MagicMock(earn_batch_interval_sec=42),
+    )
+    deployer._running = True
+
+    await deployer._run()
+
+    assert slept == [42]

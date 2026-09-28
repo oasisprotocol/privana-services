@@ -108,3 +108,27 @@ def test_validate_settings_passes_with_real_addresses(monkeypatch):
     )
     monkeypatch.setattr(main_module, "settings", crafted)
     main_module._validate_settings()
+
+
+def test_earn_batch_settings_default(monkeypatch):
+    for name in (
+        "EARN_BATCH_INTERVAL_SEC", "EARN_BUFFER_MIN", "EARN_BUFFER_BPS", "EARN_MAX_PENDING_PER_USER",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    settings = config_module.load_settings(refresh=True)
+    assert settings.earn_batch_interval_sec == 300
+    assert settings.earn_buffer_min == 50_000_000
+    assert settings.earn_buffer_bps == 500
+    assert settings.earn_max_pending_per_user == 5
+
+
+def test_earn_batch_settings_from_env(monkeypatch):
+    monkeypatch.setenv("EARN_BATCH_INTERVAL_SEC", "60")
+    monkeypatch.setenv("EARN_BUFFER_MIN", "1000000")
+    monkeypatch.setenv("EARN_BUFFER_BPS", "250")
+    monkeypatch.setenv("EARN_MAX_PENDING_PER_USER", "2")
+    settings = config_module.load_settings(refresh=True)
+    assert settings.earn_batch_interval_sec == 60
+    assert settings.earn_buffer_min == 1_000_000
+    assert settings.earn_buffer_bps == 250
+    assert settings.earn_max_pending_per_user == 2

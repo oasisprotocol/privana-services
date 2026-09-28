@@ -66,3 +66,13 @@ class Settings:
     # (pool id -> signed share count), so its recorded history can still be
     # reconciled against the chain's totalShares.
     earn_unrecorded_shares: Dict[str, int] = field(default_factory=dict)
+
+    # How often each pool's idle funds are netted against waiting withdrawals
+    # and moved in or out of its strategy as one amount.
+    earn_batch_interval_sec: int = 300
+    # Kept on the pool's account to pay withdrawals without touching the
+    # strategy: the larger of a fixed floor (token base units) and a share of
+    # the pool's assets.
+    earn_buffer_min: int = 50_000_000
+    earn_buffer_bps: int = 500
+    earn_max_pending_per_user: int = 5

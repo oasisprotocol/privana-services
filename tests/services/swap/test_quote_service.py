@@ -528,3 +528,34 @@ class TestFeeExemption(TestGetQuote):
         assert existing.quote_id == first.quote_id
         assert existing.fee_bps == service.settings.fee_bps
         assert existing.fee_policy_id is None
+
+
+class TestQuoteExpiresIn:
+    """expires_in lets clients time a quote without comparing expires_at to their own clock."""
+
+    async def test_new_quote_counts_down_from_when_the_response_is_built(self, test_db, monkeypatch):
+        clock = [1_800_000_000.0]
+        monkeypatch.setattr(time, "time", lambda: clock[0])
+        service = TestGetQuote()._make_service()
+
+        async def slow_nonce(_user):
+            clock[0] += 5  # accounting read after expires_at was set
+            return 5
+
+        service.accounting.get_transfer_nonce = AsyncMock(side_effect=slow_nonce)
+        result = await service.get_quote(
+            from_token_id=TOKEN_A,
+            to_token_id=TOKEN_B,
+            from_amount="1000000",
+            user_address="0x" + "a" * 40,
+        )
+        assert result.expires_at == 1_800_000_030
+        assert result.expires_in == 25
+
+    async def test_reused_quote_reports_the_time_it_has_left(self, insert_quote, monkeypatch):
+        clock = [1_800_000_000.5]
+        monkeypatch.setattr(time, "time", lambda: clock[0])
+        insert_quote("q-reuse", expires_at=1_800_000_012)
+        service = TestQuoteDeduplication()._make_service()
+        result = await service._find_existing_quote("0xuser", TOKEN_A, TOKEN_B, "1000000")
+        assert result.expires_in == 11  # rounded down, never overstated

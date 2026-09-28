@@ -47,12 +47,10 @@ EARN_STATUS_EXECUTING = "executing"
 EARN_STATUS_PENDING = "pending"
 EARN_STATUS_COMPLETED = "completed"
 EARN_STATUS_FAILED = "failed"
-# Shares were minted on-chain but the funds have not reached the yield
-# strategy. Distinct from "failed" because the user's deposit is real and
-# irreversible, and distinct from "completed" because the balance earns
-# nothing until deployed. Every deposit passes through this state between
-# the mint and the strategy routing, so a crash in that window leaves a row
-# an operator can find instead of a "completed" row hiding idle funds.
+# Shares were minted on-chain, but the row was settled by recovery rather
+# than by the deposit call itself. Distinct from "failed" because the user's
+# deposit is real and irreversible. The idle deployer completes these once the
+# pool's idle balance has been deployed.
 EARN_STATUS_UNDEPLOYED = "undeployed"
 # A withdrawal the strategy cannot pay out right now. Nothing has moved and
 # the user keeps their shares; the worker releases it once liquidity is back.
@@ -698,26 +696,13 @@ class VaultService:
                     "error": error,
                 }
 
+            # The shares are minted and the funds sit on the pool's account,
+            # which already counts toward its assets. The idle deployer moves
+            # them into the strategy with everything else that arrived since
+            # its last round, so the depositor does not wait on the bridge.
             self._update_transaction(
-                tx_id, status=EARN_STATUS_UNDEPLOYED, tx_hash=tx_hash
+                tx_id, status=EARN_STATUS_COMPLETED, tx_hash=tx_hash
             )
-
-            deploy_error = None
-            try:
-                await self._route_to_strategy(pool_id_hex, int(amount))
-            except Exception as exc:
-                logger.exception(
-                    "Earn deposit %s minted shares but strategy routing failed; "
-                    "funds are in pool balance pending redeploy",
-                    tx_id,
-                )
-                deploy_error = sanitize_error(str(exc))
-                self._update_transaction(tx_id, error=deploy_error)
-            else:
-                self._update_transaction(tx_id, status=EARN_STATUS_COMPLETED)
-                await self._complete_undeployed_if_clear(pool_id_hex)
-
-        deploy_status = EARN_STATUS_UNDEPLOYED if deploy_error else EARN_STATUS_COMPLETED
 
         try:
             pool_after = self.get_pool(pool_id)
@@ -731,8 +716,8 @@ class VaultService:
                 "shares_minted": None,
                 "exchange_rate": _exchange_rate(effective_assets, pool_after["total_shares"]),
                 "tx_hash": tx_hash,
-                "status": deploy_status,
-                "error": deploy_error,
+                "status": EARN_STATUS_COMPLETED,
+                "error": None,
             }
         except Exception:
             logger.warning("Post-tx read failed for deposit %s, returning degraded response", tx_id)
@@ -743,8 +728,8 @@ class VaultService:
                 "shares_minted": None,
                 "exchange_rate": None,
                 "tx_hash": tx_hash,
-                "status": deploy_status,
-                "error": deploy_error,
+                "status": EARN_STATUS_COMPLETED,
+                "error": None,
             }
 
     async def withdraw(
@@ -1290,24 +1275,6 @@ class VaultService:
             operation, tx_id, signer_address, user_address, token_id, amount, nonce,
         )
         return tx_id
-
-    async def _complete_undeployed_if_clear(self, pool_id_hex: str) -> None:
-        """A routed deposit sweeps whatever was left raw on the earn account, so
-        once the pool has nothing idle either, earlier undeployed deposits
-        have been put to work along with it. Bookkeeping only: a failed read
-        here must not fail the deposit that just succeeded.
-        """
-        try:
-            strategy = self._registry.get(pool_id_hex)
-            if (
-                strategy.name != "manual"
-                and await strategy.idle_assets() == 0
-                and await strategy.stranded_assets() == 0
-                and await strategy.in_flight_assets() == 0
-            ):
-                self._complete_undeployed(pool_id_hex)
-        except Exception:
-            logger.warning("undeployed-row reconcile skipped pool=%s", pool_id_hex, exc_info=True)
 
     def _complete_undeployed(self, pool_id_hex: str) -> None:
         """Deposits whose routing failed sit as ``undeployed`` with their funds

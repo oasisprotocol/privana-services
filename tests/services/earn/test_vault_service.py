@@ -334,10 +334,8 @@ class TestGetAllBalances:
 
 
 class TestStrategyRouting:
-    async def test_deposit_routes_to_strategy(self, test_db):
-        from src.services.earn.registry import StrategyRegistry
-
-        registry = StrategyRegistry()
+    @staticmethod
+    def _routing_strategy():
         strategy = MagicMock()
         strategy.withdraw_ready = AsyncMock(return_value=True)
         strategy.name = "aave-v3"
@@ -345,34 +343,13 @@ class TestStrategyRouting:
         strategy.deposit_to_earn = AsyncMock()
         strategy.total_assets = AsyncMock(return_value=1050)
         strategy.idle_assets = AsyncMock(return_value=0)
-        registry.register(POOL_ID_HEX, strategy)
+        return strategy
 
-        service, contract, _, _ = _make_service(registry=registry)
-        contract.functions.pools.return_value.call.return_value = (
-            bytes.fromhex(USDC_TOKEN_ID[2:]),
-            POOL_ADDRESS,
-            1000, 1050, True,
-        )
-        contract.functions.userShares.return_value.call.side_effect = [0, 952]
-
-        result = await service.deposit(
-            POOL_ID_HEX, USER_ADDRESS, "1000", 5, "0x" + "aa" * 65
-        )
-
-        assert result["status"] == "completed"
-        strategy.deposit_to_earn.assert_awaited_once_with(1000)
-
-    async def test_deposit_reports_undeployed_when_strategy_routing_fails(self, test_db):
+    async def test_deposit_completes_without_waiting_on_the_strategy(self, test_db):
         from src.services.earn.registry import StrategyRegistry
 
         registry = StrategyRegistry()
-        strategy = MagicMock()
-        strategy.withdraw_ready = AsyncMock(return_value=True)
-        strategy.name = "aave-v3"
-        strategy.is_healthy = AsyncMock(return_value=True)
-        strategy.deposit_to_earn = AsyncMock(side_effect=RuntimeError("aave rpc down"))
-        strategy.total_assets = AsyncMock(return_value=1050)
-        strategy.idle_assets = AsyncMock(return_value=0)
+        strategy = self._routing_strategy()
         registry.register(POOL_ID_HEX, strategy)
 
         service, contract, _, _ = _make_service(registry=registry)
@@ -381,124 +358,45 @@ class TestStrategyRouting:
             POOL_ADDRESS,
             1000, 1050, True,
         )
-        contract.functions.userShares.return_value.call.side_effect = [0, 952]
 
         result = await service.deposit(
             POOL_ID_HEX, USER_ADDRESS, "1000", 5, "0x" + "aa" * 65
         )
 
-        # Shares were minted, so this is not a "failed" deposit, but the funds
-        # never reached the strategy and must not be reported as settled.
-        assert result["status"] == "undeployed"
-        assert result["error"] is not None
+        # The funds stay on the pool's account for the idle deployer's next
+        # round, so the depositor never waits on a bridge.
+        assert result["status"] == "completed"
+        assert result["error"] is None
         assert result["tx_hash"] is not None
-        strategy.deposit_to_earn.assert_awaited_once()
-
+        strategy.deposit_to_earn.assert_not_awaited()
         row = test_db.execute(
             "SELECT status, error FROM earn_transactions WHERE id = ?",
             (result["deposit_id"],),
         ).fetchone()
-        assert row["status"] == "undeployed"
-        assert row["error"] is not None
-
-    async def test_undeployed_deposit_records_why_the_bridge_refused(self, test_db):
-        """Regression for the testnet outage: the accounting SDK folds its
-        .detail into str() (privana-sdk fix), and the row must keep that
-        explanation rather than truncating it back to "400 Bad Request"."""
-        from src.services.earn.registry import StrategyRegistry
-
-        class ApiError(Exception):
-            def __init__(self, message, status_code, detail=None):
-                super().__init__(message)
-                self.status_code = status_code
-                self.detail = detail
-
-            def __str__(self):
-                base = super().__str__()
-                if self.detail and self.detail not in base:
-                    return f"{base}: {self.detail}"
-                return base
-
-        registry = StrategyRegistry()
-        strategy = MagicMock()
-        strategy.withdraw_ready = AsyncMock(return_value=True)
-        strategy.name = "aave-v3"
-        strategy.is_healthy = AsyncMock(return_value=True)
-        strategy.deposit_to_earn = AsyncMock(
-            side_effect=ApiError(
-                "API request failed: 400 Bad Request",
-                400,
-                "Insufficient native balance on Base Sepolia. EVM address "
-                "0xE5A94d196DE8EeC7ABEc59aca32C322F3Dccc74A has 0 wei, "
-                "needs at least 10000000000000 wei.",
-            )
-        )
-        strategy.total_assets = AsyncMock(return_value=1050)
-        strategy.idle_assets = AsyncMock(return_value=0)
-        registry.register(POOL_ID_HEX, strategy)
-
-        service, contract, _, _ = _make_service(registry=registry)
-        contract.functions.pools.return_value.call.return_value = (
-            bytes.fromhex(USDC_TOKEN_ID[2:]),
-            POOL_ADDRESS,
-            1000, 1050, True,
-        )
-        contract.functions.userShares.return_value.call.side_effect = [0, 952]
-
-        result = await service.deposit(
-            POOL_ID_HEX, USER_ADDRESS, "1000", 5, "0x" + "aa" * 65
-        )
-
-        assert result["status"] == "undeployed"
-        row = test_db.execute(
-            "SELECT error FROM earn_transactions WHERE id = ?",
-            (result["deposit_id"],),
-        ).fetchone()
-        assert "Insufficient native balance on Base Sepolia" in row["error"]
-        assert "0xE5A94d196DE8EeC7ABEc59aca32C322F3Dccc74A" in row["error"]
-
-    async def test_deposit_is_undeployed_until_strategy_routing_succeeds(self, test_db):
-        from src.services.earn.registry import StrategyRegistry
-
-        registry = StrategyRegistry()
-        strategy = MagicMock()
-        strategy.withdraw_ready = AsyncMock(return_value=True)
-        strategy.name = "aave-v3"
-        strategy.is_healthy = AsyncMock(return_value=True)
-        strategy.total_assets = AsyncMock(return_value=1050)
-        strategy.idle_assets = AsyncMock(return_value=0)
-
-        status_during_routing = {}
-
-        async def capture_status(amount):
-            row = test_db.execute(
-                "SELECT status FROM earn_transactions WHERE operation = 'deposit'"
-            ).fetchone()
-            status_during_routing["value"] = row["status"]
-
-        strategy.deposit_to_earn = AsyncMock(side_effect=capture_status)
-        registry.register(POOL_ID_HEX, strategy)
-
-        service, contract, _, _ = _make_service(registry=registry)
-        contract.functions.pools.return_value.call.return_value = (
-            bytes.fromhex(USDC_TOKEN_ID[2:]),
-            POOL_ADDRESS,
-            1000, 1050, True,
-        )
-
-        result = await service.deposit(
-            POOL_ID_HEX, USER_ADDRESS, "1000", 5, "0x" + "aa" * 65
-        )
-
-        # A crash between the mint and the routing must leave the row visibly
-        # undeployed, never "completed" with idle funds behind it.
-        assert status_during_routing["value"] == "undeployed"
-        assert result["status"] == "completed"
-        row = test_db.execute(
-            "SELECT status FROM earn_transactions WHERE id = ?",
-            (result["deposit_id"],),
-        ).fetchone()
         assert row["status"] == "completed"
+        assert row["error"] is None
+
+    async def test_a_broken_bridge_does_not_touch_the_deposit(self, test_db):
+        from src.services.earn.registry import StrategyRegistry
+
+        registry = StrategyRegistry()
+        strategy = self._routing_strategy()
+        strategy.deposit_to_earn = AsyncMock(side_effect=RuntimeError("bridge down"))
+        registry.register(POOL_ID_HEX, strategy)
+
+        service, contract, _, _ = _make_service(registry=registry)
+        contract.functions.pools.return_value.call.return_value = (
+            bytes.fromhex(USDC_TOKEN_ID[2:]),
+            POOL_ADDRESS,
+            1000, 1050, True,
+        )
+
+        result = await service.deposit(
+            POOL_ID_HEX, USER_ADDRESS, "1000", 5, "0x" + "aa" * 65
+        )
+
+        assert result["status"] == "completed"
+        strategy.deposit_to_earn.assert_not_awaited()
 
     async def test_rate_snapshot_pairs_assets_with_the_shares_of_one_instant(self):
         from src.services.earn.registry import StrategyRegistry

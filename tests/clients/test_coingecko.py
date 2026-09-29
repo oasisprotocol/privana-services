@@ -3,7 +3,12 @@ from unittest.mock import AsyncMock, MagicMock
 import httpx
 import pytest
 
-from src.clients.coingecko import CoinGeckoClient, to_price_e8
+from src.clients.coingecko import (
+    COINGECKO_API_URL,
+    COINGECKO_PRO_API_URL,
+    CoinGeckoClient,
+    to_price_e8,
+)
 
 SAMPLE_SPOT = {"usd-coin": {"usd": 0.999736}, "ethereum": {"usd": 1873.58}}
 
@@ -87,3 +92,15 @@ class TestGetPriceHistory:
         points = await client.get_price_history("ethereum", days=30)
 
         assert [p.price_e8 for p in points] == [172400000000]
+
+
+class TestApiKey:
+    def test_without_a_key_uses_the_public_api(self):
+        c = CoinGeckoClient()
+        assert c.base_url == COINGECKO_API_URL
+        assert "x-cg-pro-api-key" not in c.client.headers
+
+    def test_with_a_key_uses_the_pro_api_and_sends_it(self):
+        c = CoinGeckoClient(api_key="CG-test")
+        assert c.base_url == COINGECKO_PRO_API_URL
+        assert c.client.headers["x-cg-pro-api-key"] == "CG-test"

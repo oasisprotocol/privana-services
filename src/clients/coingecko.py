@@ -8,6 +8,7 @@ import httpx
 logger = logging.getLogger(__name__)
 
 COINGECKO_API_URL = "https://api.coingecko.com/api/v3"
+COINGECKO_PRO_API_URL = "https://pro-api.coingecko.com/api/v3"
 
 # Prices are stored as integers scaled by 1e8, never as floats: the same column
 # holds USDC (~0.999736) and ETH (~1873.58), and this database has no precedent
@@ -30,9 +31,13 @@ def to_price_e8(price: float) -> int:
 
 
 class CoinGeckoClient:
-    def __init__(self, base_url: str = COINGECKO_API_URL) -> None:
-        self.base_url = base_url.rstrip("/")
-        self.client = httpx.AsyncClient(timeout=15.0, headers={"accept": "application/json"})
+    def __init__(self, base_url: Optional[str] = None, api_key: str = "") -> None:
+        default_url = COINGECKO_PRO_API_URL if api_key else COINGECKO_API_URL
+        self.base_url = (base_url or default_url).rstrip("/")
+        headers = {"accept": "application/json"}
+        if api_key:
+            headers["x-cg-pro-api-key"] = api_key
+        self.client = httpx.AsyncClient(timeout=15.0, headers=headers)
 
     async def get_spot_prices(self, coin_ids: list[str]) -> dict[str, int]:
         if not coin_ids:
@@ -86,5 +91,7 @@ _client_instance: Optional[CoinGeckoClient] = None
 def get_coingecko_client() -> CoinGeckoClient:
     global _client_instance
     if _client_instance is None:
-        _client_instance = CoinGeckoClient()
+        from src.core.config import load_settings
+
+        _client_instance = CoinGeckoClient(api_key=load_settings().coingecko_api_key)
     return _client_instance

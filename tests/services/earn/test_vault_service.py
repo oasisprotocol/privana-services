@@ -1523,7 +1523,7 @@ class TestSeedAwareQuotesAndExits:
 
 class TestDeployIdle:
     @staticmethod
-    def _service(*, idle, minimum=0, healthy=True, name="midas-mtbill"):
+    def _service(*, idle, minimum=0, healthy=True, name="midas-mtbill", buffer_min=0, buffer_bps=0):
         from src.services.earn.registry import StrategyRegistry
 
         registry = StrategyRegistry()
@@ -1546,6 +1546,9 @@ class TestDeployIdle:
             1000, 1000, True,
         )
         contract.functions.getSeededAssets.return_value.call.return_value = 0
+        service.settings = replace(
+            service.settings, earn_buffer_min=buffer_min, earn_buffer_bps=buffer_bps,
+        )
         return service, strategy
 
     async def test_routes_the_whole_idle_balance(self, test_db):
@@ -1735,6 +1738,46 @@ class TestDeployIdle:
 
         assert held == [(True, False)]
         assert service._pool_lock(POOL_ID_HEX.upper().replace("0X", "0x")) is service._pool_lock(POOL_ID_HEX)
+
+    async def test_keeps_the_buffer_floor_on_the_pool_account(self, test_db):
+        service, strategy = self._service(idle=80_000_000, buffer_min=30_000_000)
+
+        assert await service.deploy_idle(POOL_ID_HEX) == 50_000_000
+        strategy.deposit_to_earn.assert_awaited_once_with(50_000_000)
+
+    async def test_buffer_grows_with_the_pool(self, test_db):
+        service, strategy = self._service(idle=100_000, buffer_min=1, buffer_bps=5_000)
+
+        # Half of the 1000 deployed plus 100_000 idle stays behind.
+        assert await service.deploy_idle(POOL_ID_HEX) == 49_500
+        strategy.deposit_to_earn.assert_awaited_once_with(49_500)
+
+    async def test_idle_under_the_buffer_stays_put(self, test_db):
+        from src.core.db import db_write, get_db
+        service, strategy = self._service(idle=20_000_000, buffer_min=50_000_000)
+        db_write(
+            get_db(),
+            """INSERT INTO earn_transactions
+               (id, operation, pool_id, user_address, token_id, amount,
+                signer_address, nonce, signature, input_nonce, input_signature,
+                status, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            ("stuck", "deposit", POOL_ID_HEX, "0xuser", USDC_TOKEN_ID, "100000",
+             "0xuser", 1, "0xsig", 1, "0xsig", "undeployed", 0, 0),
+        )
+
+        assert await service.deploy_idle(POOL_ID_HEX) == 0
+        strategy.deposit_to_earn.assert_not_awaited()
+        # Money held as the buffer is where it is meant to be.
+        row = get_db().execute("SELECT status FROM earn_transactions WHERE id = 'stuck'").fetchone()
+        assert row[0] == "completed"
+
+    async def test_stranded_funds_deploy_even_when_the_buffer_is_short(self, test_db):
+        service, strategy = self._service(idle=10, buffer_min=50_000_000)
+        strategy.stranded_assets = AsyncMock(side_effect=[5_000_000, 0])
+
+        assert await service.deploy_idle(POOL_ID_HEX) == 5_000_000
+        strategy.deposit_to_earn.assert_awaited_once_with(5_000_000)
 
     async def test_does_nothing_when_there_is_nothing_idle(self, test_db):
         service, strategy = self._service(idle=0)

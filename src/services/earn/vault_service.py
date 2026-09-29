@@ -937,14 +937,15 @@ class VaultService:
             }
 
     async def deploy_idle(self, pool_id_hex: str) -> int:
-        """Move whatever is sitting in the pool's accounting balance into the
+        """Move the pool's idle balance above its liquidity buffer into the
         pool's strategy, and return how much moved.
 
-        Seed principal is paid into the pool account from outside and then
-        recorded, so it arrives idle and earns nothing until it is deployed.
-        The same is true of a deposit whose routing failed and of a reclaim
-        left over from a withdrawal that reverted, so this deploys the whole
-        idle balance rather than tracking which part is which.
+        Deposits land on the pool account and wait here, so one round deploys
+        everything that arrived since the last one as a single bridge. Seed
+        principal, a deposit settled by recovery, and a reclaim left over from
+        a withdrawal that reverted arrive the same way, so this deploys the
+        idle balance rather than tracking which part is which. The buffer stays
+        behind to pay withdrawals without touching the strategy.
 
         Net assets do not change: the funds move from one side of the backing
         figure to the other. The lock is what makes that safe, since it holds
@@ -974,11 +975,13 @@ class VaultService:
             idle = await strategy.idle_assets()
             stranded = await strategy.stranded_assets()
             minimum = await strategy.min_deploy_amount()
+            buffer = self._buffer_target(await strategy.total_assets() + idle)
             # The strategy bridges only what is not already on the earn
-            # account, so idle and stranded funds deploy together.
-            amount = idle + stranded
+            # account, so idle funds above the buffer and stranded funds
+            # deploy together.
+            amount = max(idle - buffer, 0) + stranded
             if amount <= 0 or amount < minimum:
-                if amount == 0:
+                if idle <= buffer and stranded == 0:
                     self._complete_undeployed(pool_id_hex)
                 return 0
             if not await strategy.is_healthy():
@@ -995,9 +998,17 @@ class VaultService:
             # guarantees nothing else is mid-flight.
             await self.sync_total_assets(pool_id_hex)
             left = await strategy.idle_assets()
-            if (left == 0 or left < minimum) and await strategy.stranded_assets() == 0:
+            if (left <= buffer or left - buffer < minimum) and await strategy.stranded_assets() == 0:
                 self._complete_undeployed(pool_id_hex)
             return amount
+
+    def _buffer_target(self, pool_assets: int) -> int:
+        """How much of a pool's balance stays off the strategy to pay
+        withdrawals: the larger of a fixed floor and a share of its assets."""
+        return max(
+            self.settings.earn_buffer_min,
+            pool_assets * self.settings.earn_buffer_bps // 10_000,
+        )
 
     async def effective_total_assets(self, pool_id_hex: str, on_chain_total: int) -> int:
         """Live AUM for a pool, derived from the strategy when available.

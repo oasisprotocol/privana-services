@@ -24,6 +24,7 @@ MOCK_QUOTE = QuoteResponse(
     liquidity_provider="0xlp",
     transfer_nonce=5,
     expires_at=9999999999,
+    expires_in=30,
 )
 
 

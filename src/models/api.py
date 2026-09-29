@@ -30,6 +30,7 @@ class QuoteResponse(BaseModel):
     liquidity_provider: str
     transfer_nonce: int
     expires_at: int
+    expires_in: int
     venue: str = "internal"
 
 

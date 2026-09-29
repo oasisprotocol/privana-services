@@ -20,6 +20,10 @@ logger = logging.getLogger(__name__)
 CLEANUP_INTERVAL = 60
 
 
+def _seconds_left(expires_at: int) -> int:
+    return max(0, int(expires_at - time.time()))
+
+
 def _parse_token_map(raw: str) -> dict:
     if not raw.strip():
         return {}
@@ -164,6 +168,7 @@ class QuoteService:
             liquidity_provider=liquidity_provider,
             transfer_nonce=transfer_nonce,
             expires_at=expires_at,
+            expires_in=_seconds_left(expires_at),
             venue=venue,
         )
 
@@ -265,6 +270,7 @@ class QuoteService:
             liquidity_provider=quote["liquidity_provider"],
             transfer_nonce=transfer_nonce,
             expires_at=quote["expires_at"],
+            expires_in=_seconds_left(quote["expires_at"]),
             venue=quote["venue"],
         )
 

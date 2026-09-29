@@ -152,6 +152,13 @@ class AccountingClient:
         )
         return TokenInfo(**response.json())
 
+    async def list_all_tokens(self) -> list[TokenInfo]:
+        response = await _request_with_retry(
+            self.client, "GET",
+            f"{self.base_url}/v1/accounting/tokens",
+        )
+        return [TokenInfo(**t) for t in response.json()["tokens"]]
+
     async def _exchange_jwt_for_siwe_auth(self, jwt_token: str) -> _JwtSiweAuth:
         jwt_token = jwt_token.strip()
         if not jwt_token:

@@ -145,6 +145,21 @@ class TestAccountingClient:
             await client.get_token_info("0xabc123")
         assert mock_http_client.request.call_count == 1
 
+    async def test_list_all_tokens_returns_every_registered_token(self, client, mock_http_client):
+        mock_http_client.request.return_value = self._mock_response(
+            {"tokens": [SAMPLE_TOKEN_NATIVE, SAMPLE_TOKEN_ERC20]}
+        )
+
+        result = await client.list_all_tokens()
+
+        assert [t.token_id for t in result] == [
+            SAMPLE_TOKEN_NATIVE["token_id"],
+            SAMPLE_TOKEN_ERC20["token_id"],
+        ]
+        mock_http_client.request.assert_called_once_with(
+            "GET", "http://test:8000/v1/accounting/tokens"
+        )
+
     async def test_get_lp_balance_retries_on_5xx(self, client, mock_http_client, monkeypatch):
         import asyncio
         monkeypatch.setattr("src.clients.accounting.RETRY_DELAY", 0.0)

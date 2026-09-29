@@ -328,19 +328,24 @@ async def test_a_withdraw_short_of_liquidity_waits_instead_of_failing(test_db):
     assert '"awaiting_liquidity"' in row["history"]
 
 
+def _waiting_service(capacity):
+    service = MagicMock()
+    service.payout_capacity = AsyncMock(return_value=capacity)
+    service.withdrawal_impossible = MagicMock(return_value=False)
+    service.reclaiming_pools = MagicMock(return_value=frozenset())
+    return service
+
+
 @pytest.mark.asyncio
 async def test_a_waiting_withdraw_goes_back_on_the_queue_once_liquidity_is_back(test_db):
     _row(test_db, "t1", operation="withdraw", status="awaiting_liquidity")
-    strategy = MagicMock()
-    strategy.withdraw_ready = AsyncMock(return_value=True)
-    service = MagicMock()
-    service._registry.get.return_value = strategy
+    service = _waiting_service(1000)
     service.withdraw = AsyncMock(return_value={})
 
     with patch("src.services.earn.worker.get_vault_service", return_value=service):
         await EarnWorker().run_once()
 
-    strategy.withdraw_ready.assert_awaited_once_with(1000)
+    service.payout_capacity.assert_awaited_once_with(POOL)
     # Released and claimed in the same pass, with its original signature.
     service.withdraw.assert_awaited_once()
     assert service.withdraw.await_args.kwargs["scheduled_id"] == "t1"
@@ -349,10 +354,7 @@ async def test_a_waiting_withdraw_goes_back_on_the_queue_once_liquidity_is_back(
 @pytest.mark.asyncio
 async def test_a_waiting_withdraw_stays_put_while_liquidity_is_short(test_db):
     _row(test_db, "t1", operation="withdraw", status="awaiting_liquidity")
-    strategy = MagicMock()
-    strategy.withdraw_ready = AsyncMock(return_value=False)
-    service = MagicMock()
-    service._registry.get.return_value = strategy
+    service = _waiting_service(999)
     service.withdraw = AsyncMock()
 
     # A freshly booted host: the monotonic clock is still below the interval.
@@ -366,20 +368,78 @@ async def test_a_waiting_withdraw_stays_put_while_liquidity_is_short(test_db):
     assert _status(test_db, "t1") == "awaiting_liquidity"
     service.withdraw.assert_not_called()
     # Rechecked on its own interval, not on every pass.
-    strategy.withdraw_ready.assert_awaited_once()
+    service.payout_capacity.assert_awaited_once()
 
 
 @pytest.mark.asyncio
 async def test_a_waiting_withdraw_does_not_block_other_users(test_db):
     _row(test_db, "t1", operation="withdraw", status="awaiting_liquidity", created=100)
     _row(test_db, "t2", user=USER_B, created=200)
-    strategy = MagicMock()
-    strategy.withdraw_ready = AsyncMock(return_value=False)
-    service = MagicMock()
-    service._registry.get.return_value = strategy
+    service = _waiting_service(0)
     service.deposit = AsyncMock(return_value={})
 
     with patch("src.services.earn.worker.get_vault_service", return_value=service):
         await EarnWorker().run_once()
 
     assert service.deposit.await_args.kwargs["scheduled_id"] == "t2"
+
+
+@pytest.mark.asyncio
+async def test_waiting_withdrawals_are_released_oldest_first_within_capacity(test_db):
+    _row(test_db, "a", operation="withdraw", status="awaiting_liquidity", amount="600", created=100)
+    _row(test_db, "b", operation="withdraw", status="awaiting_liquidity", amount="300", created=200, user=USER_B)
+    _row(test_db, "c", operation="withdraw", status="awaiting_liquidity", amount="300", created=300,
+         user="0x" + "33" * 20)
+    service = _waiting_service(1000)
+
+    with patch("src.services.earn.worker.get_vault_service", return_value=service):
+        await EarnWorker()._release_awaiting_liquidity()
+
+    # One balance read covers the pool; the third no longer fits.
+    service.payout_capacity.assert_awaited_once()
+    assert [_status(test_db, t) for t in ("a", "b", "c")] == ["scheduled", "scheduled", "awaiting_liquidity"]
+
+
+@pytest.mark.asyncio
+async def test_one_withdrawal_that_does_not_fit_does_not_block_the_rest(test_db):
+    _row(test_db, "big", operation="withdraw", status="awaiting_liquidity", amount="5000", created=100)
+    _row(test_db, "small", operation="withdraw", status="awaiting_liquidity", amount="10", created=200,
+         user=USER_B)
+    service = _waiting_service(1000)
+
+    with patch("src.services.earn.worker.get_vault_service", return_value=service):
+        await EarnWorker()._release_awaiting_liquidity()
+
+    # The next reclaim is sized for the large one as well.
+    assert [_status(test_db, t) for t in ("big", "small")] == ["awaiting_liquidity", "scheduled"]
+
+
+@pytest.mark.asyncio
+async def test_a_withdrawal_larger_than_the_pool_goes_back_to_be_refused(test_db):
+    _row(test_db, "huge", operation="withdraw", status="awaiting_liquidity", amount=str(10**30))
+    service = _waiting_service(1000)
+    service.withdrawal_impossible = MagicMock(return_value=True)
+
+    with patch("src.services.earn.worker.get_vault_service", return_value=service):
+        await EarnWorker()._release_awaiting_liquidity()
+
+    assert _status(test_db, "huge") == "scheduled"
+
+
+def test_claim_leaves_requests_for_a_pool_mid_reclaim_queued(test_db):
+    other_pool = "0x" + "bb" * 32
+    _row(test_db, "t1", created=100)
+    db_write(
+        test_db,
+        """INSERT INTO earn_transactions
+           (id, operation, pool_id, user_address, token_id, amount, signer_address,
+            nonce, signature, status, created_at, updated_at)
+           VALUES ('t2', 'deposit', ?, ?, '', '1000', ?, 0, '0x', 'scheduled', 200, 200)""",
+        (other_pool, USER_B.lower(), USER_B.lower()),
+    )
+
+    # Even at a limit of one, the busy pool's older row cannot take the slot.
+    claimed = EarnWorker._claim(1, frozenset({POOL}))
+
+    assert [c["id"] for c in claimed] == ["t2"]
+    assert _status(test_db, "t1") == "scheduled"

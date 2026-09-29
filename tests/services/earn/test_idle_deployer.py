@@ -11,7 +11,7 @@ def _deployer(pools, deploy=None):
 
     service = MagicMock()
     service.list_pools = MagicMock(return_value=pools)
-    service.deploy_idle = deploy or AsyncMock(return_value=0)
+    service.deploy_reclaim = deploy or AsyncMock(return_value=0)
     return IdleDeployer(service=service), service
 
 
@@ -27,17 +27,19 @@ async def test_deploys_every_active_pool():
 
     assert await deployer.deploy_once() == 350
 
-    assert [c.args[0] for c in service.deploy_idle.await_args_list] == [POOL_A, POOL_B]
+    assert [c.args[0] for c in service.deploy_reclaim.await_args_list] == [POOL_A, POOL_B]
 
 
 @pytest.mark.asyncio
-async def test_skips_paused_pools():
+async def test_paused_pools_only_reclaim():
     deployer, service = _deployer([_pool(POOL_A, active=False), _pool(POOL_B)])
 
     await deployer.deploy_once()
 
-    # A paused pool is paused because something is wrong with it.
-    assert [c.args[0] for c in service.deploy_idle.await_args_list] == [POOL_B]
+    # A paused pool gets nothing new, but its waiting exits are still paid for.
+    assert [(c.args[0], c.kwargs["allow_deploy"]) for c in service.deploy_reclaim.await_args_list] == [
+        (POOL_A, False), (POOL_B, True),
+    ]
 
 
 @pytest.mark.asyncio
@@ -56,3 +58,25 @@ async def test_a_failed_pool_listing_is_not_fatal():
     service.list_pools = MagicMock(side_effect=RuntimeError("rpc down"))
 
     assert await deployer.deploy_once() == 0
+
+
+@pytest.mark.asyncio
+async def test_rounds_run_on_the_configured_batch_interval(monkeypatch):
+    import src.services.earn.idle_deployer as module
+
+    deployer, _ = _deployer([])
+    slept = []
+
+    async def fake_sleep(seconds):
+        slept.append(seconds)
+        deployer._running = False
+
+    monkeypatch.setattr(module.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(
+        module, "load_settings", lambda: MagicMock(earn_batch_interval_sec=42),
+    )
+    deployer._running = True
+
+    await deployer._run()
+
+    assert slept == [42]

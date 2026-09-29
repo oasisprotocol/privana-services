@@ -47,12 +47,10 @@ EARN_STATUS_EXECUTING = "executing"
 EARN_STATUS_PENDING = "pending"
 EARN_STATUS_COMPLETED = "completed"
 EARN_STATUS_FAILED = "failed"
-# Shares were minted on-chain but the funds have not reached the yield
-# strategy. Distinct from "failed" because the user's deposit is real and
-# irreversible, and distinct from "completed" because the balance earns
-# nothing until deployed. Every deposit passes through this state between
-# the mint and the strategy routing, so a crash in that window leaves a row
-# an operator can find instead of a "completed" row hiding idle funds.
+# Shares were minted on-chain, but the row was settled by recovery rather
+# than by the deposit call itself. Distinct from "failed" because the user's
+# deposit is real and irreversible. The idle deployer completes these once the
+# pool's idle balance has been deployed.
 EARN_STATUS_UNDEPLOYED = "undeployed"
 # A withdrawal the strategy cannot pay out right now. Nothing has moved and
 # the user keeps their shares; the worker releases it once liquidity is back.
@@ -79,6 +77,23 @@ class ReceiptUnknown(Exception):
     """Broadcast, but the receipt could not be read. Recovery settles it."""
 
 
+class PendingLimitReached(Exception):
+    """The user already has as many unsettled earn requests as one may hold."""
+
+
+def pool_key(pool_id_hex: str) -> str:
+    """One spelling per pool. Requests may send the id with or without its
+    0x prefix, and per-pool state keyed on both would split one pool in two."""
+    return "0x" + pool_id_hex.lower().removeprefix("0x")
+
+
+def _pool_spellings(pool_id_hex: str) -> tuple[str, str]:
+    """Both spellings a stored row may use, for matching rows written before
+    ids were stored in one form."""
+    key = pool_key(pool_id_hex)
+    return key, key[2:]
+
+
 def _exchange_rate(total_assets: int, total_shares: int) -> str:
     if total_shares == 0:
         return "1.0"
@@ -90,7 +105,13 @@ class VaultService:
         self.settings = load_settings()
         self.sapphire = get_pool_admin_sapphire_client()
         self.accounting = get_accounting_client()
-        self._pools_tx_lock = asyncio.Lock()
+        self._pool_locks: dict[str, asyncio.Lock] = {}
+        # Pool balance promised to a bridge the idle deployer has started but not
+        # finished. Withdrawals cannot pay out of it.
+        self._held: dict[str, int] = {}
+        # Pools whose idle deployer holds the lock through a reclaim. The worker
+        # leaves their requests queued instead of waiting on the lock.
+        self._reclaiming: set[str] = set()
         self._registry = registry if registry is not None else get_strategy_registry()
         self._seed_read_warned = False
         self._seed_cache: dict[str, tuple[float, int]] = {}
@@ -105,6 +126,70 @@ class VaultService:
             address=self.contract_address,
             abi=EARN_MANAGER_ABI,
         )
+
+    def _pool_lock(self, pool_id_hex: str) -> asyncio.Lock:
+        """Serializes everything that reads or moves one pool's assets.
+
+        Pools do not share a denominator, so a bridge into one pool's strategy
+        has no reason to hold up a deposit into another. Sapphire submissions
+        from the admin key stay ordered by the client's own submission lock.
+        """
+        return self._pool_locks.setdefault(pool_key(pool_id_hex), asyncio.Lock())
+
+    def _moving(self, pool_id_hex: str) -> bool:
+        """Whether the idle deployer has pool funds between the pool account and
+        the strategy. Neither side can see money in a bridge, so a valuation
+        read now would come out short."""
+        key = pool_key(pool_id_hex)
+        return key in self._held or key in self._reclaiming
+
+    def reclaiming_pools(self) -> frozenset[str]:
+        return frozenset(self._reclaiming)
+
+    def _unresolved(self, pool_id_hex: str) -> bool:
+        """A receipt nobody has read yet: the operation may land at any moment
+        and move the pool balance and totalAssets with it."""
+        return get_db().execute(
+            "SELECT 1 FROM earn_transactions WHERE LOWER(pool_id) IN (?, ?) "
+            "AND status = ? LIMIT 1",
+            (*_pool_spellings(pool_id_hex), EARN_STATUS_PENDING),
+        ).fetchone() is not None
+
+    def withdrawal_impossible(self, pool_id_hex: str, amount: int) -> bool:
+        """More than the whole pool: the contract would revert it whoever
+        signed it, so waiting for liquidity would only hold up the queue."""
+        pool_id = bytes.fromhex(pool_key(pool_id_hex)[2:])
+        return amount > self.get_pool(pool_id)["total_assets"]
+
+    async def payout_capacity(self, pool_id_hex: str) -> int:
+        """What the pool account can pay out right now, leaving alone whatever
+        a bridge in progress has been promised. A failed read answers zero: a
+        request waits for the next check instead of failing."""
+        strategy = self._registry.get(pool_id_hex)
+        if strategy.name == "manual":
+            return 2**256
+        try:
+            idle = await strategy.idle_assets()
+        except Exception:
+            logger.warning("payout_capacity read failed pool=%s", pool_id_hex, exc_info=True)
+            return 0
+        return idle - self._held.get(pool_key(pool_id_hex), 0)
+
+    async def withdrawal_payable(self, pool_id_hex: str, amount: int) -> bool:
+        return await self.payout_capacity(pool_id_hex) >= amount
+
+    def _waiting_withdrawals(self, pool_id_hex: str) -> int:
+        """Withdrawals the pool account owes and has not paid yet. Queued ones
+        count as well as held ones: a held withdrawal goes back to the queue
+        once it fits, and deploying its money in the meantime would send it
+        straight back to waiting."""
+        rows = get_db().execute(
+            "SELECT amount FROM earn_transactions WHERE LOWER(pool_id) IN (?, ?) "
+            "AND operation = ? AND status IN (?, ?, ?)",
+            (*_pool_spellings(pool_id_hex), EARN_OP_WITHDRAW, EARN_STATUS_SCHEDULED,
+             EARN_STATUS_EXECUTING, EARN_STATUS_AWAITING_LIQUIDITY),
+        ).fetchall()
+        return sum(int(row["amount"]) for row in rows)
 
     async def _route_to_strategy(self, pool_id_hex: str, amount: int) -> None:
         """After a successful EarnManager.deposit, push the same amount into
@@ -129,26 +214,6 @@ class VaultService:
         if strategy.name == "manual":
             return
         await strategy.withdraw_from_earn(amount)
-
-    async def _rollback_reclaim(self, pool_id_hex: str, amount: int, tx_id: str) -> None:
-        """Re-supply funds that ``_reclaim_from_strategy`` pulled back when the
-        subsequent on-chain ``EarnManager.withdraw`` reverted. Without this the
-        reclaimed liquidity sits idle in pool balance with shares unburned.
-        Best-effort: a failed rollback is logged at CRITICAL for manual
-        reconciliation rather than masked.
-        """
-        try:
-            await self._route_to_strategy(pool_id_hex, amount)
-            logger.info(
-                "Earn withdraw %s: reclaimed funds re-supplied to strategy after revert",
-                tx_id,
-            )
-        except Exception:
-            logger.critical(
-                "Earn withdraw %s: on-chain burn reverted AND re-supply rollback failed; "
-                "amount=%d reclaimed into pool balance is stranded and needs manual redeploy",
-                tx_id, amount,
-            )
 
     def _assert_pool_custody(self, pool: dict) -> None:
         """Refuse to touch a pool whose account is not the one this service
@@ -357,7 +422,7 @@ class VaultService:
         gross = (strategy_aum or 0) + (idle or 0)
         effective_assets = (
             self._net_of_seed(gross, seeded, pool["total_shares"])
-            if gross else pool["total_assets"]
+            if gross and not self._moving(pool_id_hex) else pool["total_assets"]
         )
         exchange_rate = _exchange_rate(effective_assets, pool["total_shares"])
 
@@ -492,6 +557,7 @@ class VaultService:
         validate_address(user_address, "user_address")
         validate_amount(amount, "amount")
         validate_signature(signature, "signature")
+        pool_id_hex = pool_key(pool_id_hex)
         pool_id = bytes.fromhex(pool_id_hex.removeprefix("0x"))
 
         # An HTTP retry returns the original operation rather than queueing a
@@ -506,6 +572,21 @@ class VaultService:
         if existing is not None:
             return {"id": existing["id"], "status": existing["status"]}
 
+        # Every request costs a Sapphire transaction and a place in the queue,
+        # so one wallet cannot be allowed to line up an unbounded number.
+        unsettled = (EARN_STATUS_SCHEDULED, EARN_STATUS_EXECUTING, EARN_STATUS_PENDING,
+                     EARN_STATUS_AWAITING_LIQUIDITY)
+        held = get_db().execute(
+            f"SELECT COUNT(*) FROM earn_transactions WHERE user_address = ? "
+            f"AND status IN ({', '.join('?' * len(unsettled))})",
+            (user_address.lower(), *unsettled),
+        ).fetchone()[0]
+        if held >= self.settings.earn_max_pending_per_user:
+            raise PendingLimitReached(
+                f"{held} earn requests are still being processed; "
+                "wait for one to finish before sending another"
+            )
+
         pool = self.get_pool(pool_id)
         if pool["pool_address"] == "0x0000000000000000000000000000000000000000":
             raise ValueError("Pool not found")
@@ -514,9 +595,9 @@ class VaultService:
         self._assert_pool_custody(pool)
 
         if operation == EARN_OP_WITHDRAW:
-            # A withdraw reclaims from the strategy before the contract ever
-            # checks consent, so an unverified one is a way to make the pool
-            # redeem and roll back on demand.
+            # A withdraw the pool account cannot cover makes the idle deployer
+            # reclaim for it before the contract ever checks consent, so an
+            # unverified one is a way to make the pool redeem on demand.
             recovered = recover_withdraw_signer(
                 chain_id=self.settings.accounting_chain_id,
                 earn_manager_address=self.settings.earn_manager_contract_address,
@@ -620,7 +701,7 @@ class VaultService:
 
         sig_bytes = bytes.fromhex(signature.removeprefix("0x"))
 
-        async with self._pools_tx_lock:
+        async with self._pool_lock(pool_id_hex):
             # Sync under the lock: it reads the strategy's live AUM and writes
             # it as the contract's share-math denominator, so it must not run
             # while another op has assets in flight. Outside the lock a deposit
@@ -631,7 +712,12 @@ class VaultService:
             # that cannot confirm it is refused rather than priced against a
             # stale or manipulated value. Withdraw, which burns rather than
             # mints, stays best-effort.
-            if await self.sync_total_assets(pool_id_hex) is None:
+            #
+            # While the idle deployer has funds in a bridge the reading would come
+            # out short, so the deposit mints against the contract's own
+            # figure instead: synced before the bridge started, and moved by
+            # every deposit and withdrawal since.
+            if not self._moving(pool_id_hex) and await self.sync_total_assets(pool_id_hex) is None:
                 raise ValueError(
                     "Pool valuation could not be confirmed; deposit refused. "
                     "Retry shortly."
@@ -689,26 +775,13 @@ class VaultService:
                     "error": error,
                 }
 
+            # The shares are minted and the funds sit on the pool's account,
+            # which already counts toward its assets. The idle deployer moves
+            # them into the strategy with everything else that arrived since
+            # its last round, so the depositor does not wait on the bridge.
             self._update_transaction(
-                tx_id, status=EARN_STATUS_UNDEPLOYED, tx_hash=tx_hash
+                tx_id, status=EARN_STATUS_COMPLETED, tx_hash=tx_hash
             )
-
-            deploy_error = None
-            try:
-                await self._route_to_strategy(pool_id_hex, int(amount))
-            except Exception as exc:
-                logger.exception(
-                    "Earn deposit %s minted shares but strategy routing failed; "
-                    "funds are in pool balance pending redeploy",
-                    tx_id,
-                )
-                deploy_error = sanitize_error(str(exc))
-                self._update_transaction(tx_id, error=deploy_error)
-            else:
-                self._update_transaction(tx_id, status=EARN_STATUS_COMPLETED)
-                await self._complete_undeployed_if_clear(pool_id_hex)
-
-        deploy_status = EARN_STATUS_UNDEPLOYED if deploy_error else EARN_STATUS_COMPLETED
 
         try:
             pool_after = self.get_pool(pool_id)
@@ -722,8 +795,8 @@ class VaultService:
                 "shares_minted": None,
                 "exchange_rate": _exchange_rate(effective_assets, pool_after["total_shares"]),
                 "tx_hash": tx_hash,
-                "status": deploy_status,
-                "error": deploy_error,
+                "status": EARN_STATUS_COMPLETED,
+                "error": None,
             }
         except Exception:
             logger.warning("Post-tx read failed for deposit %s, returning degraded response", tx_id)
@@ -734,8 +807,8 @@ class VaultService:
                 "shares_minted": None,
                 "exchange_rate": None,
                 "tx_hash": tx_hash,
-                "status": deploy_status,
-                "error": deploy_error,
+                "status": EARN_STATUS_COMPLETED,
+                "error": None,
             }
 
     async def withdraw(
@@ -775,47 +848,32 @@ class VaultService:
             raise ValueError("Pool not found")
         # No active check — users must always be able to exit paused pools.
         # Custody still has to line up: the payout is debited from the account
-        # this service signs for, so a mismatch would revert on accounting
-        # after the reclaim had already moved funds.
+        # this service signs for, so a mismatch would revert on accounting.
         self._assert_pool_custody(pool)
 
-        async with self._pools_tx_lock:
-            # Sync inside the lock, before moving any strategy assets, so a
-            # concurrent deposit can never sync the transient balance this
-            # reclaim is about to create.
-            synced = await self.sync_total_assets(pool_id_hex)
+        async with self._pool_lock(pool_id_hex):
+            moving = self._moving(pool_id_hex)
+            synced = None if moving else await self.sync_total_assets(pool_id_hex)
             # Burning against a stale denominator cannot inflate an unseeded
             # pool, so those exits stay best-effort. A seeded pool is
             # different: the seed is senior, so a withdrawal priced on a
             # denominator that no longer holds would pay the user out of
-            # foundation principal.
-            if synced is None and await asyncio.to_thread(
+            # foundation principal. A bridge in progress is the exception: the
+            # contract's figure was synced before it and still holds.
+            if synced is None and not moving and await asyncio.to_thread(
                 partial(self.get_seeded_assets, pool_id, fresh=True)
             ):
                 raise ValueError(
                     "Pool valuation could not be confirmed; withdraw refused. "
                     "Retry shortly."
                 )
-            if not await self._registry.get(pool_id_hex).withdraw_ready(int(amount)):
-                raise LiquidityUnavailable("The strategy cannot pay this withdrawal out right now")
-            reclaim_tx_id = str(uuid.uuid4())
-            try:
-                await self._reclaim_from_strategy(pool_id_hex, int(amount))
-            except LiquidityUnavailable:
-                # Nothing moved, so there is nothing to roll back: re-supplying
-                # here would push the pool's idle balance into the strategy.
-                raise
-            except Exception as exc:
-                # A partial reclaim (redeemed from the protocol but never
-                # credited to the pool) must not escape the lock with the
-                # denominator understated: roll back what moved, restore the
-                # authoritative AUM, then surface the failure.
-                logger.exception("Earn withdraw %s: reclaim failed", reclaim_tx_id)
-                await self._rollback_reclaim(pool_id_hex, int(amount), reclaim_tx_id)
-                await self.sync_total_assets(pool_id_hex)
-                raise ValueError(
-                    f"Withdraw failed: {sanitize_error(str(exc))}"
-                ) from exc
+            # Paid from the pool account only. When it is short the request
+            # waits, with its signature and the user's shares untouched, and
+            # the idle deployer reclaims for everything waiting in one move.
+            if not await self.withdrawal_payable(pool_id_hex, int(amount)):
+                if await asyncio.to_thread(self.withdrawal_impossible, pool_id_hex, int(amount)):
+                    raise ValueError("Withdrawal is larger than the whole pool")
+                raise LiquidityUnavailable("The pool cannot pay this withdrawal out right now")
 
             pool_nonce = await self.accounting.get_transfer_nonce(pool["pool_address"])
 
@@ -878,7 +936,6 @@ class VaultService:
                     ],
                 )
             except ReceiptUnknown as exc:
-                # No rollback: the burn may have landed and needs the funds.
                 logger.warning("Earn withdraw %s receipt unknown; left pending for recovery", tx_id)
                 return {
                     "withdraw_id": tx_id,
@@ -891,14 +948,8 @@ class VaultService:
                     "error": None,
                 }
             except Exception as exc:
+                # Nothing left the pool account, so there is nothing to undo.
                 logger.exception("Earn withdraw %s failed", tx_id)
-                await self._rollback_reclaim(pool_id_hex, int(amount), tx_id)
-                # Restore the authoritative AUM before the lock releases: the
-                # rollback puts the assets back in the strategy, but the
-                # contract's totalAssets still reflects the reclaimed-out state
-                # until this resync, and the next op under the lock would
-                # otherwise mint against that false denominator.
-                await self.sync_total_assets(pool_id_hex)
                 error = sanitize_error(str(exc))
                 self._update_transaction(tx_id, status=EARN_STATUS_FAILED, error=error)
                 return {
@@ -942,68 +993,142 @@ class VaultService:
                 "error": None,
             }
 
-    async def deploy_idle(self, pool_id_hex: str) -> int:
-        """Move whatever is sitting in the pool's accounting balance into the
-        pool's strategy, and return how much moved.
+    async def deploy_reclaim(self, pool_id_hex: str, allow_deploy: bool = True) -> int:
+        """Net the pool account against its buffer and the withdrawals waiting
+        on it, and settle the difference with the strategy in one move.
+        Returns the amount deployed, or minus the amount reclaimed.
 
-        Seed principal is paid into the pool account from outside and then
-        recorded, so it arrives idle and earns nothing until it is deployed.
-        The same is true of a deposit whose routing failed and of a reclaim
-        left over from a withdrawal that reverted, so this deploys the whole
-        idle balance rather than tracking which part is which.
+        Deposits land on the pool account and wait there, so one round deploys
+        everything that arrived since the last one as a single bridge. Seed
+        principal, a deposit settled by recovery, and a reclaim left over from
+        a failed round arrive the same way, so this works from the balance
+        rather than tracking which part is which. Withdrawals the account could
+        not pay wait as ``awaiting_liquidity``, and one reclaim covers all of
+        them plus a buffer refill.
 
         Net assets do not change: the funds move from one side of the backing
-        figure to the other. The lock is what makes that safe, since it holds
-        across the whole bridge, so no deposit or withdrawal can read the
-        balance while the funds are in flight and no withdrawal can have its
-        reclaim deployed out from under it.
+        figure to the other. A deploy runs outside the lock with its amount
+        held back from payouts, so the pool keeps serving requests while the
+        bridge runs. A reclaim keeps the lock: its credit is detected by the
+        pool balance rising, which a payout in the meantime would throw off.
+
+        `allow_deploy` False still reclaims for waiting withdrawals, so exits
+        from a paused pool keep working while nothing new goes in.
         """
         strategy = self._registry.get(pool_id_hex)
         if strategy.name == "manual":
             return 0
+        key = pool_key(pool_id_hex)
 
-        async with self._pools_tx_lock:
-            # A pending withdrawal still needs its reclaimed funds after the
-            # original call releases the lock.
-            if get_db().execute(
-                "SELECT 1 FROM earn_transactions WHERE LOWER(pool_id) = ? "
-                "AND status IN (?, ?) LIMIT 1",
-                (pool_id_hex.lower(), EARN_STATUS_EXECUTING, EARN_STATUS_PENDING),
-            ).fetchone():
-                logger.info("Idle deploy pool=%s: an earn operation is unresolved; waiting", pool_id_hex)
+        async with self._pool_lock(pool_id_hex):
+            if self._unresolved(pool_id_hex):
+                logger.info("Deploy/reclaim pool=%s: an earn operation is unresolved; waiting", pool_id_hex)
                 return 0
             # A bridge still listed as pending may or may not have landed, so
             # the balances below cannot be trusted until it clears. The next
-            # sweep sees the settled picture.
+            # round sees the settled picture.
             if await strategy.in_flight_assets() > 0:
                 return 0
+            if key in self._held:
+                # Left by a deploy that raised: accounting may have debited a
+                # bridge that had not shown up yet. It has settled now.
+                self._held.pop(key)
+                await self.sync_total_assets(pool_id_hex)
             idle = await strategy.idle_assets()
             stranded = await strategy.stranded_assets()
+            deployed = await strategy.total_assets()
+            buffer = self._buffer_target(deployed + idle)
+            waiting = self._waiting_withdrawals(pool_id_hex)
+            spare = idle - waiting - buffer
+
+            if spare < 0:
+                # Nobody waiting and the buffer at least half full: not worth
+                # a reclaim of its own.
+                if waiting == 0 and 2 * idle >= buffer:
+                    if stranded == 0:
+                        self._complete_undeployed(pool_id_hex)
+                    return 0
+                amount = min(-spare, deployed)
+                if amount <= 0:
+                    return 0
+                if not await strategy.withdraw_ready(amount):
+                    logger.info(
+                        "Deploy/reclaim pool=%s: %s cannot pay out %d yet; %d waiting",
+                        pool_id_hex, strategy.name, amount, waiting,
+                    )
+                    return 0
+                logger.info(
+                    "Deploy/reclaim pool=%s: reclaiming %d from %s (%d waiting, buffer %d)",
+                    pool_id_hex, amount, strategy.name, waiting, buffer,
+                )
+                self._reclaiming.add(key)
+                try:
+                    await self._reclaim_from_strategy(pool_id_hex, amount)
+                except LiquidityUnavailable:
+                    logger.info("Deploy/reclaim pool=%s: reclaim refused for liquidity", pool_id_hex)
+                    return 0
+                except Exception:
+                    # Whatever was redeemed but not credited sits raw on the
+                    # earn account, which the next round spends first.
+                    logger.exception("Deploy/reclaim pool=%s: reclaim failed", pool_id_hex)
+                    return 0
+                finally:
+                    self._reclaiming.discard(key)
+                await self.sync_total_assets(pool_id_hex)
+                return -amount
+
+            if not allow_deploy:
+                return 0
             minimum = await strategy.min_deploy_amount()
             # The strategy bridges only what is not already on the earn
-            # account, so idle and stranded funds deploy together.
-            amount = idle + stranded
+            # account, so spare pool funds and stranded funds deploy together.
+            amount = spare + stranded
             if amount <= 0 or amount < minimum:
-                if amount == 0:
+                if stranded == 0:
                     self._complete_undeployed(pool_id_hex)
                 return 0
             if not await strategy.is_healthy():
                 logger.info(
-                    "Idle deploy pool=%s: %d idle but the strategy is unhealthy; leaving it",
+                    "Deploy/reclaim pool=%s: %d to deploy but the strategy is unhealthy; leaving it",
                     pool_id_hex, amount,
                 )
                 return 0
-            logger.info("Idle deploy pool=%s: routing %d into %s",
-                        pool_id_hex, amount, strategy.name)
-            await self._route_to_strategy(pool_id_hex, amount)
-            # Backing is unchanged, but totalAssets is written from a reading
-            # taken before the move, so refresh it while the lock still
-            # guarantees nothing else is mid-flight.
-            await self.sync_total_assets(pool_id_hex)
-            left = await strategy.idle_assets()
-            if (left == 0 or left < minimum) and await strategy.stranded_assets() == 0:
-                self._complete_undeployed(pool_id_hex)
-            return amount
+            # Deposits during the bridge mint against the contract's figure
+            # without reading the pool again, so bring it up to date while
+            # nothing is in flight. Yield accrued since the last sync would
+            # otherwise go to whoever deposits mid-bridge.
+            if await self.sync_total_assets(pool_id_hex) is None:
+                logger.info("Deploy/reclaim pool=%s: valuation unconfirmed; not deploying", pool_id_hex)
+                return 0
+            settled = [
+                row["id"] for row in get_db().execute(
+                    "SELECT id FROM earn_transactions WHERE LOWER(pool_id) IN (?, ?) "
+                    "AND operation = ? AND status = ?",
+                    (*_pool_spellings(pool_id_hex), EARN_OP_DEPOSIT, EARN_STATUS_UNDEPLOYED),
+                ).fetchall()
+            ]
+            self._held[key] = spare
+
+        logger.info("Deploy/reclaim pool=%s: deploying %d into %s", pool_id_hex, amount, strategy.name)
+        # A deploy that raises keeps its hold, and skips the sync, until a
+        # later round finds nothing in flight: the bridge may still land.
+        await self._route_to_strategy(pool_id_hex, amount)
+        async with self._pool_lock(pool_id_hex):
+            self._held.pop(key, None)
+            # Backing is unchanged, but a receipt still unread would land its
+            # asset change after this sync and be overwritten by it.
+            if not self._unresolved(pool_id_hex):
+                await self.sync_total_assets(pool_id_hex)
+        self._complete_undeployed(pool_id_hex, settled)
+        return amount
+
+    def _buffer_target(self, pool_assets: int) -> int:
+        """How much of a pool's balance stays off the strategy to pay
+        withdrawals: the larger of a fixed floor and a share of its assets."""
+        return max(
+            self.settings.earn_buffer_min,
+            pool_assets * self.settings.earn_buffer_bps // 10_000,
+        )
 
     async def effective_total_assets(self, pool_id_hex: str, on_chain_total: int) -> int:
         """Live AUM for a pool, derived from the strategy when available.
@@ -1065,6 +1190,10 @@ class VaultService:
         strategy = self._registry.get(pool_id_hex)
         if strategy.name == "manual":
             return on_chain_total
+        # Money in a bridge shows up on neither side, so a reading now would
+        # record a loss that reverses once it lands.
+        if self._moving(pool_id_hex):
+            return None
         try:
             external = await strategy.total_assets()
             idle = await strategy.idle_assets()
@@ -1282,36 +1411,26 @@ class VaultService:
         )
         return tx_id
 
-    async def _complete_undeployed_if_clear(self, pool_id_hex: str) -> None:
-        """A routed deposit sweeps whatever was left raw on the earn account, so
-        once the pool has nothing idle either, earlier undeployed deposits
-        have been put to work along with it. Bookkeeping only: a failed read
-        here must not fail the deposit that just succeeded.
-        """
-        try:
-            strategy = self._registry.get(pool_id_hex)
-            if (
-                strategy.name != "manual"
-                and await strategy.idle_assets() == 0
-                and await strategy.stranded_assets() == 0
-                and await strategy.in_flight_assets() == 0
-            ):
-                self._complete_undeployed(pool_id_hex)
-        except Exception:
-            logger.warning("undeployed-row reconcile skipped pool=%s", pool_id_hex, exc_info=True)
-
-    def _complete_undeployed(self, pool_id_hex: str) -> None:
+    def _complete_undeployed(self, pool_id_hex: str, ids: Optional[list[str]] = None) -> None:
         """Deposits whose routing failed sit as ``undeployed`` with their funds
         idle in the pool. Once the idle balance has been deployed those funds
         are working, so the rows have nothing left to wait for. ``updated_at``
         is left alone: value history reads it as the deposit's settlement time.
+        `ids` limits it to the rows a deploy was sized from.
         """
-        db_write(
-            get_db(),
+        query = (
             "UPDATE earn_transactions SET status = ?, error = NULL "
-            "WHERE lower(pool_id) = ? AND operation = ? AND status = ?",
-            (EARN_STATUS_COMPLETED, pool_id_hex.lower(), EARN_OP_DEPOSIT, EARN_STATUS_UNDEPLOYED),
+            "WHERE lower(pool_id) IN (?, ?) AND operation = ? AND status = ?"
         )
+        params: list = [
+            EARN_STATUS_COMPLETED, *_pool_spellings(pool_id_hex), EARN_OP_DEPOSIT, EARN_STATUS_UNDEPLOYED,
+        ]
+        if ids is not None:
+            if not ids:
+                return
+            query += f" AND id IN ({', '.join('?' * len(ids))})"
+            params.extend(ids)
+        db_write(get_db(), query, tuple(params))
 
     def _update_transaction(self, tx_id: str, **fields) -> None:
         db = get_db()

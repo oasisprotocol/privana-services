@@ -23,6 +23,7 @@ from src.services.earn.vault_service import (
     EARN_STATUS_SCHEDULED,
     EARN_STATUS_UNDEPLOYED,
     get_vault_service,
+    pool_key,
 )
 from src.services.user_queue import users_with_inflight_work
 
@@ -45,8 +46,8 @@ def _public_error(exc: Exception) -> str:
     return "Operation could not be completed; please retry"
 
 POLL_INTERVAL = 1.0
-# How often a withdrawal waiting for liquidity asks its strategy again.
-LIQUIDITY_RECHECK_SEC = 120
+# How often withdrawals waiting for liquidity check the pool account again.
+LIQUIDITY_RECHECK_SEC = 30
 
 
 class EarnWorker:
@@ -177,11 +178,16 @@ class EarnWorker:
         )
 
     @staticmethod
-    def _claim(limit: int) -> list[dict]:
+    def _claim(limit: int, busy: frozenset[str] = frozenset()) -> list[dict]:
+        # A pool mid-reclaim holds its lock until the credit lands; its
+        # requests wait in the queue rather than stall every other pool. The
+        # filter sits in the query so they cannot fill the limit either.
+        spellings = [s for pool in busy for s in (pool, pool.removeprefix("0x"))]
         rows = get_db().execute(
-            "SELECT * FROM earn_transactions WHERE status = ? "
-            "ORDER BY created_at, rowid LIMIT ?",
-            (EARN_STATUS_SCHEDULED, limit),
+            f"SELECT * FROM earn_transactions WHERE status = ? "
+            f"AND LOWER(pool_id) NOT IN ({', '.join('?' * len(spellings))}) "
+            f"ORDER BY created_at, rowid LIMIT ?",
+            (EARN_STATUS_SCHEDULED, *spellings, limit),
         ).fetchall()
         claimed: list[dict] = []
         # Anything this user already has off the queue, in either pipeline, may
@@ -215,7 +221,7 @@ class EarnWorker:
         # One row per pass. Claiming a batch would mark rows executing that this
         # pass never reaches, and a crash then reports them failed without
         # having attempted them.
-        for row in self._claim(1):
+        for row in self._claim(1, get_vault_service().reclaiming_pools()):
             service = get_vault_service()
             call = service.deposit if row["operation"] == EARN_OP_DEPOSIT else service.withdraw
             try:
@@ -255,9 +261,12 @@ class EarnWorker:
                 progress.update(progress.AWAITING_LIQUIDITY)
 
     async def _release_awaiting_liquidity(self) -> None:
-        """Put held withdrawals back in the queue once their strategy can pay
-        them. They go back as scheduled, in their original order, so the normal
-        claim path runs them with the signature and nonce they came with."""
+        """Put held withdrawals back in the queue once the pool account can
+        pay them. They go back as scheduled, oldest first. One that does not
+        fit is skipped rather than blocking the rest: the idle deployer sizes its
+        reclaim for everything waiting, so it is covered by the next one. One
+        larger than the whole pool goes back too, so the attempt can fail it
+        instead of it waiting forever."""
         now = time.monotonic()
         # The monotonic clock counts from boot, so a zero start would skip the
         # first check on a host that has been up for less than the interval.
@@ -272,14 +281,22 @@ class EarnWorker:
         if not rows:
             return
         service = get_vault_service()
+        capacity: dict[str, int] = {}
         for row in rows:
-            try:
-                ready = await service._registry.get(row["pool_id"]).withdraw_ready(int(row["amount"]))
-            except Exception:
-                logger.warning("Earn %s liquidity check failed", row["id"], exc_info=True)
-                continue
-            if not ready:
-                continue
+            pool = pool_key(row["pool_id"])
+            if pool not in capacity:
+                capacity[pool] = await service.payout_capacity(pool)
+            amount = int(row["amount"])
+            if amount <= capacity[pool]:
+                capacity[pool] -= amount
+            else:
+                try:
+                    impossible = await asyncio.to_thread(service.withdrawal_impossible, pool, amount)
+                except Exception:
+                    logger.warning("Earn %s pool read failed", row["id"], exc_info=True)
+                    continue
+                if not impossible:
+                    continue
             changed = db_write(
                 get_db(),
                 "UPDATE earn_transactions SET status = ?, updated_at = ? WHERE id = ? AND status = ?",

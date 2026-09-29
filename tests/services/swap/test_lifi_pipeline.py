@@ -56,10 +56,11 @@ def _make_pipeline(settings):
 
     evm = MagicMock()
     evm.address = "0x152E6a7125665764a4F1F1df80E8f5D49Bf0239c"
-    evm.erc20_balance = MagicMock(side_effect=[0, 60000])
+    evm.balance_of = MagicMock(side_effect=[0, 60000])
     evm.ensure_allowance = MagicMock(return_value=None)
     evm.send_transaction_request = MagicMock(return_value="0x" + "cd" * 32)
-    evm.transfer_erc20 = MagicMock(return_value="0x" + "ef" * 32)
+    evm.tx_lock = asyncio.Lock()
+    evm.transfer = MagicMock(return_value="0x" + "ef" * 32)
 
     privana = MagicMock()
     privana.transfer_funds = AsyncMock(return_value=MagicMock(status="submitted", detail=None))
@@ -222,14 +223,14 @@ class TestRefund:
                      from_token_id=FROM_TOKEN, to_token_id=TO_TOKEN)
         pipeline = _make_pipeline(settings)
         pipeline.evm.send_transaction_request = MagicMock(side_effect=RuntimeError("revert"))
-        pipeline.evm.erc20_balance = MagicMock(side_effect=[0, 1000000])
+        pipeline.evm.balance_of = MagicMock(side_effect=[0, 1000000])
         pipeline.accounting.get_transfer_nonce = AsyncMock(side_effect=[6, 70, 71])
         pipeline.accounting.get_token_info = AsyncMock(
             side_effect=[FROM_INFO, TO_INFO, FROM_INFO])
         swap_id = await self._launch_and_run(pipeline, _quote("q_e"))
         row = dict(test_db.execute("SELECT * FROM swaps WHERE id=?", (swap_id,)).fetchone())
         assert row["status"] == "refunded"
-        pipeline.evm.transfer_erc20.assert_called_once()
+        pipeline.evm.transfer.assert_called_once()
         pipeline.bridge.await_deposit_credit.assert_awaited_once()
 
     async def test_deposit_exhaustion_fails_without_refund(self, test_db, settings, insert_quote):
@@ -382,3 +383,102 @@ class TestLpNonceCoordination:
         privana.transfer_funds.assert_awaited_once()
         payout = privana.transfer_funds.await_args.args[0]
         assert (payout.to_address, payout.token_id, payout.amount) == (USER, TO_TOKEN, 100)
+
+
+class TestNativeCoins:
+    """HYPE on chain 999 and the like: accounting reports no token address,
+    LiFi takes the zero address, and each leg runs on its own chain."""
+
+    NATIVE = "0x0000000000000000000000000000000000000000"
+
+    @staticmethod
+    def _info(base, chain_id, token_address):
+        return TokenInfo(**{**base.__dict__, "chain_id": chain_id, "token_address": token_address})
+
+    @staticmethod
+    def _chain_client(balances):
+        evm = MagicMock()
+        evm.address = "0x152E6a7125665764a4F1F1df80E8f5D49Bf0239c"
+        evm.balance_of = MagicMock(side_effect=balances)
+        evm.ensure_allowance = MagicMock(return_value=None)
+        evm.send_transaction_request = MagicMock(return_value="0x" + "cd" * 32)
+        evm.transfer = MagicMock(return_value="0x" + "ef" * 32)
+        evm.gas_cost = MagicMock(return_value=0)
+        evm.tx_lock = asyncio.Lock()
+        return evm
+
+    async def _run(self, pipeline, test_db, insert_quote):
+        insert_quote("qn", venue="lifi", user_address=USER,
+                     from_token_id=FROM_TOKEN, to_token_id=TO_TOKEN)
+        pipeline.spawn_background = MagicMock()
+        quote = _quote("qn")
+        swap_id = _seed_swap(test_db, quote)
+        await pipeline.launch(quote, USER, 5, "0x" + "ab" * 65, swap_id)
+        await pipeline._run(swap_id, quote, 5)
+        return dict(test_db.execute("SELECT * FROM swaps WHERE id=?", (swap_id,)).fetchone())
+
+    async def test_a_native_coin_goes_to_lifi_as_the_zero_address(
+        self, test_db, settings, insert_quote, monkeypatch
+    ):
+        pipeline = _make_pipeline(settings)
+        pipeline.evm = None
+        hyperevm = self._chain_client([])
+        base = self._chain_client([0, 60000])
+        clients = {999: hyperevm, 84532: base}
+        monkeypatch.setattr("src.services.swap.lifi_pipeline.get_evm_client", clients.__getitem__)
+        pipeline.accounting.get_token_info = AsyncMock(side_effect=[
+            self._info(FROM_INFO, 999, ""), TO_INFO,
+        ])
+
+        row = await self._run(pipeline, test_db, insert_quote)
+
+        assert row["status"] == "completed"
+        call = pipeline.lifi.get_execution_quote.call_args.kwargs
+        assert call["from_token_address"] == self.NATIVE
+        assert call["from_chain_id"] == 999
+        # The swap is signed on HyperEVM; the output is read and returned on Base.
+        hyperevm.send_transaction_request.assert_called_once()
+        base.send_transaction_request.assert_not_called()
+        assert base.balance_of.call_count == 2
+        base.transfer.assert_called_once()
+        hyperevm.transfer.assert_not_called()
+
+    async def test_native_output_on_the_same_chain_is_not_short_by_the_gas(
+        self, test_db, settings, insert_quote
+    ):
+        pipeline = _make_pipeline(settings)
+        # 60_000 arrived, 900 of it went on gas for the approval and the swap.
+        pipeline.evm.balance_of = MagicMock(side_effect=[1_000_000, 1_059_100])
+        pipeline.evm.ensure_allowance = MagicMock(return_value="0x" + "aa" * 32)
+        pipeline.evm.gas_cost = MagicMock(side_effect=[300, 600])
+        pipeline.accounting.get_token_info = AsyncMock(side_effect=[
+            FROM_INFO, self._info(TO_INFO, 84532, ""),
+        ])
+
+        row = await self._run(pipeline, test_db, insert_quote)
+
+        credited, _ = calculate_fee(60000, 10)
+        assert row["status"] == "completed"
+        assert row["to_amount_actual"] == str(credited)
+        assert pipeline.lifi.get_execution_quote.call_args.kwargs["to_token_address"] == self.NATIVE
+
+    async def test_a_refund_of_a_native_coin_goes_back_on_its_own_chain(
+        self, test_db, settings, insert_quote, monkeypatch
+    ):
+        pipeline = _make_pipeline(settings)
+        pipeline.evm = None
+        hyperevm = self._chain_client([1_000_000])
+        hyperevm.send_transaction_request = MagicMock(side_effect=RuntimeError("revert"))
+        base = self._chain_client([0])
+        clients = {999: hyperevm, 84532: base}
+        monkeypatch.setattr("src.services.swap.lifi_pipeline.get_evm_client", clients.__getitem__)
+        native = self._info(FROM_INFO, 999, None)
+        pipeline.accounting.get_token_info = AsyncMock(side_effect=[native, TO_INFO, native])
+        pipeline.accounting.get_transfer_nonce = AsyncMock(side_effect=[6, 70, 71])
+
+        row = await self._run(pipeline, test_db, insert_quote)
+
+        assert row["status"] == "refunded"
+        hyperevm.transfer.assert_called_once()
+        assert hyperevm.transfer.call_args.args[0] is None
+        base.transfer.assert_not_called()

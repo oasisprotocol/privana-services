@@ -11,8 +11,8 @@ TOKEN_CHECKSUMMED = Web3.to_checksum_address(TOKEN)
 
 
 def _make_client(w3):
-    from src.clients.base_evm import BaseEvmClient
-    client = BaseEvmClient("http://localhost:1", "0x" + "11" * 32)
+    from src.clients.base_evm import EvmClient
+    client = EvmClient("http://localhost:1", "0x" + "11" * 32)
     client.w3 = w3
     return client
 
@@ -89,16 +89,16 @@ class TestEnsureAllowance:
         assert tx_hash == "0x" + "ab" * 32
 
 
-class TestErc20Helpers:
-    def test_erc20_balance(self):
+class TestTokenHelpers:
+    def test_token_balance(self):
         w3 = _w3()
         contract = MagicMock()
         contract.functions.balanceOf.return_value.call.return_value = 555
         w3.eth.contract.return_value = contract
         client = _make_client(w3)
-        assert client.erc20_balance(TOKEN, OWNER) == 555
+        assert client.balance_of(TOKEN, OWNER) == 555
 
-    def test_transfer_erc20_returns_hash(self):
+    def test_token_transfer_returns_hash(self):
         w3 = _w3()
         contract = MagicMock()
         contract.functions.transfer.return_value.build_transaction.return_value = {
@@ -108,12 +108,122 @@ class TestErc20Helpers:
         }
         w3.eth.contract.return_value = contract
         client = _make_client(w3)
-        assert client.transfer_erc20(TOKEN, RECIPIENT, 42) == "0x" + "ab" * 32
+        assert client.transfer(TOKEN, RECIPIENT, 42) == "0x" + "ab" * 32
 
 
-class TestModuleLock:
-    def test_base_tx_lock_exists(self):
+class TestNativeCoins:
+    NATIVE = "0x0000000000000000000000000000000000000000"
+
+    @pytest.mark.parametrize("token", [None, "", NATIVE])
+    def test_balance_is_the_account_balance(self, token):
+        w3 = _w3()
+        w3.eth.get_balance.return_value = 777
+        client = _make_client(w3)
+
+        assert client.balance_of(token, OWNER) == 777
+        w3.eth.contract.assert_not_called()
+
+    def test_transfer_sends_value_with_no_calldata(self):
+        w3 = _w3()
+        client = _make_client(w3)
+        with patch.object(client._account, "sign_transaction") as mock_sign:
+            mock_sign.return_value = MagicMock(raw_transaction=b"raw")
+            client.transfer(None, RECIPIENT, 42)
+            tx = mock_sign.call_args.args[0]
+
+        assert tx["to"] == Web3.to_checksum_address(RECIPIENT)
+        assert tx["value"] == 42
+        assert tx["gas"] == 21_000
+        assert "data" not in tx
+        w3.eth.contract.assert_not_called()
+
+    def test_nothing_to_approve(self):
+        w3 = _w3()
+        client = _make_client(w3)
+
+        assert client.ensure_allowance(self.NATIVE, SPENDER, 1000) is None
+        w3.eth.contract.assert_not_called()
+
+
+class TestChainGuard:
+    def test_refuses_a_transaction_built_for_another_chain(self):
+        w3 = _w3()
+        client = _make_client(w3)
+        request = {**TestSendTransactionRequest.TX_REQUEST, "chainId": 999}
+
+        with pytest.raises(ValueError, match="built for chain 999"):
+            client.send_transaction_request(request)
+        w3.eth.send_raw_transaction.assert_not_called()
+
+    def test_sends_one_built_for_its_own_chain(self):
+        client = _make_client(_w3())
+        request = {**TestSendTransactionRequest.TX_REQUEST, "chainId": 84532}
+
+        assert client.send_transaction_request(request) == "0x" + "ab" * 32
+
+    def test_gas_cost_is_what_the_receipt_paid(self):
+        w3 = _w3()
+        w3.eth.get_transaction_receipt.return_value = {"gasUsed": 21_000, "effectiveGasPrice": 3}
+        client = _make_client(w3)
+
+        assert client.gas_cost("0x" + "ab" * 32) == 63_000
+
+
+class TestClientPerChain:
+    @pytest.fixture
+    def rpcs(self, monkeypatch):
+        import src.clients.base_evm as module
+
+        monkeypatch.setattr(module, "_clients", {})
+        monkeypatch.setattr(module, "_chain_ids", {})
+        answers = {"base": 8453, "eth": 1, "hyper": 999}
+
+        def make(rpc_url, _key):
+            client = MagicMock()
+            if answers[rpc_url] is None:
+                type(client.w3.eth).chain_id = property(lambda _: (_ for _ in ()).throw(OSError("down")))
+            else:
+                client.w3.eth.chain_id = answers[rpc_url]
+            client.rpc = rpc_url
+            return client
+
+        settings = MagicMock(
+            base_rpc_url="base", ethereum_rpc_url="eth", hyperevm_rpc_url="hyper",
+            liquidity_provider_secret_key="0x" + "11" * 32,
+        )
+        monkeypatch.setattr(module, "EvmClient", make)
+        monkeypatch.setattr(module, "load_settings", lambda: settings)
+        return answers, settings
+
+    def test_picks_the_rpc_that_serves_the_chain(self, rpcs):
+        from src.clients.base_evm import get_evm_client
+
+        assert get_evm_client(999).rpc == "hyper"
+        assert get_evm_client(8453).rpc == "base"
+        assert get_evm_client(999) is get_evm_client(999)
+
+    def test_a_chain_nobody_serves_is_an_error(self, rpcs):
+        from src.clients.base_evm import get_evm_client
+
+        with pytest.raises(ValueError, match="chain 42161"):
+            get_evm_client(42161)
+
+    def test_an_unset_or_unreachable_rpc_is_skipped(self, rpcs):
+        from src.clients.base_evm import get_evm_client
+
+        answers, settings = rpcs
+        settings.ethereum_rpc_url = ""
+        answers["base"] = None
+
+        assert get_evm_client(999).rpc == "hyper"
+        with pytest.raises(ValueError):
+            get_evm_client(1)
+
+
+class TestTxLock:
+    def test_each_chain_orders_its_own_sends(self):
         import asyncio
 
-        from src.clients.base_evm import base_tx_lock
-        assert isinstance(base_tx_lock, asyncio.Lock)
+        first, second = _make_client(_w3()), _make_client(_w3())
+        assert isinstance(first.tx_lock, asyncio.Lock)
+        assert first.tx_lock is not second.tx_lock

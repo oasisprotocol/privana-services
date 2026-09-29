@@ -98,6 +98,7 @@ def load_settings(refresh: bool = False) -> Settings:
             lifi_token_map=os.getenv("LIFI_TOKEN_MAP"),
             base_rpc_url=os.getenv("BASE_RPC_URL"),
             ethereum_rpc_url=os.getenv("ETHEREUM_RPC_URL"),
+            hyperevm_rpc_url=os.getenv("HYPEREVM_RPC_URL", ""),
             aave_pool_address=os.getenv("AAVE_POOL_ADDRESS"),
             aave_pool_assets=os.getenv("AAVE_POOL_ASSETS"),
             midas_chain_id=int(os.getenv("MIDAS_CHAIN_ID", "1"), 0),

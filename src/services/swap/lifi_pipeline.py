@@ -6,7 +6,7 @@ from typing import Any, Awaitable, Callable, Optional
 from privana.types import TransferFundsRequest
 
 from src.clients.accounting import get_accounting_client
-from src.clients.base_evm import base_tx_lock, get_base_evm_client
+from src.clients.base_evm import NATIVE_TOKEN, get_evm_client, is_native
 from src.clients.lifi import get_lifi_client
 from src.clients.privana import get_swap_lp_privana_client
 from src.core.config import load_settings
@@ -45,7 +45,8 @@ class LifiSwapPipeline:
         self.accounting = accounting or get_accounting_client()
         self.lifi = lifi or get_lifi_client()
         self.bridge = bridge or AccountingBridge()
-        self.evm = evm or get_base_evm_client()
+        # One client for every chain in tests; per chain otherwise.
+        self.evm = evm
         self._privana_factory = privana_factory or get_swap_lp_privana_client
         self._poll_interval_sec = poll_interval_sec
         self._credit_max_retries = CREDIT_MAX_RETRIES
@@ -76,6 +77,9 @@ class LifiSwapPipeline:
         task = asyncio.create_task(self._run(swap_id, quote, input_nonce))
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
+
+    def _evm_for(self, chain_id: int):
+        return self.evm if self.evm is not None else get_evm_client(chain_id)
 
     async def _run(self, swap_id: str, quote: dict, input_nonce: int) -> None:
         try:
@@ -126,10 +130,11 @@ class LifiSwapPipeline:
 
     async def _redeposit_input(self, quote: dict) -> None:
         from_info = await self.accounting.get_token_info(quote["from_token_id"])
+        evm = self._evm_for(from_info.chain_id)
         amount = int(quote["from_amount"])
         for _ in range(REFUND_BALANCE_POLLS):
             balance = await asyncio.to_thread(
-                self.evm.erc20_balance, from_info.token_address, self.evm.address
+                evm.balance_of, from_info.token_address, evm.address
             )
             if balance >= amount:
                 break
@@ -139,9 +144,9 @@ class LifiSwapPipeline:
 
         deposit_address = await self.bridge.get_deposit_address()
         pre_internal = await self.bridge.lp_internal_balance(quote["from_token_id"])
-        async with base_tx_lock:
+        async with evm.tx_lock:
             deposit_tx = await asyncio.to_thread(
-                self.evm.transfer_erc20, from_info.token_address, deposit_address, amount
+                evm.transfer, from_info.token_address, deposit_address, amount
             )
         await self.bridge.await_deposit_credit(
             from_info.chain_id, deposit_tx, amount, quote["from_token_id"], pre_internal
@@ -184,14 +189,16 @@ class LifiSwapPipeline:
         self._update_swap(swap_id, step=LifiSwapStep.LIFI_EXECUTE.value)
         from_info = await self.accounting.get_token_info(quote["from_token_id"])
         to_info = await self.accounting.get_token_info(quote["to_token_id"])
+        from_evm = self._evm_for(from_info.chain_id)
+        to_evm = self._evm_for(to_info.chain_id)
 
         exec_quote = await self.lifi.get_execution_quote(
             from_chain_id=from_info.chain_id,
             to_chain_id=to_info.chain_id,
-            from_token_address=from_info.token_address,
-            to_token_address=to_info.token_address,
+            from_token_address=_lifi_token(from_info.token_address),
+            to_token_address=_lifi_token(to_info.token_address),
             from_amount=quote["from_amount"],
-            from_address=self.evm.address,
+            from_address=from_evm.address,
         )
         net_min, _ = calculate_fee(
             int(exec_quote["estimate"]["toAmountMin"]), self._quote_fee_bps(quote)
@@ -202,26 +209,32 @@ class LifiSwapPipeline:
             )
 
         pre_out = await asyncio.to_thread(
-            self.evm.erc20_balance, to_info.token_address, self.evm.address
+            to_evm.balance_of, to_info.token_address, to_evm.address
         )
-        async with base_tx_lock:
-            await asyncio.to_thread(
-                self.evm.ensure_allowance,
+        async with from_evm.tx_lock:
+            approve_tx = await asyncio.to_thread(
+                from_evm.ensure_allowance,
                 from_info.token_address,
                 exec_quote["estimate"]["approvalAddress"],
                 int(quote["from_amount"]),
             )
             tx_hash = await asyncio.to_thread(
-                self.evm.send_transaction_request, exec_quote["transactionRequest"]
+                from_evm.send_transaction_request, exec_quote["transactionRequest"]
             )
         self._update_swap(swap_id, lifi_tx_hash=tx_hash)
 
         await self._await_lifi_done(tx_hash, from_info.chain_id, to_info.chain_id)
 
         post_out = await asyncio.to_thread(
-            self.evm.erc20_balance, to_info.token_address, self.evm.address
+            to_evm.balance_of, to_info.token_address, to_evm.address
         )
         received = post_out - pre_out
+        if is_native(to_info.token_address) and from_evm is to_evm:
+            # The output coin also paid for this chain's gas, which the
+            # balance difference would otherwise take out of the user's share.
+            for sent in (approve_tx, tx_hash):
+                if sent:
+                    received += await asyncio.to_thread(to_evm.gas_cost, sent)
         if received <= 0:
             raise RuntimeError("no output tokens received from lifi execution")
         return received, to_info
@@ -263,9 +276,10 @@ class LifiSwapPipeline:
     ) -> None:
         deposit_address = await self.bridge.get_deposit_address()
         pre_internal = await self.bridge.lp_internal_balance(quote["to_token_id"])
-        async with base_tx_lock:
+        evm = self._evm_for(to_info.chain_id)
+        async with evm.tx_lock:
             deposit_tx = await asyncio.to_thread(
-                self.evm.transfer_erc20, to_info.token_address, deposit_address, received
+                evm.transfer, to_info.token_address, deposit_address, received
             )
         self._update_swap(swap_id, deposit_tx_hash=deposit_tx)
         await self.bridge.await_deposit_credit(
@@ -350,6 +364,10 @@ class LifiSwapPipeline:
         if row is None:
             raise ValueError(f"Swap {swap_id} not found")
         return SwapRecord(**dict(row))
+
+
+def _lifi_token(token_address: Optional[str]) -> str:
+    return NATIVE_TOKEN if is_native(token_address) else token_address
 
 
 async def recover_inflight_lifi_swaps(pipeline: Optional[LifiSwapPipeline] = None) -> None:

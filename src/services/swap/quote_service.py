@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import time
@@ -5,6 +6,7 @@ import uuid
 from typing import Optional
 
 from src.clients.accounting import get_accounting_client
+from src.clients.base_evm import get_evm_client
 from src.clients.lifi import get_lifi_client
 from src.core.config import load_settings
 from src.core.db import db_write, get_db
@@ -204,6 +206,13 @@ class QuoteService:
     ) -> str:
         if not self.settings.lifi_execution_enabled:
             raise ValueError("Insufficient liquidity for this swap")
+        # Execution signs on both chains, so a quote is only worth handing out
+        # when this deployment has an RPC for each of them.
+        for chain_id in {from_chain_id, to_chain_id}:
+            try:
+                await asyncio.to_thread(get_evm_client, chain_id)
+            except ValueError:
+                raise ValueError("External swaps are not available on this chain") from None
         real_routes = await self.lifi.get_routes(
             from_chain_id=from_chain_id,
             to_chain_id=to_chain_id,

@@ -5,9 +5,12 @@ from fastapi import APIRouter, HTTPException
 from src.models.api import (
     ChainInfo,
     ChainListResponse,
+    PriceListResponse,
     TokenInfo,
     TokenListResponse,
+    TokenPrice,
 )
+from src.models.history import usd_string
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +45,19 @@ async def list_tokens() -> TokenListResponse:
     except Exception as exc:
         logger.exception("Failed to list tokens")
         raise HTTPException(status_code=500, detail="Failed to list tokens") from exc
+
+
+@router.get("/prices", response_model=PriceListResponse)
+async def list_prices() -> PriceListResponse:
+    from src.services.spot_prices import get_spot_price_cache
+
+    prices = await get_spot_price_cache().current()
+    return PriceListResponse(
+        prices=[
+            TokenPrice(token_id=p.token_id, usd=usd_string(p.price_e8), updated_at=p.updated_at)
+            for p in prices
+        ]
+    )
 
 
 @router.get("/chains", response_model=ChainListResponse)

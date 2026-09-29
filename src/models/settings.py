@@ -49,6 +49,7 @@ class Settings:
     defillama_pool_ids: str
 
     coingecko_token_ids: str
+    coingecko_api_key: str = ""
 
     lifi_execution_enabled: bool = False
     # HyperEVM (chain 999), used to execute external swaps of its tokens.

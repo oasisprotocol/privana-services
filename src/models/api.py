@@ -77,6 +77,16 @@ class TokenListResponse(BaseModel):
     tokens: list[TokenInfo]
 
 
+class TokenPrice(BaseModel):
+    token_id: str
+    usd: str = Field(..., description="USD price as a decimal string")
+    updated_at: int = Field(..., description="Unix seconds the price was fetched")
+
+
+class PriceListResponse(BaseModel):
+    prices: list[TokenPrice]
+
+
 class ChainInfo(BaseModel):
     chain_id: int
     name: str

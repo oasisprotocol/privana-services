@@ -112,6 +112,7 @@ def load_settings(refresh: bool = False) -> Settings:
             midas_pool_assets=os.getenv("MIDAS_POOL_ASSETS"),
             defillama_pool_ids=os.getenv("DEFILLAMA_POOL_IDS", ""),
             coingecko_token_ids=os.getenv("COINGECKO_TOKEN_IDS", ""),
+            coingecko_api_key=os.getenv("COINGECKO_API_KEY", ""),
             earn_unrecorded_shares=_parse_unrecorded_shares(os.getenv("EARN_UNRECORDED_SHARES", "")),
             earn_batch_interval_sec=int(os.getenv("EARN_BATCH_INTERVAL_SEC", "300")),
             earn_buffer_min=int(os.getenv("EARN_BUFFER_MIN", "50000000")),

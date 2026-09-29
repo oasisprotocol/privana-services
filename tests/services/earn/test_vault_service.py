@@ -2177,15 +2177,16 @@ class TestScheduling:
     read happens in the worker, because a deposit that waits for those inline
     is a deposit the gateway hangs up on."""
 
-    def test_a_scheduled_deposit_is_queued_not_executed(self, test_db):
+    async def test_a_scheduled_deposit_is_queued_not_executed(self, test_db):
         service, contract, _, _ = _make_service()
         _schedulable(contract)
+        service.accounting.get_transfer_nonce = AsyncMock(return_value=0)
 
         from eth_account import Account
 
         key = "0x" + "33" * 32
         user = Account.from_key(key).address
-        result = service.schedule_deposit(
+        result = await service.schedule_deposit(
             pool_id_hex=POOL_ID_HEX, user_address=user,
             amount="1000", nonce=3, signature=_transfer_sig(key, 1000, 3),
         )
@@ -2212,15 +2213,16 @@ class TestScheduling:
             pool_id=POOL_ID_HEX, amount=amount, nonce=nonce,
         )
 
-    def test_a_scheduled_withdraw_is_recorded_as_a_withdraw(self, test_db):
+    async def test_a_scheduled_withdraw_is_recorded_as_a_withdraw(self, test_db):
         from eth_account import Account
 
         service, contract, _, _ = _make_service()
         _schedulable(contract)
+        service.accounting.get_transfer_nonce = AsyncMock(return_value=0)
         key = "0x" + "11" * 32
         user = Account.from_key(key).address
 
-        result = service.schedule_withdraw(
+        result = await service.schedule_withdraw(
             pool_id_hex=POOL_ID_HEX, user_address=user,
             amount="500", nonce=1, signature=self._consent(key, 500, 1),
         )
@@ -2231,7 +2233,7 @@ class TestScheduling:
         assert row["operation"] == "withdraw"
         assert row["status"] == "scheduled"
 
-    def test_a_withdraw_signed_by_someone_else_is_refused_before_it_queues(self, test_db):
+    async def test_a_withdraw_signed_by_someone_else_is_refused_before_it_queues(self, test_db):
         """A withdraw the pool account cannot cover makes the idle deployer
         reclaim for it before the contract checks consent, so an unverified one
         is a way to make the pool redeem on demand. The consent recovers
@@ -2240,18 +2242,19 @@ class TestScheduling:
 
         service, contract, _, _ = _make_service()
         _schedulable(contract)
+        service.accounting.get_transfer_nonce = AsyncMock(return_value=0)
         attacker_key = "0x" + "22" * 32
         victim = Account.from_key("0x" + "11" * 32).address
 
         with pytest.raises(ValueError, match="not signed by user_address"):
-            service.schedule_withdraw(
+            await service.schedule_withdraw(
                 pool_id_hex=POOL_ID_HEX, user_address=victim,
                 amount="500", nonce=1, signature=self._consent(attacker_key, 500, 1),
             )
 
         assert test_db.execute("SELECT COUNT(*) c FROM earn_transactions").fetchone()["c"] == 0
 
-    def test_a_scheduled_row_keeps_the_callers_own_nonce_and_signature(self, test_db):
+    async def test_a_scheduled_row_keeps_the_callers_own_nonce_and_signature(self, test_db):
         """Execution overwrites nonce/signature with what it settled on — a
         withdraw signs the payout with the pool's key — so the caller's own
         consent is kept in its own columns for reconstruction after a crash."""
@@ -2259,11 +2262,12 @@ class TestScheduling:
 
         service, contract, _, _ = _make_service()
         _schedulable(contract)
+        service.accounting.get_transfer_nonce = AsyncMock(return_value=0)
         key = "0x" + "44" * 32
         user = Account.from_key(key).address
         sig = _transfer_sig(key, 1000, 7)
 
-        result = service.schedule_deposit(
+        result = await service.schedule_deposit(
             pool_id_hex=POOL_ID_HEX, user_address=user,
             amount="1000", nonce=7, signature=sig,
         )
@@ -2275,15 +2279,16 @@ class TestScheduling:
         assert row["input_nonce"] == 7
         assert row["input_signature"] == sig
 
-    def test_a_pool_id_without_its_prefix_is_stored_in_one_spelling(self, test_db):
+    async def test_a_pool_id_without_its_prefix_is_stored_in_one_spelling(self, test_db):
         from eth_account import Account
 
         service, contract, _, _ = _make_service()
         _schedulable(contract)
+        service.accounting.get_transfer_nonce = AsyncMock(return_value=0)
         key = "0x" + "55" * 32
         user = Account.from_key(key).address
 
-        result = service.schedule_deposit(
+        result = await service.schedule_deposit(
             pool_id_hex=POOL_ID_HEX.removeprefix("0x").upper(), user_address=user,
             amount="1000", nonce=3, signature=_transfer_sig(key, 1000, 3),
         )
@@ -2298,9 +2303,10 @@ class TestScheduling:
         "field,value",
         [("user_address", "nope"), ("amount", "-1"), ("signature", "0xzz")],
     )
-    def test_a_malformed_request_is_refused_without_queueing(self, test_db, field, value):
+    async def test_a_malformed_request_is_refused_without_queueing(self, test_db, field, value):
         service, contract, _, _ = _make_service()
         _schedulable(contract)
+        service.accounting.get_transfer_nonce = AsyncMock(return_value=0)
         kwargs = dict(
             pool_id_hex=POOL_ID_HEX, user_address=USER_ADDRESS,
             amount="1000", nonce=0, signature="0x" + "aa" * 65,
@@ -2308,26 +2314,27 @@ class TestScheduling:
         kwargs[field] = value
 
         with pytest.raises(ValueError):
-            service.schedule_deposit(**kwargs)
+            await service.schedule_deposit(**kwargs)
 
         assert test_db.execute("SELECT COUNT(*) c FROM earn_transactions").fetchone()["c"] == 0
 
-    def test_a_second_deposit_on_a_held_nonce_is_refused_before_it_queues(self, test_db):
+    async def test_a_second_deposit_on_a_held_nonce_is_refused_before_it_queues(self, test_db):
         from eth_account import Account
 
         from src.services.user_queue import OperationPendingError
 
         service, contract, _, _ = _make_service()
         _schedulable(contract)
+        service.accounting.get_transfer_nonce = AsyncMock(return_value=0)
         key = "0x" + "66" * 32
         user = Account.from_key(key).address
-        first = service.schedule_deposit(
+        first = await service.schedule_deposit(
             pool_id_hex=POOL_ID_HEX, user_address=user,
             amount="1000", nonce=3, signature=_transfer_sig(key, 1000, 3),
         )
 
         with pytest.raises(OperationPendingError) as exc:
-            service.schedule_deposit(
+            await service.schedule_deposit(
                 pool_id_hex=POOL_ID_HEX, user_address=user,
                 amount="2000", nonce=3, signature=_transfer_sig(key, 2000, 3),
             )
@@ -2336,7 +2343,7 @@ class TestScheduling:
         assert exc.value.operation_id == first["id"]
         assert test_db.execute("SELECT COUNT(*) c FROM earn_transactions").fetchone()["c"] == 1
 
-    def test_a_user_at_the_pending_limit_is_refused_before_it_queues(self, test_db):
+    async def test_a_user_at_the_pending_limit_is_refused_before_it_queues(self, test_db):
         from eth_account import Account
 
         from src.core.db import db_write
@@ -2344,6 +2351,7 @@ class TestScheduling:
 
         service, contract, _, _ = _make_service()
         _schedulable(contract)
+        service.accounting.get_transfer_nonce = AsyncMock(return_value=0)
         service.settings = replace(service.settings, earn_max_pending_per_user=2)
         key = "0x" + "88" * 32
         user = Account.from_key(key).address
@@ -2356,24 +2364,25 @@ class TestScheduling:
                    VALUES (?, 'withdraw', ?, ?, '', '1', ?, 0, '0x', ?, 0, 0)""",
                 (f"old{i}", POOL_ID_HEX, user.lower(), user.lower(), status),
             )
-        service.schedule_deposit(
+        await service.schedule_deposit(
             pool_id_hex=POOL_ID_HEX, user_address=user,
             amount="1000", nonce=1, signature=_transfer_sig(key, 1000, 1),
         )
 
         with pytest.raises(PendingLimitReached):
-            service.schedule_deposit(
+            await service.schedule_deposit(
                 pool_id_hex=POOL_ID_HEX, user_address=user,
                 amount="1000", nonce=2, signature=_transfer_sig(key, 1000, 2),
             )
 
         assert test_db.execute("SELECT COUNT(*) c FROM earn_transactions").fetchone()["c"] == 3
 
-    def test_a_retry_at_the_limit_still_returns_its_operation(self, test_db):
+    async def test_a_retry_at_the_limit_still_returns_its_operation(self, test_db):
         from eth_account import Account
 
         service, contract, _, _ = _make_service()
         _schedulable(contract)
+        service.accounting.get_transfer_nonce = AsyncMock(return_value=0)
         service.settings = replace(service.settings, earn_max_pending_per_user=1)
         key = "0x" + "99" * 32
         user = Account.from_key(key).address
@@ -2381,43 +2390,117 @@ class TestScheduling:
             pool_id_hex=POOL_ID_HEX, user_address=user,
             amount="1000", nonce=1, signature=_transfer_sig(key, 1000, 1),
         )
-        first = service.schedule_deposit(**kwargs)
+        first = await service.schedule_deposit(**kwargs)
 
         # A lost response retried is the same request, not a new one.
-        assert service.schedule_deposit(**kwargs)["id"] == first["id"]
+        assert (await service.schedule_deposit(**kwargs))["id"] == first["id"]
 
-    def test_other_users_are_not_held_to_someone_elses_limit(self, test_db):
+    async def test_other_users_are_not_held_to_someone_elses_limit(self, test_db):
         from eth_account import Account
 
         service, contract, _, _ = _make_service()
         _schedulable(contract)
+        service.accounting.get_transfer_nonce = AsyncMock(return_value=0)
         service.settings = replace(service.settings, earn_max_pending_per_user=1)
         busy, free = "0x" + "aa" * 32, "0x" + "bb" * 32
-        service.schedule_deposit(
+        await service.schedule_deposit(
             pool_id_hex=POOL_ID_HEX, user_address=Account.from_key(busy).address,
             amount="1000", nonce=1, signature=_transfer_sig(busy, 1000, 1),
         )
 
-        result = service.schedule_deposit(
+        result = await service.schedule_deposit(
             pool_id_hex=POOL_ID_HEX, user_address=Account.from_key(free).address,
             amount="1000", nonce=1, signature=_transfer_sig(free, 1000, 1),
         )
 
         assert result["status"] == "scheduled"
 
-    def test_a_withdraw_consent_nonce_never_blocks_a_deposit(self, test_db):
+    async def test_a_deposit_on_a_spent_nonce_is_refused_before_it_queues(self, test_db):
+        from eth_account import Account
+
+        from src.services.user_queue import StaleNonceError
+
+        service, contract, _, _ = _make_service()
+        _schedulable(contract)
+        service.accounting.get_transfer_nonce = AsyncMock(return_value=4)
+        key = "0x" + "12" * 32
+        user = Account.from_key(key).address
+
+        with pytest.raises(StaleNonceError) as exc:
+            await service.schedule_deposit(
+                pool_id_hex=POOL_ID_HEX, user_address=user,
+                amount="1000", nonce=3, signature=_transfer_sig(key, 1000, 3),
+            )
+
+        # It would only revert with InvalidNonce after showing up as pending.
+        assert exc.value.payload()["code"] == "stale_nonce"
+        assert exc.value.payload()["current_nonce"] == 4
+        assert test_db.execute("SELECT COUNT(*) c FROM earn_transactions").fetchone()["c"] == 0
+
+    async def test_the_current_or_a_later_nonce_still_queues(self, test_db):
         from eth_account import Account
 
         service, contract, _, _ = _make_service()
         _schedulable(contract)
+        service.accounting.get_transfer_nonce = AsyncMock(return_value=4)
+        key = "0x" + "13" * 32
+        user = Account.from_key(key).address
+
+        # The next one may be signed while the current one is still queued.
+        for nonce in (4, 5):
+            result = await service.schedule_deposit(
+                pool_id_hex=POOL_ID_HEX, user_address=user,
+                amount="1000", nonce=nonce, signature=_transfer_sig(key, 1000, nonce),
+            )
+            assert result["status"] == "scheduled"
+
+    async def test_a_retry_of_a_queued_deposit_returns_it_once_its_nonce_is_spent(self, test_db):
+        from eth_account import Account
+
+        service, contract, _, _ = _make_service()
+        _schedulable(contract)
+        service.accounting.get_transfer_nonce = AsyncMock(return_value=0)
+        key = "0x" + "14" * 32
+        kwargs = dict(
+            pool_id_hex=POOL_ID_HEX, user_address=Account.from_key(key).address,
+            amount="1000", nonce=0, signature=_transfer_sig(key, 1000, 0),
+        )
+        first = await service.schedule_deposit(**kwargs)
+        service.accounting.get_transfer_nonce = AsyncMock(return_value=1)
+
+        assert (await service.schedule_deposit(**kwargs))["id"] == first["id"]
+
+    async def test_a_withdraw_does_not_read_the_transfer_nonce(self, test_db):
+        from eth_account import Account
+
+        service, contract, _, _ = _make_service()
+        _schedulable(contract)
+        service.accounting.get_transfer_nonce = AsyncMock(return_value=99)
+        key = "0x" + "15" * 32
+
+        result = await service.schedule_withdraw(
+            pool_id_hex=POOL_ID_HEX, user_address=Account.from_key(key).address,
+            amount="500", nonce=1, signature=self._consent(key, 500, 1),
+        )
+
+        # A withdraw is signed against EarnManager's own nonce, not this one.
+        assert result["status"] == "scheduled"
+        service.accounting.get_transfer_nonce.assert_not_awaited()
+
+    async def test_a_withdraw_consent_nonce_never_blocks_a_deposit(self, test_db):
+        from eth_account import Account
+
+        service, contract, _, _ = _make_service()
+        _schedulable(contract)
+        service.accounting.get_transfer_nonce = AsyncMock(return_value=0)
         key = "0x" + "77" * 32
         user = Account.from_key(key).address
-        service.schedule_withdraw(
+        await service.schedule_withdraw(
             pool_id_hex=POOL_ID_HEX, user_address=user,
             amount="500", nonce=3, signature=self._consent(key, 500, 3),
         )
 
-        result = service.schedule_deposit(
+        result = await service.schedule_deposit(
             pool_id_hex=POOL_ID_HEX, user_address=user,
             amount="1000", nonce=3, signature=_transfer_sig(key, 1000, 3),
         )
@@ -2425,7 +2508,7 @@ class TestScheduling:
         assert result["status"] == "scheduled"
         assert test_db.execute("SELECT COUNT(*) c FROM earn_transactions").fetchone()["c"] == 2
 
-    def test_a_queued_swap_blocks_a_deposit_on_the_same_nonce(self, test_db):
+    async def test_a_queued_swap_blocks_a_deposit_on_the_same_nonce(self, test_db):
         import time
 
         from eth_account import Account
@@ -2434,6 +2517,7 @@ class TestScheduling:
 
         service, contract, _, _ = _make_service()
         _schedulable(contract)
+        service.accounting.get_transfer_nonce = AsyncMock(return_value=0)
         key = "0x" + "88" * 32
         user = Account.from_key(key).address
         now = int(time.time())
@@ -2448,21 +2532,22 @@ class TestScheduling:
         test_db.commit()
 
         with pytest.raises(OperationPendingError) as exc:
-            service.schedule_deposit(
+            await service.schedule_deposit(
                 pool_id_hex=POOL_ID_HEX, user_address=user,
                 amount="1000", nonce=3, signature=_transfer_sig(key, 1000, 3),
             )
 
         assert (exc.value.operation_type, exc.value.operation_id) == ("swap", "swap-1")
 
-    def test_executing_a_scheduled_row_updates_it_rather_than_adding_another(self, test_db):
+    async def test_executing_a_scheduled_row_updates_it_rather_than_adding_another(self, test_db):
         from eth_account import Account
 
         service, contract, _, _ = _make_service()
         _schedulable(contract)
+        service.accounting.get_transfer_nonce = AsyncMock(return_value=0)
         key = "0x" + "55" * 32
         user = Account.from_key(key).address
-        scheduled = service.schedule_deposit(
+        scheduled = await service.schedule_deposit(
             pool_id_hex=POOL_ID_HEX, user_address=user,
             amount="1000", nonce=0, signature=_transfer_sig(key, 1000, 0),
         )

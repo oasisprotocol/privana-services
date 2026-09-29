@@ -26,7 +26,7 @@ from src.services.earn.cache import get_pool_list_cache
 from src.services.earn.registry import get_strategy_registry
 from src.services.earn.vault_service import PendingLimitReached, get_vault_service
 from src.services.portfolio.history_service import MAX_HISTORY_DAYS, earn_history
-from src.services.user_queue import OperationPendingError
+from src.services.user_queue import OperationPendingError, StaleNonceError
 
 logger = logging.getLogger(__name__)
 
@@ -177,7 +177,7 @@ async def deposit(payload: DepositRequest) -> DepositResponse | JSONResponse:
         # Queued, not executed: the strategy leg bridges and supplies on another
         # chain and routinely outlives the gateway's patience. The client polls
         # GET /v1/operations/unsettled for the outcome, keyed by deposit_id.
-        scheduled = service.schedule_deposit(
+        scheduled = await service.schedule_deposit(
             pool_id_hex=payload.pool_id,
             user_address=payload.user_address,
             amount=payload.amount,
@@ -190,7 +190,7 @@ async def deposit(payload: DepositRequest) -> DepositResponse | JSONResponse:
             amount=payload.amount,
             status=scheduled["status"],
         )
-    except OperationPendingError as exc:
+    except (OperationPendingError, StaleNonceError) as exc:
         return JSONResponse(status_code=409, content=exc.payload())
     except PendingLimitReached as exc:
         raise HTTPException(status_code=429, detail=str(exc)) from exc
@@ -203,7 +203,7 @@ async def withdraw(payload: WithdrawRequest) -> WithdrawResponse:
     _pool_id_bytes(payload.pool_id)
     try:
         service = get_vault_service()
-        scheduled = service.schedule_withdraw(
+        scheduled = await service.schedule_withdraw(
             pool_id_hex=payload.pool_id,
             user_address=payload.user_address,
             amount=payload.amount,

@@ -2336,6 +2336,75 @@ class TestScheduling:
         assert exc.value.operation_id == first["id"]
         assert test_db.execute("SELECT COUNT(*) c FROM earn_transactions").fetchone()["c"] == 1
 
+    def test_a_user_at_the_pending_limit_is_refused_before_it_queues(self, test_db):
+        from eth_account import Account
+
+        from src.core.db import db_write
+        from src.services.earn.vault_service import PendingLimitReached
+
+        service, contract, _, _ = _make_service()
+        _schedulable(contract)
+        service.settings = replace(service.settings, earn_max_pending_per_user=2)
+        key = "0x" + "88" * 32
+        user = Account.from_key(key).address
+        for i, status in enumerate(("awaiting_liquidity", "completed")):
+            db_write(
+                test_db,
+                """INSERT INTO earn_transactions
+                   (id, operation, pool_id, user_address, token_id, amount,
+                    signer_address, nonce, signature, status, created_at, updated_at)
+                   VALUES (?, 'withdraw', ?, ?, '', '1', ?, 0, '0x', ?, 0, 0)""",
+                (f"old{i}", POOL_ID_HEX, user.lower(), user.lower(), status),
+            )
+        service.schedule_deposit(
+            pool_id_hex=POOL_ID_HEX, user_address=user,
+            amount="1000", nonce=1, signature=_transfer_sig(key, 1000, 1),
+        )
+
+        with pytest.raises(PendingLimitReached):
+            service.schedule_deposit(
+                pool_id_hex=POOL_ID_HEX, user_address=user,
+                amount="1000", nonce=2, signature=_transfer_sig(key, 1000, 2),
+            )
+
+        assert test_db.execute("SELECT COUNT(*) c FROM earn_transactions").fetchone()["c"] == 3
+
+    def test_a_retry_at_the_limit_still_returns_its_operation(self, test_db):
+        from eth_account import Account
+
+        service, contract, _, _ = _make_service()
+        _schedulable(contract)
+        service.settings = replace(service.settings, earn_max_pending_per_user=1)
+        key = "0x" + "99" * 32
+        user = Account.from_key(key).address
+        kwargs = dict(
+            pool_id_hex=POOL_ID_HEX, user_address=user,
+            amount="1000", nonce=1, signature=_transfer_sig(key, 1000, 1),
+        )
+        first = service.schedule_deposit(**kwargs)
+
+        # A lost response retried is the same request, not a new one.
+        assert service.schedule_deposit(**kwargs)["id"] == first["id"]
+
+    def test_other_users_are_not_held_to_someone_elses_limit(self, test_db):
+        from eth_account import Account
+
+        service, contract, _, _ = _make_service()
+        _schedulable(contract)
+        service.settings = replace(service.settings, earn_max_pending_per_user=1)
+        busy, free = "0x" + "aa" * 32, "0x" + "bb" * 32
+        service.schedule_deposit(
+            pool_id_hex=POOL_ID_HEX, user_address=Account.from_key(busy).address,
+            amount="1000", nonce=1, signature=_transfer_sig(busy, 1000, 1),
+        )
+
+        result = service.schedule_deposit(
+            pool_id_hex=POOL_ID_HEX, user_address=Account.from_key(free).address,
+            amount="1000", nonce=1, signature=_transfer_sig(free, 1000, 1),
+        )
+
+        assert result["status"] == "scheduled"
+
     def test_a_withdraw_consent_nonce_never_blocks_a_deposit(self, test_db):
         from eth_account import Account
 

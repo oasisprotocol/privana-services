@@ -24,7 +24,7 @@ from src.models.earn import (
 from src.models.history import EarnHistoryPoint, EarnHistoryResponse, usd_string
 from src.services.earn.cache import get_pool_list_cache
 from src.services.earn.registry import get_strategy_registry
-from src.services.earn.vault_service import get_vault_service
+from src.services.earn.vault_service import PendingLimitReached, get_vault_service
 from src.services.portfolio.history_service import MAX_HISTORY_DAYS, earn_history
 from src.services.user_queue import OperationPendingError
 
@@ -192,6 +192,8 @@ async def deposit(payload: DepositRequest) -> DepositResponse | JSONResponse:
         )
     except OperationPendingError as exc:
         return JSONResponse(status_code=409, content=exc.payload())
+    except PendingLimitReached as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -214,6 +216,8 @@ async def withdraw(payload: WithdrawRequest) -> WithdrawResponse:
             amount=payload.amount,
             status=scheduled["status"],
         )
+    except PendingLimitReached as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

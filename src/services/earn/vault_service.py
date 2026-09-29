@@ -77,6 +77,10 @@ class ReceiptUnknown(Exception):
     """Broadcast, but the receipt could not be read. Recovery settles it."""
 
 
+class PendingLimitReached(Exception):
+    """The user already has as many unsettled earn requests as one may hold."""
+
+
 def pool_key(pool_id_hex: str) -> str:
     """One spelling per pool. Requests may send the id with or without its
     0x prefix, and per-pool state keyed on both would split one pool in two."""
@@ -567,6 +571,21 @@ class VaultService:
         ).fetchone()
         if existing is not None:
             return {"id": existing["id"], "status": existing["status"]}
+
+        # Every request costs a Sapphire transaction and a place in the queue,
+        # so one wallet cannot be allowed to line up an unbounded number.
+        unsettled = (EARN_STATUS_SCHEDULED, EARN_STATUS_EXECUTING, EARN_STATUS_PENDING,
+                     EARN_STATUS_AWAITING_LIQUIDITY)
+        held = get_db().execute(
+            f"SELECT COUNT(*) FROM earn_transactions WHERE user_address = ? "
+            f"AND status IN ({', '.join('?' * len(unsettled))})",
+            (user_address.lower(), *unsettled),
+        ).fetchone()[0]
+        if held >= self.settings.earn_max_pending_per_user:
+            raise PendingLimitReached(
+                f"{held} earn requests are still being processed; "
+                "wait for one to finish before sending another"
+            )
 
         pool = self.get_pool(pool_id)
         if pool["pool_address"] == "0x0000000000000000000000000000000000000000":

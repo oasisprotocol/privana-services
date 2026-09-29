@@ -283,6 +283,25 @@ class TestDepositRoute:
             assert r.json()["pending_operation_type"] == "earn_deposit"
 
 
+    async def test_a_user_at_the_pending_limit_gets_a_429(self, api_client):
+        from src.services.earn.vault_service import PendingLimitReached
+
+        with patch("src.api.earn.get_vault_service") as mock_svc:
+            svc = MagicMock()
+            svc.schedule_deposit = MagicMock(side_effect=PendingLimitReached("5 earn requests"))
+            mock_svc.return_value = svc
+
+            r = await api_client.post("/v1/earn/deposit", json={
+                "pool_id": POOL_ID,
+                "user_address": USER_ADDRESS,
+                "amount": "1000",
+                "nonce": 0,
+                "signature": "0x" + "aa" * 65,
+            })
+            assert r.status_code == 429
+            assert "5 earn requests" in r.json()["detail"]
+
+
 class TestWithdrawRoute:
     async def test_queues_the_withdraw_and_returns_its_id(self, api_client):
         with patch("src.api.earn.get_vault_service") as mock_svc:
@@ -550,3 +569,22 @@ class TestWithdrawNonceRoute:
             assert r.status_code == 200
             assert r.json()["nonce"] == 3
             svc.get_withdraw_nonce_via_token.assert_called_once_with("0x" + "ee" * 32)
+
+
+class TestWithdrawPendingLimit:
+    async def test_a_user_at_the_pending_limit_gets_a_429(self, api_client):
+        from src.services.earn.vault_service import PendingLimitReached
+
+        with patch("src.api.earn.get_vault_service") as mock_svc:
+            svc = MagicMock()
+            svc.schedule_withdraw = MagicMock(side_effect=PendingLimitReached("5 earn requests"))
+            mock_svc.return_value = svc
+
+            r = await api_client.post("/v1/earn/withdraw", json={
+                "pool_id": POOL_ID,
+                "user_address": USER_ADDRESS,
+                "amount": "500",
+                "nonce": 0,
+                "signature": "0x" + "cc" * 65,
+            })
+            assert r.status_code == 429

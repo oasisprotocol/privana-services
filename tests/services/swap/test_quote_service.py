@@ -141,6 +141,28 @@ class TestExpiredQuoteCleanup:
         row = test_db.execute("SELECT id FROM quotes").fetchone()
         assert row["id"] == "valid_1"
 
+    @pytest.mark.parametrize("status,kept", [
+        ("scheduled", True), ("executing", True), ("refunding", True),
+        ("completed", False), ("failed", False), ("refunded", False),
+    ])
+    def test_keeps_expired_quotes_an_unsettled_swap_still_needs(self, test_db, insert_quote, status, kept):
+        from src.core.db import db_write
+
+        insert_quote("q1", expires_at=int(time.time()) - 10)
+        db_write(
+            test_db,
+            """INSERT INTO swaps (id, quote_id, user_address, from_token_id, to_token_id,
+               from_amount, to_amount_estimate, status, created_at, updated_at)
+               VALUES ('s1', 'q1', '0xuser', '0xaa', '0xbb', '1', '1', ?, 0, 0)""",
+            (status,),
+        )
+
+        deleted = self._make_service().cleanup_expired_quotes()
+
+        assert deleted == (0 if kept else 1)
+        remaining = test_db.execute("SELECT COUNT(*) AS cnt FROM quotes").fetchone()["cnt"]
+        assert remaining == (1 if kept else 0)
+
     def test_throttles_cleanup(self, test_db, insert_quote):
         past = int(time.time()) - 10
         insert_quote("expired_1", expires_at=past)

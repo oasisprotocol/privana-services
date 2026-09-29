@@ -12,7 +12,7 @@ from src.core.fee_policy import FeeDecision, resolve_internal_fee
 from src.core.fees import calculate_fee
 from src.core.validation import validate_address, validate_amount, validate_token_id
 from src.models.api import QuoteResponse
-from src.models.swap import SwapVenue
+from src.models.swap import SwapStatus, SwapVenue
 
 logger = logging.getLogger(__name__)
 
@@ -279,7 +279,14 @@ class QuoteService:
         if now - self._last_cleanup < CLEANUP_INTERVAL:
             return 0
         db = get_db()
-        cursor = db_write(db, "DELETE FROM quotes WHERE expires_at <= ?", (now,))
+        # A swap accepted before its quote expired can still be waiting in the
+        # queue, and it reads the quote when it runs. Keep those until it settles.
+        cursor = db_write(
+            db,
+            "DELETE FROM quotes WHERE expires_at <= ? AND id NOT IN "
+            "(SELECT quote_id FROM swaps WHERE status IN (?, ?, ?))",
+            (now, SwapStatus.SCHEDULED.value, SwapStatus.EXECUTING.value, SwapStatus.REFUNDING.value),
+        )
         self._last_cleanup = now
         deleted = cursor.rowcount
         if deleted > 0:

@@ -210,6 +210,26 @@ async def test_lifi_dispatch_uses_same_record_and_quote_id(worker, enqueue, test
     worker._pipeline.launch.assert_awaited_once()
 
 
+async def test_a_swap_queued_past_its_quote_expiry_still_dispatches(worker, enqueue, test_db):
+    from src.services.swap.quote_service import QuoteService
+
+    record = await enqueue(venue="lifi")
+    # The user's earlier swap held the queue until the quote expired, and a
+    # quote request from anyone swept expired quotes in the meantime.
+    test_db.execute("UPDATE quotes SET expires_at = 0 WHERE id = 'q1'")
+    cleaner = QuoteService.__new__(QuoteService)
+    cleaner._last_cleanup = 0
+    cleaner.cleanup_expired_quotes()
+    worker._pipeline = MagicMock()
+    worker._pipeline.launch = AsyncMock()
+
+    await worker.run_lifi_once()
+
+    worker._pipeline.launch.assert_awaited_once()
+    assert worker._pipeline.launch.call_args.kwargs["swap_id"] == record.id
+    assert rows(test_db)[0]["status"] == "executing"
+
+
 async def test_internal_worker_leaves_lifi_to_dispatcher(worker, enqueue, test_db):
     await enqueue(venue="lifi")
     await worker.run_internal_once()

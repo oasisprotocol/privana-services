@@ -9,13 +9,13 @@ logger = logging.getLogger(__name__)
 
 
 class IdleDeployer:
-    """Puts idle pool funds to work.
+    """Settles each pool with its strategy on a fixed interval.
 
-    Seed principal is paid into a pool's account from outside and recorded
-    separately, so nothing about that flow deploys it; it would sit earning
-    nothing, which is the opposite of the point. The same applies to a
-    deposit whose routing failed and to a reclaim a reverted withdrawal left
-    behind. This sweeps all of it into the pool's strategy.
+    Deposits wait on the pool account and withdrawals are paid from it, so
+    every round nets what the pool holds against its liquidity buffer and the
+    withdrawals waiting on it, and moves the difference in one bridge. Seed
+    principal, a deposit settled by recovery, and a reclaim a failed round
+    left behind are swept up the same way.
     """
 
     def __init__(self, service: Optional[VaultService] = None) -> None:
@@ -34,20 +34,19 @@ class IdleDeployer:
             logger.exception("Idle deploy failed to list pools; skipping this round")
             return 0
 
-        deployed = 0
+        moved = 0
         for pool in pools:
             # A paused pool is usually paused because something is wrong with
             # it, which is not the moment to push more funds into its
-            # strategy. Exits stay open either way.
-            if not pool.get("active"):
-                continue
+            # strategy. Exits stay open, so its waiting withdrawals are still
+            # reclaimed for.
             try:
-                deployed += await service.deploy_idle(pool["pool_id"])
+                moved += await service.rebalance(pool["pool_id"], allow_deploy=bool(pool.get("active")))
             except Exception:
                 # One pool's bridge being down says nothing about the others,
-                # and the funds stay idle until the next round either way.
-                logger.exception("Idle deploy failed pool=%s", pool["pool_id"])
-        return deployed
+                # and the funds stay where they are until the next round.
+                logger.exception("Rebalance failed pool=%s", pool["pool_id"])
+        return moved
 
     async def start(self) -> None:
         if self._task is not None:

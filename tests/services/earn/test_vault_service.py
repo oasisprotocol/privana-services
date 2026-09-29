@@ -518,14 +518,14 @@ class TestStrategyRouting:
 
         assert held == [True]
 
-    async def test_failed_withdraw_resyncs_under_the_lock(self, test_db):
+    async def test_failed_withdraw_moves_nothing(self, test_db):
         from src.services.earn.registry import StrategyRegistry
 
         registry = StrategyRegistry()
         strategy = MagicMock()
-        strategy.withdraw_ready = AsyncMock(return_value=True)
         strategy.name = "aave-v3"
         strategy.is_healthy = AsyncMock(return_value=True)
+        strategy.idle_assets = AsyncMock(return_value=500)
         strategy.withdraw_from_earn = AsyncMock()
         strategy.deposit_to_earn = AsyncMock()
         registry.register(POOL_ID_HEX, strategy)
@@ -543,9 +543,10 @@ class TestStrategyRouting:
             result = await service.withdraw(POOL_ID_HEX, USER_ADDRESS, "500", 0, USER_WITHDRAW_SIG)
 
         assert result["status"] == "failed"
-        # Once before the reclaim, once after the rollback; both under the lock.
-        assert held == [True, True]
-        strategy.deposit_to_earn.assert_awaited_once_with(500)
+        # Paid from the pool account, so a revert leaves nothing to put back.
+        assert held == [True]
+        strategy.withdraw_from_earn.assert_not_awaited()
+        strategy.deposit_to_earn.assert_not_awaited()
 
     async def test_deposit_refuses_when_strategy_unhealthy(self, test_db):
         from src.services.earn.registry import StrategyRegistry
@@ -650,20 +651,24 @@ class TestStrategyRouting:
         ]
         assert all(w >= 1000 for w in writes)
 
-    async def test_withdraw_reclaims_from_strategy(self, test_db):
+    @staticmethod
+    def _withdraw_service(idle):
         from src.services.earn.registry import StrategyRegistry
 
         registry = StrategyRegistry()
         strategy = MagicMock()
-        strategy.withdraw_ready = AsyncMock(return_value=True)
-        strategy.name = "aave-v3"
+        strategy.name = "midas-mtbill"
         strategy.is_healthy = AsyncMock(return_value=True)
         strategy.withdraw_from_earn = AsyncMock()
+        strategy.deposit_to_earn = AsyncMock()
         strategy.total_assets = AsyncMock(return_value=1050)
-        strategy.idle_assets = AsyncMock(return_value=0)
+        if isinstance(idle, Exception):
+            strategy.idle_assets = AsyncMock(side_effect=idle)
+        else:
+            strategy.idle_assets = AsyncMock(return_value=idle)
         registry.register(POOL_ID_HEX, strategy)
 
-        service, contract, _, _ = _make_service(registry=registry)
+        service, contract, sapphire, _ = _make_service(registry=registry)
         contract.functions.pools.return_value.call.return_value = (
             bytes.fromhex(USDC_TOKEN_ID[2:]),
             POOL_ADDRESS,
@@ -671,132 +676,93 @@ class TestStrategyRouting:
         )
         contract.functions.userShares.return_value.call.side_effect = [500, 500, 25]
         contract.functions.convertToAssets.return_value.call.return_value = 525
+        return service, strategy, sapphire
+
+    async def test_withdraw_pays_from_the_pool_account(self, test_db):
+        service, strategy, sapphire = self._withdraw_service(idle=500)
 
         with patch("src.services.earn.vault_service.sign_transfer", return_value="0x" + "bb" * 65):
             result = await service.withdraw(POOL_ID_HEX, USER_ADDRESS, "500", 0, USER_WITHDRAW_SIG)
 
         assert result["status"] == "completed"
-        strategy.withdraw_from_earn.assert_awaited_once_with(500)
+        strategy.withdraw_from_earn.assert_not_awaited()
+        assert sapphire.execute_contract_call.call_args.kwargs["function_name"] == "withdraw"
 
     async def test_withdraw_short_of_liquidity_moves_nothing(self, test_db):
-        from src.services.earn.registry import StrategyRegistry
         from src.services.earn.strategies.base import LiquidityUnavailable
 
-        registry = StrategyRegistry()
-        strategy = MagicMock()
-        strategy.withdraw_ready = AsyncMock(return_value=False)
-        strategy.name = "midas-mtbill"
-        strategy.is_healthy = AsyncMock(return_value=True)
-        strategy.withdraw_from_earn = AsyncMock()
-        strategy.deposit_to_earn = AsyncMock()
-        strategy.total_assets = AsyncMock(return_value=1050)
-        strategy.idle_assets = AsyncMock(return_value=0)
-        registry.register(POOL_ID_HEX, strategy)
-
-        service, contract, sapphire, _ = _make_service(registry=registry)
-        contract.functions.pools.return_value.call.return_value = (
-            bytes.fromhex(USDC_TOKEN_ID[2:]),
-            POOL_ADDRESS,
-            1000, 1050, True,
-        )
-        contract.functions.userShares.return_value.call.side_effect = [500, 500, 25]
-        contract.functions.convertToAssets.return_value.call.return_value = 525
+        service, strategy, sapphire = self._withdraw_service(idle=499)
 
         with pytest.raises(LiquidityUnavailable):
             await service.withdraw(POOL_ID_HEX, USER_ADDRESS, "500", 0, USER_WITHDRAW_SIG)
 
         strategy.withdraw_from_earn.assert_not_awaited()
-        strategy.deposit_to_earn.assert_not_awaited()
+        assert all(
+            c.kwargs["function_name"] != "withdraw"
+            for c in sapphire.execute_contract_call.call_args_list
+        )
 
-    async def test_a_redeem_that_reverts_for_liquidity_is_not_rolled_back(self, test_db):
-        from src.services.earn.registry import StrategyRegistry
+    async def test_a_withdrawal_larger_than_the_pool_is_refused_not_held(self, test_db):
+        service, _, sapphire = self._withdraw_service(idle=10**6)
+
+        with pytest.raises(ValueError, match="larger than the whole pool"):
+            await service.withdraw(POOL_ID_HEX, USER_ADDRESS, str(10**6 + 1), 0, USER_WITHDRAW_SIG)
+
+        assert all(
+            c.kwargs["function_name"] != "withdraw"
+            for c in sapphire.execute_contract_call.call_args_list
+        )
+
+    async def test_an_unreadable_pool_balance_holds_the_withdrawal(self, test_db):
         from src.services.earn.strategies.base import LiquidityUnavailable
 
-        registry = StrategyRegistry()
-        strategy = MagicMock()
-        strategy.withdraw_ready = AsyncMock(return_value=True)
-        strategy.name = "midas-mtbill"
-        strategy.is_healthy = AsyncMock(return_value=True)
-        strategy.withdraw_from_earn = AsyncMock(side_effect=LiquidityUnavailable("reverted"))
-        strategy.deposit_to_earn = AsyncMock()
-        strategy.total_assets = AsyncMock(return_value=1050)
-        strategy.idle_assets = AsyncMock(return_value=0)
-        registry.register(POOL_ID_HEX, strategy)
+        service, strategy, sapphire = self._withdraw_service(idle=RuntimeError("accounting down"))
+        service.sync_total_assets = AsyncMock(return_value=1050)
 
-        service, contract, _, _ = _make_service(registry=registry)
-        contract.functions.pools.return_value.call.return_value = (
-            bytes.fromhex(USDC_TOKEN_ID[2:]),
-            POOL_ADDRESS,
-            1000, 1050, True,
-        )
-        contract.functions.userShares.return_value.call.side_effect = [500, 500, 25]
-        contract.functions.convertToAssets.return_value.call.return_value = 525
+        # Waiting beats failing: the request keeps its signature and retries.
+        with pytest.raises(LiquidityUnavailable):
+            await service.withdraw(POOL_ID_HEX, USER_ADDRESS, "500", 0, USER_WITHDRAW_SIG)
+
+        sapphire.execute_contract_call.assert_not_called()
+
+    async def test_withdraw_cannot_spend_funds_promised_to_a_bridge(self, test_db):
+        from src.services.earn.strategies.base import LiquidityUnavailable
+
+        service, _, _ = self._withdraw_service(idle=800)
+        service._held[POOL_ID_HEX] = 400
 
         with pytest.raises(LiquidityUnavailable):
             await service.withdraw(POOL_ID_HEX, USER_ADDRESS, "500", 0, USER_WITHDRAW_SIG)
 
-        # A rollback here would push the pool's idle balance into the strategy.
-        strategy.deposit_to_earn.assert_not_awaited()
+        assert await service.withdrawal_payable(POOL_ID_HEX, 400)
 
-    async def test_withdraw_strategy_failure_blocks_onchain_burn(self, test_db):
-        from src.services.earn.registry import StrategyRegistry
-
-        registry = StrategyRegistry()
-        strategy = MagicMock()
-        strategy.withdraw_ready = AsyncMock(return_value=True)
-        strategy.name = "aave-v3"
-        strategy.is_healthy = AsyncMock(return_value=True)
-        strategy.withdraw_from_earn = AsyncMock(side_effect=RuntimeError("aave rpc down"))
-        strategy.deposit_to_earn = AsyncMock()
-        strategy.total_assets = AsyncMock(return_value=1050)
-        strategy.idle_assets = AsyncMock(return_value=0)
-        registry.register(POOL_ID_HEX, strategy)
-
-        service, contract, sapphire, _ = _make_service(registry=registry)
-        contract.functions.pools.return_value.call.return_value = (
-            bytes.fromhex(USDC_TOKEN_ID[2:]),
-            POOL_ADDRESS,
-            1000, 1050, True,
-        )
-        contract.functions.userShares.return_value.call.return_value = 500
-        contract.functions.convertToAssets.return_value.call.return_value = 525
-
-        with patch("src.services.earn.vault_service.sign_transfer", return_value="0x" + "bb" * 65):
-            with pytest.raises(ValueError, match="Withdraw failed"):
-                await service.withdraw(POOL_ID_HEX, USER_ADDRESS, "500", 0, USER_WITHDRAW_SIG)
-
-        strategy.withdraw_from_earn.assert_awaited_once()
-        strategy.deposit_to_earn.assert_awaited_once_with(500)
-        sapphire.execute_contract_call.assert_not_called()
-
-    async def test_withdraw_onchain_revert_resupplies_reclaimed_funds(self, test_db):
-        from src.services.earn.registry import StrategyRegistry
-
-        registry = StrategyRegistry()
-        strategy = MagicMock()
-        strategy.withdraw_ready = AsyncMock(return_value=True)
-        strategy.name = "aave-v3"
-        strategy.is_healthy = AsyncMock(return_value=True)
-        strategy.withdraw_from_earn = AsyncMock()
-        strategy.deposit_to_earn = AsyncMock()
-        registry.register(POOL_ID_HEX, strategy)
-
-        service, contract, sapphire, _ = _make_service(registry=registry)
-        contract.functions.pools.return_value.call.return_value = (
-            bytes.fromhex(USDC_TOKEN_ID[2:]),
-            POOL_ADDRESS,
-            1000, 1050, True,
-        )
-        contract.functions.userShares.return_value.call.return_value = 500
-        contract.functions.convertToAssets.return_value.call.return_value = 525
-        sapphire.execute_contract_call.side_effect = RuntimeError("InvalidWithdrawSignature")
+    async def test_withdraw_skips_the_sync_while_a_bridge_is_running(self, test_db):
+        service, _, _ = self._withdraw_service(idle=800)
+        service._held[POOL_ID_HEX] = 100
+        service.sync_total_assets = AsyncMock(return_value=None)
+        service.get_seeded_assets = MagicMock(return_value=5_000)
 
         with patch("src.services.earn.vault_service.sign_transfer", return_value="0x" + "bb" * 65):
             result = await service.withdraw(POOL_ID_HEX, USER_ADDRESS, "500", 0, USER_WITHDRAW_SIG)
 
-        assert result["status"] == "failed"
-        strategy.withdraw_from_earn.assert_awaited_once_with(500)
-        strategy.deposit_to_earn.assert_awaited_once_with(500)
+        # The reading would be short by the bridge; the contract's figure holds.
+        assert result["status"] == "completed"
+        service.sync_total_assets.assert_not_awaited()
+
+    async def test_deposit_skips_the_sync_while_a_bridge_is_running(self, test_db):
+        service, _, _ = self._withdraw_service(idle=0)
+        service._held[POOL_ID_HEX] = 100
+        service.sync_total_assets = AsyncMock(return_value=None)
+
+        result = await service.deposit(POOL_ID_HEX, USER_ADDRESS, "1000", 5, "0x" + "aa" * 65)
+
+        assert result["status"] == "completed"
+        service.sync_total_assets.assert_not_awaited()
+
+    async def test_manual_pools_always_pay_out(self, test_db):
+        service, _, _, _ = _make_service()
+
+        assert await service.withdrawal_payable(POOL_ID_HEX, 10**30)
 
 
 class TestEffectiveTotalAssets:
@@ -1510,7 +1476,7 @@ class TestSeedAwareQuotesAndExits:
 
     async def test_an_unseeded_pool_still_exits_on_an_unconfirmed_valuation(self, test_db):
         service, strategy, _ = self._service(
-            external=105, idle=0, seeded=0, shares=10, on_chain_assets=110,
+            external=95, idle=10, seeded=0, shares=10, on_chain_assets=110,
         )
 
         with patch("src.services.earn.vault_service.sign_transfer", return_value="0x" + "bb" * 65):
@@ -1518,7 +1484,7 @@ class TestSeedAwareQuotesAndExits:
 
         # Users must always be able to leave a pool with no senior claim on it.
         assert result["status"] == "completed"
-        strategy.withdraw_from_earn.assert_awaited_once_with(10)
+        strategy.withdraw_from_earn.assert_not_awaited()
 
 
 class TestDeployIdle:
@@ -1554,14 +1520,14 @@ class TestDeployIdle:
     async def test_routes_the_whole_idle_balance(self, test_db):
         service, strategy = self._service(idle=100_000)
 
-        assert await service.deploy_idle(POOL_ID_HEX) == 100_000
+        assert await service.rebalance(POOL_ID_HEX) == 100_000
 
         strategy.deposit_to_earn.assert_awaited_once_with(100_000)
 
-    @pytest.mark.parametrize("status,waits", [
-        ("executing", True), ("pending", True), ("failed", False),
+    @pytest.mark.parametrize("status,moved", [
+        ("executing", 99_900), ("pending", 0), ("failed", 100_000),
     ])
-    async def test_waits_for_unresolved_rows_in_this_pool(self, test_db, status, waits):
+    async def test_waits_for_unresolved_rows_in_this_pool(self, test_db, status, moved):
         from src.core.db import db_write
         service, strategy = self._service(idle=100_000)
         db_write(
@@ -1572,8 +1538,10 @@ class TestDeployIdle:
                VALUES ('w1', 'withdraw', ?, 'user', 'token', '100', 'signer', 0, '', ?, 1, 2)""",
             ("0x" + POOL_ID_HEX[2:].upper(), status),
         )
-        assert await service.deploy_idle(POOL_ID_HEX) == (0 if waits else 100_000)
-        assert strategy.deposit_to_earn.await_count == (0 if waits else 1)
+        # A receipt nobody has read may still move the balance; a withdrawal
+        # still in the queue only keeps its own amount back.
+        assert await service.rebalance(POOL_ID_HEX) == moved
+        assert strategy.deposit_to_earn.await_count == (1 if moved else 0)
 
     async def test_a_reverted_withdraw_found_by_recovery_is_redeployed(self, test_db):
         """Timeout, then recovery reads the revert and fails the row; the
@@ -1606,7 +1574,7 @@ class TestDeployIdle:
         assert self._status(test_db, "w1") == "failed"
         strategy.deposit_to_earn.assert_not_awaited()
 
-        assert await service.deploy_idle(POOL_ID_HEX) == 100_000
+        assert await service.rebalance(POOL_ID_HEX) == 100_000
         strategy.deposit_to_earn.assert_awaited_once_with(100_000)
         service.sync_total_assets.assert_awaited()
 
@@ -1641,7 +1609,7 @@ class TestDeployIdle:
              "0xuser", 2, "0xsig", 2, "0xsig", "undeployed", 0, 0),
         )
 
-        await service.deploy_idle(POOL_ID_HEX)
+        await service.rebalance(POOL_ID_HEX)
 
         rows = get_db().execute(
             "SELECT id, status, error FROM earn_transactions ORDER BY id"
@@ -1655,14 +1623,14 @@ class TestDeployIdle:
         service, strategy = self._service(idle=0)
         strategy.stranded_assets = AsyncMock(side_effect=[5_000_000, 0])
 
-        assert await service.deploy_idle(POOL_ID_HEX) == 5_000_000
+        assert await service.rebalance(POOL_ID_HEX) == 5_000_000
         strategy.deposit_to_earn.assert_awaited_once_with(5_000_000)
 
     async def test_deploys_idle_and_stranded_funds_together_against_the_minimum(self, test_db):
         service, strategy = self._service(idle=600_000, minimum=1_000_000)
         strategy.stranded_assets = AsyncMock(side_effect=[600_000, 0])
 
-        assert await service.deploy_idle(POOL_ID_HEX) == 1_200_000
+        assert await service.rebalance(POOL_ID_HEX) == 1_200_000
         strategy.deposit_to_earn.assert_awaited_once_with(1_200_000)
 
     async def test_leaves_undeployed_rows_open_while_a_bridge_is_in_flight(self, test_db):
@@ -1680,7 +1648,7 @@ class TestDeployIdle:
              "0xuser", 1, "0xsig", 1, "0xsig", "undeployed", 0, 0),
         )
 
-        await service.deploy_idle(POOL_ID_HEX)
+        await service.rebalance(POOL_ID_HEX)
 
         row = get_db().execute("SELECT status FROM earn_transactions WHERE id = 'stuck'").fetchone()
         assert row[0] == "undeployed"
@@ -1689,7 +1657,7 @@ class TestDeployIdle:
         service, strategy = self._service(idle=600_000)
         strategy.in_flight_assets = AsyncMock(return_value=400_000)
 
-        assert await service.deploy_idle(POOL_ID_HEX) == 0
+        assert await service.rebalance(POOL_ID_HEX) == 0
         strategy.deposit_to_earn.assert_not_awaited()
 
     async def test_reconciles_undeployed_rows_when_nothing_is_waiting(self, test_db):
@@ -1706,55 +1674,108 @@ class TestDeployIdle:
              "0xuser", 1, "0xsig", 1, "0xsig", "undeployed", 0, 0),
         )
 
-        assert await service.deploy_idle(POOL_ID_HEX) == 0
+        assert await service.rebalance(POOL_ID_HEX) == 0
 
         row = get_db().execute("SELECT status FROM earn_transactions WHERE id = 'stuck'").fetchone()
         assert row[0] == "completed"
 
-    async def test_holds_the_pool_lock_across_the_bridge(self, test_db):
-        service, strategy = self._service(idle=100_000)
-        held = []
+    async def test_a_deploy_keeps_the_pool_open_with_its_amount_held(self, test_db):
+        service, strategy = self._service(idle=100_000, buffer_min=20_000)
+        during = []
         strategy.deposit_to_earn = AsyncMock(
-            side_effect=lambda _a: held.append(service._pool_lock(POOL_ID_HEX).locked())
-        )
-
-        await service.deploy_idle(POOL_ID_HEX)
-
-        # A withdrawal's reclaim must not be deployed out from under it.
-        assert held == [True]
-        assert not service._pool_lock(POOL_ID_HEX).locked()
-
-    async def test_a_bridge_in_one_pool_leaves_other_pools_unlocked(self, test_db):
-        other_pool = "0x" + "cd" * 32
-        service, strategy = self._service(idle=100_000)
-        held = []
-        strategy.deposit_to_earn = AsyncMock(
-            side_effect=lambda _a: held.append(
-                (service._pool_lock(POOL_ID_HEX).locked(), service._pool_lock(other_pool).locked())
+            side_effect=lambda _a: during.append(
+                (service._pool_lock(POOL_ID_HEX).locked(), dict(service._held))
             )
         )
 
-        await service.deploy_idle(POOL_ID_HEX)
+        assert await service.rebalance(POOL_ID_HEX) == 80_000
 
-        assert held == [(True, False)]
-        assert service._pool_lock(POOL_ID_HEX.upper().replace("0X", "0x")) is service._pool_lock(POOL_ID_HEX)
+        # Deposits and payouts carry on during the bridge, but cannot touch
+        # the 80_000 it was promised.
+        assert during == [(False, {POOL_ID_HEX: 80_000})]
+        assert service._held == {}
+        assert not service._pool_lock(POOL_ID_HEX).locked()
+
+    async def test_a_failed_deploy_holds_its_amount_until_the_bridge_settles(self, test_db):
+        service, strategy = self._service(idle=100_000)
+        strategy.deposit_to_earn = AsyncMock(side_effect=RuntimeError("bridge timed out"))
+        service.sync_total_assets = AsyncMock(return_value=1000)
+
+        with pytest.raises(RuntimeError):
+            await service.rebalance(POOL_ID_HEX)
+
+        # Accounting may have debited a bridge that has not landed: a sync now
+        # would write that dip into the share price.
+        assert service._held == {POOL_ID_HEX: 100_000}
+        assert service.sync_total_assets.await_count == 1
+
+        strategy.in_flight_assets = AsyncMock(return_value=100_000)
+        assert await service.rebalance(POOL_ID_HEX) == 0
+        assert service._held == {POOL_ID_HEX: 100_000}
+
+        strategy.in_flight_assets = AsyncMock(return_value=0)
+        strategy.idle_assets = AsyncMock(return_value=0)
+        await service.rebalance(POOL_ID_HEX)
+        assert service._held == {}
+        assert service.sync_total_assets.await_count == 2
+
+    async def test_syncs_before_the_bridge_so_mid_bridge_deposits_price_right(self, test_db):
+        service, strategy = self._service(idle=100_000)
+        order = []
+        service.sync_total_assets = AsyncMock(side_effect=lambda _p: order.append("sync") or 1000)
+        strategy.deposit_to_earn = AsyncMock(side_effect=lambda _a: order.append("bridge"))
+
+        await service.rebalance(POOL_ID_HEX)
+
+        assert order == ["sync", "bridge", "sync"]
+
+    async def test_an_unconfirmed_valuation_holds_the_deploy(self, test_db):
+        service, strategy = self._service(idle=100_000)
+        service.sync_total_assets = AsyncMock(return_value=None)
+
+        assert await service.rebalance(POOL_ID_HEX) == 0
+        strategy.deposit_to_earn.assert_not_awaited()
+        assert service._held == {}
+
+    async def test_skips_the_closing_sync_while_a_receipt_is_unread(self, test_db):
+        from src.core.db import db_write, get_db
+        service, strategy = self._service(idle=100_000)
+        service.sync_total_assets = AsyncMock(return_value=1000)
+
+        async def bridge(_amount):
+            db_write(
+                get_db(),
+                """INSERT INTO earn_transactions
+                   (id, operation, pool_id, user_address, token_id, amount,
+                    signer_address, nonce, signature, status, created_at, updated_at)
+                   VALUES ('d1', 'deposit', ?, '0xuser', ?, '5', '0xuser', 0, '0x', 'pending', 0, 0)""",
+                (POOL_ID_HEX, USDC_TOKEN_ID),
+            )
+
+        strategy.deposit_to_earn = AsyncMock(side_effect=bridge)
+
+        await service.rebalance(POOL_ID_HEX)
+
+        # Syncing now would land after that deposit and erase it from totalAssets.
+        assert service.sync_total_assets.await_count == 1
 
     async def test_keeps_the_buffer_floor_on_the_pool_account(self, test_db):
         service, strategy = self._service(idle=80_000_000, buffer_min=30_000_000)
 
-        assert await service.deploy_idle(POOL_ID_HEX) == 50_000_000
+        assert await service.rebalance(POOL_ID_HEX) == 50_000_000
         strategy.deposit_to_earn.assert_awaited_once_with(50_000_000)
 
     async def test_buffer_grows_with_the_pool(self, test_db):
         service, strategy = self._service(idle=100_000, buffer_min=1, buffer_bps=5_000)
 
         # Half of the 1000 deployed plus 100_000 idle stays behind.
-        assert await service.deploy_idle(POOL_ID_HEX) == 49_500
+        assert await service.rebalance(POOL_ID_HEX) == 49_500
         strategy.deposit_to_earn.assert_awaited_once_with(49_500)
 
-    async def test_idle_under_the_buffer_stays_put(self, test_db):
+    async def test_a_half_full_buffer_is_left_alone(self, test_db):
         from src.core.db import db_write, get_db
-        service, strategy = self._service(idle=20_000_000, buffer_min=50_000_000)
+        service, strategy = self._service(idle=30_000_000, buffer_min=50_000_000)
+        strategy.withdraw_from_earn = AsyncMock()
         db_write(
             get_db(),
             """INSERT INTO earn_transactions
@@ -1766,44 +1787,169 @@ class TestDeployIdle:
              "0xuser", 1, "0xsig", 1, "0xsig", "undeployed", 0, 0),
         )
 
-        assert await service.deploy_idle(POOL_ID_HEX) == 0
+        assert await service.rebalance(POOL_ID_HEX) == 0
         strategy.deposit_to_earn.assert_not_awaited()
+        strategy.withdraw_from_earn.assert_not_awaited()
         # Money held as the buffer is where it is meant to be.
         row = get_db().execute("SELECT status FROM earn_transactions WHERE id = 'stuck'").fetchone()
         assert row[0] == "completed"
 
-    async def test_stranded_funds_deploy_even_when_the_buffer_is_short(self, test_db):
-        service, strategy = self._service(idle=10, buffer_min=50_000_000)
-        strategy.stranded_assets = AsyncMock(side_effect=[5_000_000, 0])
+    @staticmethod
+    def _waiting(amount, tx_id, pool=POOL_ID_HEX):
+        from src.core.db import db_write, get_db
+        db_write(
+            get_db(),
+            """INSERT INTO earn_transactions
+               (id, operation, pool_id, user_address, token_id, amount,
+                signer_address, nonce, signature, status, created_at, updated_at)
+               VALUES (?, 'withdraw', ?, '0xuser', ?, ?, ?, 0, '0xsig', 'awaiting_liquidity', 0, 0)""",
+            (tx_id, pool, USDC_TOKEN_ID, str(amount), POOL_ADDRESS),
+        )
 
-        assert await service.deploy_idle(POOL_ID_HEX) == 5_000_000
-        strategy.deposit_to_earn.assert_awaited_once_with(5_000_000)
+    async def test_one_reclaim_covers_every_waiting_withdrawal_and_the_buffer(self, test_db):
+        service, strategy = self._service(idle=50, buffer_min=100)
+        strategy.total_assets = AsyncMock(return_value=10_000)
+        service.sync_total_assets = AsyncMock(return_value=10_050)
+        self._waiting(300, "w1")
+        self._waiting(200, "w2")
+        self._waiting(999, "elsewhere", pool="0x" + "cd" * 32)
+        during = []
+
+        async def reclaim(amount):
+            during.append((service._pool_lock(POOL_ID_HEX).locked(), service.reclaiming_pools()))
+
+        strategy.withdraw_from_earn = AsyncMock(side_effect=reclaim)
+
+        assert await service.rebalance(POOL_ID_HEX) == -550
+
+        strategy.withdraw_from_earn.assert_awaited_once_with(550)
+        strategy.withdraw_ready.assert_awaited_once_with(550)
+        # The credit is spotted by the pool balance rising, so nothing else
+        # may touch that balance until it lands.
+        assert during == [(True, frozenset({POOL_ID_HEX}))]
+        assert service.reclaiming_pools() == frozenset()
+        service.sync_total_assets.assert_awaited_once()
+        strategy.deposit_to_earn.assert_not_awaited()
+
+    async def test_a_short_buffer_is_refilled_with_nobody_waiting(self, test_db):
+        service, strategy = self._service(idle=10, buffer_min=50_000_000)
+        strategy.total_assets = AsyncMock(return_value=100_000_000)
+        strategy.withdraw_from_earn = AsyncMock()
+
+        assert await service.rebalance(POOL_ID_HEX) == -(50_000_000 - 10)
+        strategy.deposit_to_earn.assert_not_awaited()
+
+    async def test_a_reclaim_never_asks_for_more_than_is_deployed(self, test_db):
+        service, strategy = self._service(idle=0, buffer_min=100)
+        strategy.total_assets = AsyncMock(return_value=250)
+        strategy.withdraw_from_earn = AsyncMock()
+        self._waiting(1_000, "w1")
+
+        assert await service.rebalance(POOL_ID_HEX) == -250
+        strategy.withdraw_from_earn.assert_awaited_once_with(250)
+
+    async def test_waits_while_the_strategy_cannot_pay_out(self, test_db):
+        service, strategy = self._service(idle=0)
+        strategy.withdraw_ready = AsyncMock(return_value=False)
+        strategy.withdraw_from_earn = AsyncMock()
+        self._waiting(300, "w1")
+
+        assert await service.rebalance(POOL_ID_HEX) == 0
+        strategy.withdraw_from_earn.assert_not_awaited()
+
+    @pytest.mark.parametrize("error", ["liquidity", "crash"])
+    async def test_a_failed_reclaim_clears_the_pool_for_the_next_round(self, test_db, error):
+        from src.services.earn.strategies.base import LiquidityUnavailable
+        service, strategy = self._service(idle=0)
+        strategy.withdraw_from_earn = AsyncMock(
+            side_effect=LiquidityUnavailable("capacity") if error == "liquidity" else RuntimeError("rpc")
+        )
+        self._waiting(300, "w1")
+
+        assert await service.rebalance(POOL_ID_HEX) == 0
+
+        assert service.reclaiming_pools() == frozenset()
+        assert not service._pool_lock(POOL_ID_HEX).locked()
+        assert self._status(test_db, "w1") == "awaiting_liquidity"
+
+    async def test_waiting_withdrawals_are_kept_back_from_a_deploy(self, test_db):
+        service, strategy = self._service(idle=1_000, buffer_min=100)
+        self._waiting(400, "w1")
+
+        assert await service.rebalance(POOL_ID_HEX) == 500
+        strategy.deposit_to_earn.assert_awaited_once_with(500)
+
+    async def test_queued_withdrawals_are_kept_back_from_a_deploy_too(self, test_db):
+        from src.core.db import db_write, get_db
+        service, strategy = self._service(idle=1_000, buffer_min=100)
+        self._waiting(100, "w1")
+        for tx_id, status in (("w2", "scheduled"), ("w3", "executing"), ("done", "completed")):
+            self._waiting(200, tx_id)
+            db_write(get_db(), "UPDATE earn_transactions SET status = ? WHERE id = ?", (status, tx_id))
+
+        # A withdrawal released back to the queue still needs its money.
+        assert await service.rebalance(POOL_ID_HEX) == 400
+        strategy.deposit_to_earn.assert_awaited_once_with(400)
+
+    async def test_a_paused_pool_still_reclaims_for_its_exits(self, test_db):
+        service, strategy = self._service(idle=0)
+        strategy.withdraw_from_earn = AsyncMock()
+        self._waiting(300, "w1")
+
+        assert await service.rebalance(POOL_ID_HEX, allow_deploy=False) == -300
+
+    async def test_a_paused_pool_takes_nothing_new(self, test_db):
+        service, strategy = self._service(idle=100_000)
+
+        assert await service.rebalance(POOL_ID_HEX, allow_deploy=False) == 0
+        strategy.deposit_to_earn.assert_not_awaited()
+
+    async def test_a_deposit_landing_mid_bridge_stays_undeployed(self, test_db):
+        from src.core.db import db_write, get_db
+        service, strategy = self._service(idle=100_000)
+        insert = """INSERT INTO earn_transactions
+               (id, operation, pool_id, user_address, token_id, amount,
+                signer_address, nonce, signature, input_nonce, input_signature,
+                status, created_at, updated_at)
+               VALUES (?, 'deposit', ?, '0xuser', ?, '1', '0xuser', 1, '0xsig', 1, '0xsig',
+                       'undeployed', 0, 0)"""
+        db_write(get_db(), insert, ("before", POOL_ID_HEX, USDC_TOKEN_ID))
+
+        async def bridge(_amount):
+            db_write(get_db(), insert, ("during", POOL_ID_HEX, USDC_TOKEN_ID))
+
+        strategy.deposit_to_earn = AsyncMock(side_effect=bridge)
+
+        await service.rebalance(POOL_ID_HEX)
+
+        assert self._status(test_db, "before") == "completed"
+        assert self._status(test_db, "during") == "undeployed"
 
     async def test_does_nothing_when_there_is_nothing_idle(self, test_db):
         service, strategy = self._service(idle=0)
 
-        assert await service.deploy_idle(POOL_ID_HEX) == 0
+        assert await service.rebalance(POOL_ID_HEX) == 0
 
         strategy.deposit_to_earn.assert_not_awaited()
 
     async def test_leaves_amounts_below_the_protocol_minimum(self, test_db):
         service, strategy = self._service(idle=500_000, minimum=1_000_000)
 
-        assert await service.deploy_idle(POOL_ID_HEX) == 0
+        assert await service.rebalance(POOL_ID_HEX) == 0
 
         strategy.deposit_to_earn.assert_not_awaited()
 
     async def test_leaves_the_funds_when_the_strategy_is_unhealthy(self, test_db):
         service, strategy = self._service(idle=100_000, healthy=False)
 
-        assert await service.deploy_idle(POOL_ID_HEX) == 0
+        assert await service.rebalance(POOL_ID_HEX) == 0
 
         strategy.deposit_to_earn.assert_not_awaited()
 
     async def test_manual_pools_have_nothing_to_deploy_into(self, test_db):
         service, strategy = self._service(idle=100_000, name="manual")
 
-        assert await service.deploy_idle(POOL_ID_HEX) == 0
+        assert await service.rebalance(POOL_ID_HEX) == 0
 
         strategy.deposit_to_earn.assert_not_awaited()
 
@@ -2086,10 +2232,10 @@ class TestScheduling:
         assert row["status"] == "scheduled"
 
     def test_a_withdraw_signed_by_someone_else_is_refused_before_it_queues(self, test_db):
-        """A withdraw reclaims from the strategy before the contract checks
-        consent, so an unverified one is a way to make the pool redeem and roll
-        back on demand. The consent recovers without a chain read, so it is
-        bound here rather than at execution."""
+        """A withdraw the pool account cannot cover makes the rebalancer
+        reclaim for it before the contract checks consent, so an unverified one
+        is a way to make the pool redeem on demand. The consent recovers
+        without a chain read, so it is bound here rather than at execution."""
         from eth_account import Account
 
         service, contract, _, _ = _make_service()
@@ -2128,6 +2274,25 @@ class TestScheduling:
         ).fetchone()
         assert row["input_nonce"] == 7
         assert row["input_signature"] == sig
+
+    def test_a_pool_id_without_its_prefix_is_stored_in_one_spelling(self, test_db):
+        from eth_account import Account
+
+        service, contract, _, _ = _make_service()
+        _schedulable(contract)
+        key = "0x" + "55" * 32
+        user = Account.from_key(key).address
+
+        result = service.schedule_deposit(
+            pool_id_hex=POOL_ID_HEX.removeprefix("0x").upper(), user_address=user,
+            amount="1000", nonce=3, signature=_transfer_sig(key, 1000, 3),
+        )
+
+        row = test_db.execute(
+            "SELECT pool_id FROM earn_transactions WHERE id = ?", (result["id"],)
+        ).fetchone()
+        assert row["pool_id"] == POOL_ID_HEX
+        assert service._pool_lock(POOL_ID_HEX.removeprefix("0x")) is service._pool_lock(POOL_ID_HEX)
 
     @pytest.mark.parametrize(
         "field,value",

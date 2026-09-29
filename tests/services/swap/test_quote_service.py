@@ -10,6 +10,20 @@ from src.core.config import load_settings
 from src.core.fee_policy import parse_fee_policies
 from src.models.common import Balance
 
+
+@pytest.fixture(autouse=True)
+def evm_clients(monkeypatch):
+    """Every chain has an RPC unless a test says otherwise."""
+    missing: set[int] = set()
+
+    def get_evm_client(chain_id):
+        if chain_id in missing:
+            raise ValueError(f"No RPC is configured for chain {chain_id}")
+        return MagicMock()
+
+    monkeypatch.setattr("src.services.swap.quote_service.get_evm_client", get_evm_client)
+    return missing
+
 # Accounting token ids are bytes32; validation rejects anything shorter.
 TOKEN_A = "0x" + "aa" * 32
 TOKEN_B = "0x" + "bb" * 32
@@ -338,6 +352,43 @@ class TestVenueSelection(TestGetQuote):
         assert real_call.kwargs["from_chain_id"] == 84532
         assert real_call.kwargs["from_token_address"] == "0x8eEDCff0b07609Cfb5e2775dFf21EDbACc30D0df"
         assert real_call.kwargs["to_token_address"] == "0xA9B8D8039cb3FF9d9Fff6decD18EA7bb792e51D3"
+
+    async def test_a_chain_without_an_rpc_gets_no_lifi_quote(self, test_db, evm_clients):
+        service = self._make_service()
+        service.settings = replace(service.settings, lifi_execution_enabled=True)
+        service.accounting.get_lp_balance = AsyncMock(return_value=self.LOW_BALANCE)
+        evm_clients.add(84532)
+
+        # Execution would have nothing to sign with on that chain.
+        with pytest.raises(ValueError, match="not available on this chain"):
+            await service.get_quote(
+                from_token_id=TOKEN_A,
+                to_token_id=TOKEN_B,
+                from_amount="1000000",
+                user_address="0x" + "a" * 40,
+            )
+        assert service.lifi.get_routes.call_count == 1
+
+    async def test_a_native_coin_is_priced_as_lifis_zero_address(self, test_db):
+        from src.models.common import TokenInfo
+
+        service = self._make_service()
+        service.settings = replace(service.settings, lifi_execution_enabled=True)
+        service.accounting.get_lp_balance = AsyncMock(return_value=self.LOW_BALANCE)
+        tokens = list(service.accounting.get_token_info.side_effect)
+        tokens[0] = TokenInfo(**{**tokens[0].__dict__, "token_address": ""})
+        service.accounting.get_token_info = AsyncMock(side_effect=tokens)
+
+        result = await service.get_quote(
+            from_token_id=TOKEN_A,
+            to_token_id=TOKEN_B,
+            from_amount="1000000",
+            user_address="0x" + "a" * 40,
+        )
+
+        assert result.venue == "lifi"
+        for call in service.lifi.get_routes.call_args_list:
+            assert call.kwargs["from_token_address"] == "0x0000000000000000000000000000000000000000"
 
     async def test_lp_short_no_lifi_route_raises(self, test_db):
         service = self._make_service()

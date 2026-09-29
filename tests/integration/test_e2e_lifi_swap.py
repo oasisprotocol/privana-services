@@ -97,10 +97,11 @@ def _stub_pipeline(settings, lifi_status="DONE"):
     bridge.await_deposit_credit = AsyncMock(return_value=None)
     evm = MagicMock()
     evm.address = "0x152E6a7125665764a4F1F1df80E8f5D49Bf0239c"
-    evm.erc20_balance = MagicMock(side_effect=[0, 60000, 1000000])
+    evm.balance_of = MagicMock(side_effect=[0, 60000, 1000000])
     evm.ensure_allowance = MagicMock(return_value=None)
     evm.send_transaction_request = MagicMock(return_value="0x" + "cd" * 32)
-    evm.transfer_erc20 = MagicMock(return_value="0x" + "ef" * 32)
+    evm.tx_lock = asyncio.Lock()
+    evm.transfer = MagicMock(return_value="0x" + "ef" * 32)
     privana = MagicMock()
     privana.transfer_funds = AsyncMock(return_value=MagicMock(status="submitted", detail=None))
 

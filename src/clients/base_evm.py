@@ -12,27 +12,49 @@ logger = logging.getLogger(__name__)
 
 ERC20_ABI = load_abi("ERC20")
 TRANSFER_GAS_LIMIT = 100_000
+NATIVE_TRANSFER_GAS_LIMIT = 21_000
 APPROVE_GAS_LIMIT = 80_000
 
-base_tx_lock = asyncio.Lock()
+# LiFi's address for a chain's native coin.
+NATIVE_TOKEN = "0x0000000000000000000000000000000000000000"
 
 
-class BaseEvmClient:
+def is_native(token: Optional[str]) -> bool:
+    """Accounting reports a native coin with no contract address."""
+    return not token or int(token, 16) == 0
+
+
+class EvmClient:
+    """The LP account on one EVM chain. Native coins and ERC-20s go through
+    the same calls, told apart by `is_native`."""
+
     def __init__(self, rpc_url: str, secret_key: str) -> None:
         self.w3 = Web3(Web3.HTTPProvider(rpc_url))
         self._account = Account.from_key(secret_key)
         self.address = self._account.address
+        # Nonces are per chain, so each chain orders its own sends.
+        self.tx_lock = asyncio.Lock()
 
-    def erc20_balance(self, token: str, owner: str) -> int:
+    def balance_of(self, token: Optional[str], owner: str) -> int:
+        owner = Web3.to_checksum_address(owner)
+        if is_native(token):
+            return self.w3.eth.get_balance(owner)
         contract = self.w3.eth.contract(address=Web3.to_checksum_address(token), abi=ERC20_ABI)
-        return contract.functions.balanceOf(Web3.to_checksum_address(owner)).call()
+        return contract.functions.balanceOf(owner).call()
 
-    def transfer_erc20(self, token: str, to: str, amount: int) -> str:
+    def transfer(self, token: Optional[str], to: str, amount: int) -> str:
+        if is_native(token):
+            tx = self._tx_params(gas=NATIVE_TRANSFER_GAS_LIMIT)
+            tx.update(to=Web3.to_checksum_address(to), value=amount)
+            return self._send(tx)
         contract = self.w3.eth.contract(address=Web3.to_checksum_address(token), abi=ERC20_ABI)
         fn = contract.functions.transfer(Web3.to_checksum_address(to), amount)
         return self._send(fn.build_transaction(self._tx_params(gas=TRANSFER_GAS_LIMIT)))
 
-    def ensure_allowance(self, token: str, spender: str, amount: int) -> Optional[str]:
+    def ensure_allowance(self, token: Optional[str], spender: str, amount: int) -> Optional[str]:
+        # A native coin travels as the transaction's value; nothing to approve.
+        if is_native(token):
+            return None
         contract = self.w3.eth.contract(address=Web3.to_checksum_address(token), abi=ERC20_ABI)
         current = contract.functions.allowance(
             self.address, Web3.to_checksum_address(spender)
@@ -43,6 +65,14 @@ class BaseEvmClient:
         return self._send(fn.build_transaction(self._tx_params(gas=APPROVE_GAS_LIMIT)))
 
     def send_transaction_request(self, tx_request: dict) -> str:
+        chain_id = self.w3.eth.chain_id
+        # LiFi builds the calldata for one chain. Signing it for another would
+        # send it to the same address there, with the same value attached.
+        requested = tx_request.get("chainId")
+        if requested is not None and int(requested) != chain_id:
+            raise ValueError(
+                f"transaction built for chain {requested} cannot be sent on chain {chain_id}"
+            )
         tx = {
             "from": self.address,
             "to": Web3.to_checksum_address(tx_request["to"]),
@@ -55,9 +85,13 @@ class BaseEvmClient:
                 else self.w3.eth.gas_price
             ),
             "nonce": self.w3.eth.get_transaction_count(self.address, "pending"),
-            "chainId": self.w3.eth.chain_id,
+            "chainId": chain_id,
         }
         return self._send(tx)
+
+    def gas_cost(self, tx_hash: str) -> int:
+        receipt = self.w3.eth.get_transaction_receipt(tx_hash)
+        return receipt["gasUsed"] * receipt["effectiveGasPrice"]
 
     def _tx_params(self, gas: int) -> dict:
         return {
@@ -78,14 +112,27 @@ class BaseEvmClient:
         return tx_hex
 
 
-_client_instance: Optional[BaseEvmClient] = None
+_clients: dict[str, EvmClient] = {}
+_chain_ids: dict[str, int] = {}
 
 
-def get_base_evm_client() -> BaseEvmClient:
-    global _client_instance
-    if _client_instance is None:
-        settings = load_settings()
-        _client_instance = BaseEvmClient(
-            settings.base_rpc_url, settings.liquidity_provider_secret_key
-        )
-    return _client_instance
+def get_evm_client(chain_id: int) -> EvmClient:
+    """The LP client for `chain_id`, picked by asking each configured RPC
+    which chain it serves, so a testnet RPC answers for its testnet chain and
+    a misconfigured URL can never sign for the wrong one."""
+    settings = load_settings()
+    for rpc_url in (settings.base_rpc_url, settings.ethereum_rpc_url, settings.hyperevm_rpc_url):
+        if not rpc_url:
+            continue
+        if rpc_url not in _clients:
+            _clients[rpc_url] = EvmClient(rpc_url, settings.liquidity_provider_secret_key)
+        if rpc_url not in _chain_ids:
+            try:
+                _chain_ids[rpc_url] = _clients[rpc_url].w3.eth.chain_id
+            except Exception as exc:
+                # Type only: the error text can carry the RPC URL and its key.
+                logger.warning("EVM RPC unreachable while resolving its chain id: %s", type(exc).__name__)
+                continue
+        if _chain_ids[rpc_url] == chain_id:
+            return _clients[rpc_url]
+    raise ValueError(f"No RPC is configured for chain {chain_id}")

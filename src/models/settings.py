@@ -51,6 +51,8 @@ class Settings:
     coingecko_token_ids: str
 
     lifi_execution_enabled: bool = False
+    # HyperEVM (chain 999), used to execute external swaps of its tokens.
+    hyperevm_rpc_url: str = ""
     lifi_max_swap_amount_usd: int = 0
 
     pool_admin_secret_key: str = ""

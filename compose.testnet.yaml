@@ -14,6 +14,7 @@ services:
       - SAPPHIRE_RPC_HEADERS
       - BASE_RPC_URL
       - LIFI_API_KEY
+      - COINGECKO_API_KEY
     volumes:
       - /run/rofl-appd.sock:/run/rofl-appd.sock
       - data:/app/data

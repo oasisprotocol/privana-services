@@ -1520,7 +1520,7 @@ class TestDeployIdle:
     async def test_routes_the_whole_idle_balance(self, test_db):
         service, strategy = self._service(idle=100_000)
 
-        assert await service.rebalance(POOL_ID_HEX) == 100_000
+        assert await service.deploy_reclaim(POOL_ID_HEX) == 100_000
 
         strategy.deposit_to_earn.assert_awaited_once_with(100_000)
 
@@ -1540,7 +1540,7 @@ class TestDeployIdle:
         )
         # A receipt nobody has read may still move the balance; a withdrawal
         # still in the queue only keeps its own amount back.
-        assert await service.rebalance(POOL_ID_HEX) == moved
+        assert await service.deploy_reclaim(POOL_ID_HEX) == moved
         assert strategy.deposit_to_earn.await_count == (1 if moved else 0)
 
     async def test_a_reverted_withdraw_found_by_recovery_is_redeployed(self, test_db):
@@ -1574,7 +1574,7 @@ class TestDeployIdle:
         assert self._status(test_db, "w1") == "failed"
         strategy.deposit_to_earn.assert_not_awaited()
 
-        assert await service.rebalance(POOL_ID_HEX) == 100_000
+        assert await service.deploy_reclaim(POOL_ID_HEX) == 100_000
         strategy.deposit_to_earn.assert_awaited_once_with(100_000)
         service.sync_total_assets.assert_awaited()
 
@@ -1609,7 +1609,7 @@ class TestDeployIdle:
              "0xuser", 2, "0xsig", 2, "0xsig", "undeployed", 0, 0),
         )
 
-        await service.rebalance(POOL_ID_HEX)
+        await service.deploy_reclaim(POOL_ID_HEX)
 
         rows = get_db().execute(
             "SELECT id, status, error FROM earn_transactions ORDER BY id"
@@ -1623,14 +1623,14 @@ class TestDeployIdle:
         service, strategy = self._service(idle=0)
         strategy.stranded_assets = AsyncMock(side_effect=[5_000_000, 0])
 
-        assert await service.rebalance(POOL_ID_HEX) == 5_000_000
+        assert await service.deploy_reclaim(POOL_ID_HEX) == 5_000_000
         strategy.deposit_to_earn.assert_awaited_once_with(5_000_000)
 
     async def test_deploys_idle_and_stranded_funds_together_against_the_minimum(self, test_db):
         service, strategy = self._service(idle=600_000, minimum=1_000_000)
         strategy.stranded_assets = AsyncMock(side_effect=[600_000, 0])
 
-        assert await service.rebalance(POOL_ID_HEX) == 1_200_000
+        assert await service.deploy_reclaim(POOL_ID_HEX) == 1_200_000
         strategy.deposit_to_earn.assert_awaited_once_with(1_200_000)
 
     async def test_leaves_undeployed_rows_open_while_a_bridge_is_in_flight(self, test_db):
@@ -1648,7 +1648,7 @@ class TestDeployIdle:
              "0xuser", 1, "0xsig", 1, "0xsig", "undeployed", 0, 0),
         )
 
-        await service.rebalance(POOL_ID_HEX)
+        await service.deploy_reclaim(POOL_ID_HEX)
 
         row = get_db().execute("SELECT status FROM earn_transactions WHERE id = 'stuck'").fetchone()
         assert row[0] == "undeployed"
@@ -1657,7 +1657,7 @@ class TestDeployIdle:
         service, strategy = self._service(idle=600_000)
         strategy.in_flight_assets = AsyncMock(return_value=400_000)
 
-        assert await service.rebalance(POOL_ID_HEX) == 0
+        assert await service.deploy_reclaim(POOL_ID_HEX) == 0
         strategy.deposit_to_earn.assert_not_awaited()
 
     async def test_reconciles_undeployed_rows_when_nothing_is_waiting(self, test_db):
@@ -1674,7 +1674,7 @@ class TestDeployIdle:
              "0xuser", 1, "0xsig", 1, "0xsig", "undeployed", 0, 0),
         )
 
-        assert await service.rebalance(POOL_ID_HEX) == 0
+        assert await service.deploy_reclaim(POOL_ID_HEX) == 0
 
         row = get_db().execute("SELECT status FROM earn_transactions WHERE id = 'stuck'").fetchone()
         assert row[0] == "completed"
@@ -1688,7 +1688,7 @@ class TestDeployIdle:
             )
         )
 
-        assert await service.rebalance(POOL_ID_HEX) == 80_000
+        assert await service.deploy_reclaim(POOL_ID_HEX) == 80_000
 
         # Deposits and payouts carry on during the bridge, but cannot touch
         # the 80_000 it was promised.
@@ -1702,7 +1702,7 @@ class TestDeployIdle:
         service.sync_total_assets = AsyncMock(return_value=1000)
 
         with pytest.raises(RuntimeError):
-            await service.rebalance(POOL_ID_HEX)
+            await service.deploy_reclaim(POOL_ID_HEX)
 
         # Accounting may have debited a bridge that has not landed: a sync now
         # would write that dip into the share price.
@@ -1710,12 +1710,12 @@ class TestDeployIdle:
         assert service.sync_total_assets.await_count == 1
 
         strategy.in_flight_assets = AsyncMock(return_value=100_000)
-        assert await service.rebalance(POOL_ID_HEX) == 0
+        assert await service.deploy_reclaim(POOL_ID_HEX) == 0
         assert service._held == {POOL_ID_HEX: 100_000}
 
         strategy.in_flight_assets = AsyncMock(return_value=0)
         strategy.idle_assets = AsyncMock(return_value=0)
-        await service.rebalance(POOL_ID_HEX)
+        await service.deploy_reclaim(POOL_ID_HEX)
         assert service._held == {}
         assert service.sync_total_assets.await_count == 2
 
@@ -1725,7 +1725,7 @@ class TestDeployIdle:
         service.sync_total_assets = AsyncMock(side_effect=lambda _p: order.append("sync") or 1000)
         strategy.deposit_to_earn = AsyncMock(side_effect=lambda _a: order.append("bridge"))
 
-        await service.rebalance(POOL_ID_HEX)
+        await service.deploy_reclaim(POOL_ID_HEX)
 
         assert order == ["sync", "bridge", "sync"]
 
@@ -1733,7 +1733,7 @@ class TestDeployIdle:
         service, strategy = self._service(idle=100_000)
         service.sync_total_assets = AsyncMock(return_value=None)
 
-        assert await service.rebalance(POOL_ID_HEX) == 0
+        assert await service.deploy_reclaim(POOL_ID_HEX) == 0
         strategy.deposit_to_earn.assert_not_awaited()
         assert service._held == {}
 
@@ -1754,7 +1754,7 @@ class TestDeployIdle:
 
         strategy.deposit_to_earn = AsyncMock(side_effect=bridge)
 
-        await service.rebalance(POOL_ID_HEX)
+        await service.deploy_reclaim(POOL_ID_HEX)
 
         # Syncing now would land after that deposit and erase it from totalAssets.
         assert service.sync_total_assets.await_count == 1
@@ -1762,14 +1762,14 @@ class TestDeployIdle:
     async def test_keeps_the_buffer_floor_on_the_pool_account(self, test_db):
         service, strategy = self._service(idle=80_000_000, buffer_min=30_000_000)
 
-        assert await service.rebalance(POOL_ID_HEX) == 50_000_000
+        assert await service.deploy_reclaim(POOL_ID_HEX) == 50_000_000
         strategy.deposit_to_earn.assert_awaited_once_with(50_000_000)
 
     async def test_buffer_grows_with_the_pool(self, test_db):
         service, strategy = self._service(idle=100_000, buffer_min=1, buffer_bps=5_000)
 
         # Half of the 1000 deployed plus 100_000 idle stays behind.
-        assert await service.rebalance(POOL_ID_HEX) == 49_500
+        assert await service.deploy_reclaim(POOL_ID_HEX) == 49_500
         strategy.deposit_to_earn.assert_awaited_once_with(49_500)
 
     async def test_a_half_full_buffer_is_left_alone(self, test_db):
@@ -1787,7 +1787,7 @@ class TestDeployIdle:
              "0xuser", 1, "0xsig", 1, "0xsig", "undeployed", 0, 0),
         )
 
-        assert await service.rebalance(POOL_ID_HEX) == 0
+        assert await service.deploy_reclaim(POOL_ID_HEX) == 0
         strategy.deposit_to_earn.assert_not_awaited()
         strategy.withdraw_from_earn.assert_not_awaited()
         # Money held as the buffer is where it is meant to be.
@@ -1820,7 +1820,7 @@ class TestDeployIdle:
 
         strategy.withdraw_from_earn = AsyncMock(side_effect=reclaim)
 
-        assert await service.rebalance(POOL_ID_HEX) == -550
+        assert await service.deploy_reclaim(POOL_ID_HEX) == -550
 
         strategy.withdraw_from_earn.assert_awaited_once_with(550)
         strategy.withdraw_ready.assert_awaited_once_with(550)
@@ -1836,7 +1836,7 @@ class TestDeployIdle:
         strategy.total_assets = AsyncMock(return_value=100_000_000)
         strategy.withdraw_from_earn = AsyncMock()
 
-        assert await service.rebalance(POOL_ID_HEX) == -(50_000_000 - 10)
+        assert await service.deploy_reclaim(POOL_ID_HEX) == -(50_000_000 - 10)
         strategy.deposit_to_earn.assert_not_awaited()
 
     async def test_a_reclaim_never_asks_for_more_than_is_deployed(self, test_db):
@@ -1845,7 +1845,7 @@ class TestDeployIdle:
         strategy.withdraw_from_earn = AsyncMock()
         self._waiting(1_000, "w1")
 
-        assert await service.rebalance(POOL_ID_HEX) == -250
+        assert await service.deploy_reclaim(POOL_ID_HEX) == -250
         strategy.withdraw_from_earn.assert_awaited_once_with(250)
 
     async def test_waits_while_the_strategy_cannot_pay_out(self, test_db):
@@ -1854,7 +1854,7 @@ class TestDeployIdle:
         strategy.withdraw_from_earn = AsyncMock()
         self._waiting(300, "w1")
 
-        assert await service.rebalance(POOL_ID_HEX) == 0
+        assert await service.deploy_reclaim(POOL_ID_HEX) == 0
         strategy.withdraw_from_earn.assert_not_awaited()
 
     @pytest.mark.parametrize("error", ["liquidity", "crash"])
@@ -1866,7 +1866,7 @@ class TestDeployIdle:
         )
         self._waiting(300, "w1")
 
-        assert await service.rebalance(POOL_ID_HEX) == 0
+        assert await service.deploy_reclaim(POOL_ID_HEX) == 0
 
         assert service.reclaiming_pools() == frozenset()
         assert not service._pool_lock(POOL_ID_HEX).locked()
@@ -1876,7 +1876,7 @@ class TestDeployIdle:
         service, strategy = self._service(idle=1_000, buffer_min=100)
         self._waiting(400, "w1")
 
-        assert await service.rebalance(POOL_ID_HEX) == 500
+        assert await service.deploy_reclaim(POOL_ID_HEX) == 500
         strategy.deposit_to_earn.assert_awaited_once_with(500)
 
     async def test_queued_withdrawals_are_kept_back_from_a_deploy_too(self, test_db):
@@ -1888,7 +1888,7 @@ class TestDeployIdle:
             db_write(get_db(), "UPDATE earn_transactions SET status = ? WHERE id = ?", (status, tx_id))
 
         # A withdrawal released back to the queue still needs its money.
-        assert await service.rebalance(POOL_ID_HEX) == 400
+        assert await service.deploy_reclaim(POOL_ID_HEX) == 400
         strategy.deposit_to_earn.assert_awaited_once_with(400)
 
     async def test_a_paused_pool_still_reclaims_for_its_exits(self, test_db):
@@ -1896,12 +1896,12 @@ class TestDeployIdle:
         strategy.withdraw_from_earn = AsyncMock()
         self._waiting(300, "w1")
 
-        assert await service.rebalance(POOL_ID_HEX, allow_deploy=False) == -300
+        assert await service.deploy_reclaim(POOL_ID_HEX, allow_deploy=False) == -300
 
     async def test_a_paused_pool_takes_nothing_new(self, test_db):
         service, strategy = self._service(idle=100_000)
 
-        assert await service.rebalance(POOL_ID_HEX, allow_deploy=False) == 0
+        assert await service.deploy_reclaim(POOL_ID_HEX, allow_deploy=False) == 0
         strategy.deposit_to_earn.assert_not_awaited()
 
     async def test_a_deposit_landing_mid_bridge_stays_undeployed(self, test_db):
@@ -1920,7 +1920,7 @@ class TestDeployIdle:
 
         strategy.deposit_to_earn = AsyncMock(side_effect=bridge)
 
-        await service.rebalance(POOL_ID_HEX)
+        await service.deploy_reclaim(POOL_ID_HEX)
 
         assert self._status(test_db, "before") == "completed"
         assert self._status(test_db, "during") == "undeployed"
@@ -1928,28 +1928,28 @@ class TestDeployIdle:
     async def test_does_nothing_when_there_is_nothing_idle(self, test_db):
         service, strategy = self._service(idle=0)
 
-        assert await service.rebalance(POOL_ID_HEX) == 0
+        assert await service.deploy_reclaim(POOL_ID_HEX) == 0
 
         strategy.deposit_to_earn.assert_not_awaited()
 
     async def test_leaves_amounts_below_the_protocol_minimum(self, test_db):
         service, strategy = self._service(idle=500_000, minimum=1_000_000)
 
-        assert await service.rebalance(POOL_ID_HEX) == 0
+        assert await service.deploy_reclaim(POOL_ID_HEX) == 0
 
         strategy.deposit_to_earn.assert_not_awaited()
 
     async def test_leaves_the_funds_when_the_strategy_is_unhealthy(self, test_db):
         service, strategy = self._service(idle=100_000, healthy=False)
 
-        assert await service.rebalance(POOL_ID_HEX) == 0
+        assert await service.deploy_reclaim(POOL_ID_HEX) == 0
 
         strategy.deposit_to_earn.assert_not_awaited()
 
     async def test_manual_pools_have_nothing_to_deploy_into(self, test_db):
         service, strategy = self._service(idle=100_000, name="manual")
 
-        assert await service.rebalance(POOL_ID_HEX) == 0
+        assert await service.deploy_reclaim(POOL_ID_HEX) == 0
 
         strategy.deposit_to_earn.assert_not_awaited()
 
@@ -2232,7 +2232,7 @@ class TestScheduling:
         assert row["status"] == "scheduled"
 
     def test_a_withdraw_signed_by_someone_else_is_refused_before_it_queues(self, test_db):
-        """A withdraw the pool account cannot cover makes the rebalancer
+        """A withdraw the pool account cannot cover makes the idle deployer
         reclaim for it before the contract checks consent, so an unverified one
         is a way to make the pool redeem on demand. The consent recovers
         without a chain read, so it is bound here rather than at execution."""

@@ -106,10 +106,10 @@ class VaultService:
         self.sapphire = get_pool_admin_sapphire_client()
         self.accounting = get_accounting_client()
         self._pool_locks: dict[str, asyncio.Lock] = {}
-        # Pool balance promised to a bridge the rebalancer has started but not
+        # Pool balance promised to a bridge the idle deployer has started but not
         # finished. Withdrawals cannot pay out of it.
         self._held: dict[str, int] = {}
-        # Pools whose rebalancer holds the lock through a reclaim. The worker
+        # Pools whose idle deployer holds the lock through a reclaim. The worker
         # leaves their requests queued instead of waiting on the lock.
         self._reclaiming: set[str] = set()
         self._registry = registry if registry is not None else get_strategy_registry()
@@ -137,7 +137,7 @@ class VaultService:
         return self._pool_locks.setdefault(pool_key(pool_id_hex), asyncio.Lock())
 
     def _moving(self, pool_id_hex: str) -> bool:
-        """Whether the rebalancer has pool funds between the pool account and
+        """Whether the idle deployer has pool funds between the pool account and
         the strategy. Neither side can see money in a bridge, so a valuation
         read now would come out short."""
         key = pool_key(pool_id_hex)
@@ -595,7 +595,7 @@ class VaultService:
         self._assert_pool_custody(pool)
 
         if operation == EARN_OP_WITHDRAW:
-            # A withdraw the pool account cannot cover makes the rebalancer
+            # A withdraw the pool account cannot cover makes the idle deployer
             # reclaim for it before the contract ever checks consent, so an
             # unverified one is a way to make the pool redeem on demand.
             recovered = recover_withdraw_signer(
@@ -713,7 +713,7 @@ class VaultService:
             # stale or manipulated value. Withdraw, which burns rather than
             # mints, stays best-effort.
             #
-            # While the rebalancer has funds in a bridge the reading would come
+            # While the idle deployer has funds in a bridge the reading would come
             # out short, so the deposit mints against the contract's own
             # figure instead: synced before the bridge started, and moved by
             # every deposit and withdrawal since.
@@ -869,7 +869,7 @@ class VaultService:
                 )
             # Paid from the pool account only. When it is short the request
             # waits, with its signature and the user's shares untouched, and
-            # the rebalancer reclaims for everything waiting in one move.
+            # the idle deployer reclaims for everything waiting in one move.
             if not await self.withdrawal_payable(pool_id_hex, int(amount)):
                 if await asyncio.to_thread(self.withdrawal_impossible, pool_id_hex, int(amount)):
                     raise ValueError("Withdrawal is larger than the whole pool")
@@ -993,7 +993,7 @@ class VaultService:
                 "error": None,
             }
 
-    async def rebalance(self, pool_id_hex: str, allow_deploy: bool = True) -> int:
+    async def deploy_reclaim(self, pool_id_hex: str, allow_deploy: bool = True) -> int:
         """Net the pool account against its buffer and the withdrawals waiting
         on it, and settle the difference with the strategy in one move.
         Returns the amount deployed, or minus the amount reclaimed.
@@ -1022,7 +1022,7 @@ class VaultService:
 
         async with self._pool_lock(pool_id_hex):
             if self._unresolved(pool_id_hex):
-                logger.info("Rebalance pool=%s: an earn operation is unresolved; waiting", pool_id_hex)
+                logger.info("Deploy/reclaim pool=%s: an earn operation is unresolved; waiting", pool_id_hex)
                 return 0
             # A bridge still listed as pending may or may not have landed, so
             # the balances below cannot be trusted until it clears. The next
@@ -1053,24 +1053,24 @@ class VaultService:
                     return 0
                 if not await strategy.withdraw_ready(amount):
                     logger.info(
-                        "Rebalance pool=%s: %s cannot pay out %d yet; %d waiting",
+                        "Deploy/reclaim pool=%s: %s cannot pay out %d yet; %d waiting",
                         pool_id_hex, strategy.name, amount, waiting,
                     )
                     return 0
                 logger.info(
-                    "Rebalance pool=%s: reclaiming %d from %s (%d waiting, buffer %d)",
+                    "Deploy/reclaim pool=%s: reclaiming %d from %s (%d waiting, buffer %d)",
                     pool_id_hex, amount, strategy.name, waiting, buffer,
                 )
                 self._reclaiming.add(key)
                 try:
                     await self._reclaim_from_strategy(pool_id_hex, amount)
                 except LiquidityUnavailable:
-                    logger.info("Rebalance pool=%s: reclaim refused for liquidity", pool_id_hex)
+                    logger.info("Deploy/reclaim pool=%s: reclaim refused for liquidity", pool_id_hex)
                     return 0
                 except Exception:
                     # Whatever was redeemed but not credited sits raw on the
                     # earn account, which the next round spends first.
-                    logger.exception("Rebalance pool=%s: reclaim failed", pool_id_hex)
+                    logger.exception("Deploy/reclaim pool=%s: reclaim failed", pool_id_hex)
                     return 0
                 finally:
                     self._reclaiming.discard(key)
@@ -1089,7 +1089,7 @@ class VaultService:
                 return 0
             if not await strategy.is_healthy():
                 logger.info(
-                    "Rebalance pool=%s: %d to deploy but the strategy is unhealthy; leaving it",
+                    "Deploy/reclaim pool=%s: %d to deploy but the strategy is unhealthy; leaving it",
                     pool_id_hex, amount,
                 )
                 return 0
@@ -1098,7 +1098,7 @@ class VaultService:
             # nothing is in flight. Yield accrued since the last sync would
             # otherwise go to whoever deposits mid-bridge.
             if await self.sync_total_assets(pool_id_hex) is None:
-                logger.info("Rebalance pool=%s: valuation unconfirmed; not deploying", pool_id_hex)
+                logger.info("Deploy/reclaim pool=%s: valuation unconfirmed; not deploying", pool_id_hex)
                 return 0
             settled = [
                 row["id"] for row in get_db().execute(
@@ -1109,7 +1109,7 @@ class VaultService:
             ]
             self._held[key] = spare
 
-        logger.info("Rebalance pool=%s: deploying %d into %s", pool_id_hex, amount, strategy.name)
+        logger.info("Deploy/reclaim pool=%s: deploying %d into %s", pool_id_hex, amount, strategy.name)
         # A deploy that raises keeps its hold, and skips the sync, until a
         # later round finds nothing in flight: the bridge may still land.
         await self._route_to_strategy(pool_id_hex, amount)

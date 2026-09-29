@@ -11,7 +11,7 @@ def _deployer(pools, deploy=None):
 
     service = MagicMock()
     service.list_pools = MagicMock(return_value=pools)
-    service.rebalance = deploy or AsyncMock(return_value=0)
+    service.deploy_reclaim = deploy or AsyncMock(return_value=0)
     return IdleDeployer(service=service), service
 
 
@@ -27,7 +27,7 @@ async def test_deploys_every_active_pool():
 
     assert await deployer.deploy_once() == 350
 
-    assert [c.args[0] for c in service.rebalance.await_args_list] == [POOL_A, POOL_B]
+    assert [c.args[0] for c in service.deploy_reclaim.await_args_list] == [POOL_A, POOL_B]
 
 
 @pytest.mark.asyncio
@@ -37,7 +37,7 @@ async def test_paused_pools_only_reclaim():
     await deployer.deploy_once()
 
     # A paused pool gets nothing new, but its waiting exits are still paid for.
-    assert [(c.args[0], c.kwargs["allow_deploy"]) for c in service.rebalance.await_args_list] == [
+    assert [(c.args[0], c.kwargs["allow_deploy"]) for c in service.deploy_reclaim.await_args_list] == [
         (POOL_A, False), (POOL_B, True),
     ]
 

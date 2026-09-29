@@ -1,4 +1,4 @@
-"""End to end: the worker and the rebalancer running side by side against
+"""End to end: the worker and the idle deployer running side by side against
 fake pools, the way they run in production."""
 import asyncio
 import random
@@ -121,7 +121,7 @@ def _unsettled():
 
 
 async def _run(service):
-    """The worker and the rebalancer, concurrently, until the queue drains.
+    """The worker and the idle deployer, concurrently, until the queue drains.
     The worker gets through many requests per round, as it does against a
     five minute interval in production."""
     worker = EarnWorker()
@@ -134,7 +134,7 @@ async def _run(service):
             await worker.run_once()
             await asyncio.sleep(0.001)
 
-    async def run_rebalancer():
+    async def run_deployer():
         while _unsettled():
             await deployer.deploy_once()
             await asyncio.sleep(0.1)
@@ -145,7 +145,7 @@ async def _run(service):
                return_value={"shares_delta": None, "exchange_rate": None}), \
          patch("src.services.earn.worker.LIQUIDITY_RECHECK_SEC", 0), \
          patch("src.services.earn.vault_service.sign_transfer", return_value="0x" + "bb" * 65):
-        await asyncio.wait_for(asyncio.gather(run_worker(), run_rebalancer()), timeout=30)
+        await asyncio.wait_for(asyncio.gather(run_worker(), run_deployer()), timeout=30)
 
 
 def _statuses():

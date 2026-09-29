@@ -41,11 +41,11 @@ class IdleDeployer:
             # strategy. Exits stay open, so its waiting withdrawals are still
             # reclaimed for.
             try:
-                moved += await service.rebalance(pool["pool_id"], allow_deploy=bool(pool.get("active")))
+                moved += await service.deploy_reclaim(pool["pool_id"], allow_deploy=bool(pool.get("active")))
             except Exception:
                 # One pool's bridge being down says nothing about the others,
                 # and the funds stay where they are until the next round.
-                logger.exception("Rebalance failed pool=%s", pool["pool_id"])
+                logger.exception("Deploy/reclaim failed pool=%s", pool["pool_id"])
         return moved
 
     async def start(self) -> None:

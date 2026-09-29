@@ -263,7 +263,7 @@ class EarnWorker:
     async def _release_awaiting_liquidity(self) -> None:
         """Put held withdrawals back in the queue once the pool account can
         pay them. They go back as scheduled, oldest first. One that does not
-        fit is skipped rather than blocking the rest: the rebalancer sizes its
+        fit is skipped rather than blocking the rest: the idle deployer sizes its
         reclaim for everything waiting, so it is covered by the next one. One
         larger than the whole pool goes back too, so the attempt can fail it
         instead of it waiting forever."""

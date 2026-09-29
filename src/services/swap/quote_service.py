@@ -118,6 +118,11 @@ class QuoteService:
         lp_balance = await self.accounting.get_lp_balance(to_token_id)
         venue = SwapVenue.INTERNAL.value
         if int(lp_balance.balance) < to_amount_after_fee:
+            # The LiFi pipeline withdraws, approves and returns tokens as
+            # ERC-20s. A native coin has no contract to call, so the swap would
+            # fail after the user's funds had already left, refund included.
+            if _is_native(from_info.token_address) or _is_native(to_info.token_address):
+                raise ValueError("Native coins cannot be swapped through an external route yet")
             venue = await self._select_lifi_venue_or_raise(
                 from_chain_id, to_chain_id, from_on_chain, to_on_chain, from_amount
             )
@@ -292,6 +297,10 @@ class QuoteService:
         if row is None:
             return None
         return dict(row)
+
+def _is_native(token_address: Optional[str]) -> bool:
+    return not token_address or int(token_address, 16) == 0
+
 
 _service_instance: Optional[QuoteService] = None
 

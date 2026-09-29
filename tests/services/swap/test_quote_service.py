@@ -317,6 +317,47 @@ class TestVenueSelection(TestGetQuote):
         assert real_call.kwargs["from_token_address"] == "0x8eEDCff0b07609Cfb5e2775dFf21EDbACc30D0df"
         assert real_call.kwargs["to_token_address"] == "0xA9B8D8039cb3FF9d9Fff6decD18EA7bb792e51D3"
 
+    def _native(self, service, side, address):
+        from src.models.common import TokenInfo
+
+        tokens = list(service.accounting.get_token_info.side_effect)
+        index = 0 if side == "from" else 1
+        tokens[index] = TokenInfo(**{**tokens[index].__dict__, "token_address": address})
+        service.accounting.get_token_info = AsyncMock(side_effect=tokens)
+
+    @pytest.mark.parametrize("side", ["from", "to"])
+    @pytest.mark.parametrize("address", ["", None, "0x0000000000000000000000000000000000000000"])
+    async def test_a_native_coin_is_refused_on_the_lifi_venue(self, test_db, side, address):
+        service = self._make_service()
+        service.settings = replace(service.settings, lifi_execution_enabled=True)
+        service.accounting.get_lp_balance = AsyncMock(return_value=self.LOW_BALANCE)
+        self._native(service, side, address)
+
+        # Execution moves tokens as ERC-20s, so a quote it cannot carry out
+        # must not be handed out: the swap would fail after taking the funds.
+        with pytest.raises(ValueError, match="Native coins"):
+            await service.get_quote(
+                from_token_id=TOKEN_A,
+                to_token_id=TOKEN_B,
+                from_amount="1000000",
+                user_address="0x" + "a" * 40,
+            )
+        assert test_db.execute("SELECT COUNT(*) AS cnt FROM quotes").fetchone()["cnt"] == 0
+
+    async def test_a_native_coin_still_swaps_internally(self, test_db):
+        service = self._make_service()
+        service.settings = replace(service.settings, lifi_execution_enabled=True)
+        self._native(service, "from", "")
+
+        result = await service.get_quote(
+            from_token_id=TOKEN_A,
+            to_token_id=TOKEN_B,
+            from_amount="1000000",
+            user_address="0x" + "a" * 40,
+        )
+
+        assert result.venue == "internal"
+
     async def test_lp_short_no_lifi_route_raises(self, test_db):
         service = self._make_service()
         service.settings = replace(service.settings, lifi_execution_enabled=True)

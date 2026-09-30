@@ -34,7 +34,7 @@ from src.services.earn.earned import (
 )
 from src.services.earn.registry import StrategyRegistry, get_strategy_registry
 from src.services.earn.strategies.base import ApyPoint, LiquidityUnavailable
-from src.services.user_queue import assert_nonce_free
+from src.services.user_queue import assert_nonce_free, assert_nonce_unspent
 
 logger = logging.getLogger(__name__)
 
@@ -620,6 +620,7 @@ class VaultService:
             raise ValueError(f"{operation} was not signed by user_address")
         if operation == EARN_OP_DEPOSIT:
             assert_nonce_free(user_address, nonce)
+            assert_nonce_unspent(self.accounting, user_address, nonce)
 
         tx_id = str(uuid.uuid4())
         now = int(time.time())

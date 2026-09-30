@@ -53,6 +53,7 @@ def _make_service(registry=None):
 
         acct = MagicMock()
         acct.get_transfer_nonce = AsyncMock(return_value=7)
+        acct.transfer_nonce = MagicMock(return_value=0)
         mock_acct.return_value = acct
 
         # Default the on-chain withdraw nonce to 0 so withdraw tests can pass
@@ -2404,6 +2405,77 @@ class TestScheduling:
         )
 
         assert result["status"] == "scheduled"
+
+    def test_a_deposit_on_a_spent_nonce_is_refused_before_it_queues(self, test_db):
+        from eth_account import Account
+
+        from src.services.user_queue import StaleNonceError
+
+        service, contract, _, _ = _make_service()
+        _schedulable(contract)
+        service.accounting.transfer_nonce = MagicMock(return_value=4)
+        key = "0x" + "12" * 32
+        user = Account.from_key(key).address
+
+        with pytest.raises(StaleNonceError) as exc:
+            service.schedule_deposit(
+                pool_id_hex=POOL_ID_HEX, user_address=user,
+                amount="1000", nonce=3, signature=_transfer_sig(key, 1000, 3),
+            )
+
+        # It would only revert with InvalidNonce after showing up as pending.
+        assert exc.value.payload()["code"] == "stale_nonce"
+        assert exc.value.payload()["current_nonce"] == 4
+        assert test_db.execute("SELECT COUNT(*) c FROM earn_transactions").fetchone()["c"] == 0
+
+    def test_the_current_or_a_later_nonce_still_queues(self, test_db):
+        from eth_account import Account
+
+        service, contract, _, _ = _make_service()
+        _schedulable(contract)
+        service.accounting.transfer_nonce = MagicMock(return_value=4)
+        key = "0x" + "13" * 32
+        user = Account.from_key(key).address
+
+        # The next one may be signed while the current one is still queued.
+        for nonce in (4, 5):
+            result = service.schedule_deposit(
+                pool_id_hex=POOL_ID_HEX, user_address=user,
+                amount="1000", nonce=nonce, signature=_transfer_sig(key, 1000, nonce),
+            )
+            assert result["status"] == "scheduled"
+
+    def test_a_retry_of_a_queued_deposit_returns_it_once_its_nonce_is_spent(self, test_db):
+        from eth_account import Account
+
+        service, contract, _, _ = _make_service()
+        _schedulable(contract)
+        key = "0x" + "14" * 32
+        kwargs = dict(
+            pool_id_hex=POOL_ID_HEX, user_address=Account.from_key(key).address,
+            amount="1000", nonce=0, signature=_transfer_sig(key, 1000, 0),
+        )
+        first = service.schedule_deposit(**kwargs)
+        service.accounting.transfer_nonce = MagicMock(return_value=1)
+
+        assert service.schedule_deposit(**kwargs)["id"] == first["id"]
+
+    def test_a_withdraw_does_not_read_the_transfer_nonce(self, test_db):
+        from eth_account import Account
+
+        service, contract, _, _ = _make_service()
+        _schedulable(contract)
+        service.accounting.transfer_nonce = MagicMock(return_value=99)
+        key = "0x" + "15" * 32
+
+        result = service.schedule_withdraw(
+            pool_id_hex=POOL_ID_HEX, user_address=Account.from_key(key).address,
+            amount="500", nonce=1, signature=self._consent(key, 500, 1),
+        )
+
+        # A withdraw is signed against EarnManager's own nonce, not this one.
+        assert result["status"] == "scheduled"
+        service.accounting.transfer_nonce.assert_not_called()
 
     def test_a_withdraw_consent_nonce_never_blocks_a_deposit(self, test_db):
         from eth_account import Account

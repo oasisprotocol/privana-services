@@ -302,6 +302,26 @@ class TestDepositRoute:
             assert "5 earn requests" in r.json()["detail"]
 
 
+    async def test_a_spent_nonce_is_a_409_naming_the_current_one(self, api_client):
+        from src.services.user_queue import StaleNonceError
+
+        with patch("src.api.earn.get_vault_service") as mock_svc:
+            svc = MagicMock()
+            svc.schedule_deposit = MagicMock(side_effect=StaleNonceError(3, 4))
+            mock_svc.return_value = svc
+
+            r = await api_client.post("/v1/earn/deposit", json={
+                "pool_id": POOL_ID,
+                "user_address": USER_ADDRESS,
+                "amount": "1000",
+                "nonce": 3,
+                "signature": "0x" + "aa" * 65,
+            })
+            assert r.status_code == 409
+            assert r.json()["code"] == "stale_nonce"
+            assert r.json()["current_nonce"] == 4
+
+
 class TestWithdrawRoute:
     async def test_queues_the_withdraw_and_returns_its_id(self, api_client):
         with patch("src.api.earn.get_vault_service") as mock_svc:

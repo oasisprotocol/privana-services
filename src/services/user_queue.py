@@ -6,7 +6,11 @@ with nonce N and one signed with N+1 can be submitted in the opposite order,
 and the later nonce then fails for good. Each worker asks here before it
 claims.
 """
+import logging
+
 from src.core.db import get_db
+
+logger = logging.getLogger(__name__)
 
 # Taken off the queue and possibly already holding the user's nonce. Scheduled
 # rows are not here: nothing has been signed against a nonce yet. The two
@@ -48,6 +52,41 @@ class OperationPendingError(Exception):
             "pending_operation_type": self.operation_type,
             "pending_operation_id": self.operation_id,
         }
+
+
+class StaleNonceError(Exception):
+    """Raised when the submitted transfer nonce has already been used on chain."""
+
+    def __init__(self, input_nonce: int, current_nonce: int) -> None:
+        super().__init__(
+            f"Nonce {input_nonce} has already been used; sign again with nonce {current_nonce}"
+        )
+        self.current_nonce = current_nonce
+
+    def payload(self) -> dict:
+        return {"detail": str(self), "code": "stale_nonce", "current_nonce": self.current_nonce}
+
+
+def assert_nonce_unspent(accounting, user_address: str, input_nonce: int) -> None:
+    """Refuse a request signed with a transfer nonce the chain has moved past.
+
+    It could only revert with InvalidNonce once executed, after showing up as
+    an operation in progress. A later nonce passes: a user may sign the next
+    one while an earlier request is still queued. A failed read lets the
+    request through, since execution rejects it anyway. Swaps skip this: their
+    request path reads nothing from a chain.
+    """
+    try:
+        current = accounting.transfer_nonce(user_address)
+    except Exception as exc:
+        logger.warning("Transfer nonce read failed; not checking it: %s", type(exc).__name__)
+        return
+    if input_nonce < current:
+        logger.info(
+            "Refused a spent transfer nonce: user=%s nonce=%d current=%d",
+            user_address, input_nonce, current,
+        )
+        raise StaleNonceError(input_nonce, current)
 
 
 def assert_nonce_free(user_address: str, input_nonce: int) -> None:

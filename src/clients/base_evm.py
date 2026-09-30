@@ -4,6 +4,7 @@ from typing import Optional
 
 from eth_account import Account
 from web3 import Web3
+from web3.exceptions import TransactionNotFound
 
 from src.core.abi import load_abi
 from src.core.config import load_settings
@@ -104,12 +105,40 @@ class EvmClient:
 
     def _send(self, tx: dict) -> str:
         signed = self._account.sign_transaction(tx)
-        tx_hash = self.w3.eth.send_raw_transaction(signed.raw_transaction)
-        receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash)
+        tx_hash = Web3.to_hex(Web3.keccak(signed.raw_transaction))
+        logger.info("Sending transaction %s via %s: %s", tx_hash, self.w3.provider.endpoint_uri, tx)
+        try:
+            tx_hash = self.w3.eth.send_raw_transaction(signed.raw_transaction)
+            logger.info("Transaction %s accepted by %s", tx_hash, self.w3.provider.endpoint_uri)
+            receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash)
+        except Exception as exc:
+            self._log_send_failure(tx_hash, tx, exc)
+            raise
         tx_hex = Web3.to_hex(tx_hash)
         if receipt.status != 1:
             raise RuntimeError(f"transaction reverted: {tx_hex}")
+        logger.info("Transaction %s succeeded in block %s", tx_hex, receipt.blockNumber)
         return tx_hex
+
+    def _log_send_failure(self, tx_hex: str, tx: dict, exc: Exception) -> None:
+        """Record what the chain says about a send whose outcome is unknown."""
+        try:
+            latest = self.w3.eth.get_transaction_count(self.address, "latest")
+            pending = self.w3.eth.get_transaction_count(self.address, "pending")
+            try:
+                self.w3.eth.get_transaction(tx_hex)
+                known = True
+            except TransactionNotFound:
+                known = False
+            logger.error(
+                "Transaction %s failed (%s) via %s: from=%s nonce=%s latest_nonce=%s pending_nonce=%s known_to_node=%s",
+                tx_hex, type(exc).__name__, self.w3.provider.endpoint_uri, self.address, tx.get("nonce"), latest, pending, known,
+            )
+        except Exception as probe_exc:
+            logger.error(
+                "Transaction %s failed (%s) via %s; state probe also failed (%s)",
+                tx_hex, type(exc).__name__, self.w3.provider.endpoint_uri, type(probe_exc).__name__,
+            )
 
 
 _clients: dict[str, EvmClient] = {}

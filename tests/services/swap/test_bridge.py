@@ -75,6 +75,7 @@ class FakeAccounting:
     def __init__(self):
         self.nonce = 9
         self.pending = []
+        self.arriving = []
         self.next_index = 40
         self.token_by_index = {}
 
@@ -84,7 +85,12 @@ class FakeAccounting:
 
     async def get_pending_withdrawals(self, _address):
         await asyncio.sleep(0)
-        return _pending(list(self.pending))
+        # An accepted request is listed from the second poll after it, so a
+        # parallel task gets a turn in between.
+        listed = _pending(list(self.pending))
+        self.pending.extend(self.arriving)
+        self.arriving = []
+        return listed
 
     async def request_withdrawal(self, request):
         await asyncio.sleep(0)
@@ -97,12 +103,7 @@ class FakeAccounting:
         index = self.next_index
         self.next_index += 1
         self.token_by_index[index] = request.token_id
-
-        async def appear():
-            await asyncio.sleep(0.01)
-            self.pending.append(index)
-
-        asyncio.get_running_loop().create_task(appear())
+        self.arriving.append(index)
         return MagicMock(status="submitted", detail=None)
 
     async def get_withdrawal_info(self, index):

@@ -21,6 +21,9 @@ MAX_NETWORK_RETRIES = 10
 ACCEPTED_SUBMISSION_STATUSES = {"submitted", "pending", "accepted"}
 SAPPHIRE_TESTNET_CHAIN_ID = 23295
 
+# One per process, shared by every bridge: the LP has a single withdrawal nonce.
+withdrawal_lock = asyncio.Lock()
+
 
 def _normalize_tx_hash(tx_hash: str) -> str:
     return tx_hash if tx_hash.startswith("0x") else f"0x{tx_hash}"
@@ -65,55 +68,59 @@ class AccountingBridge:
         return await client.get_balance(token_id)
 
     async def withdraw_to_chain(self, token_id: str, amount: int) -> int:
-        pre = await self._retry("get_pending_withdrawals", self._get_pending_withdrawals)
-        pre_indices = {w.index for w in pre.pending_withdrawals}
+        # LiFi swaps run in parallel and all withdraw from the LP account. Hold
+        # the lock until this request shows up as pending: by then its nonce is
+        # spent, and the one new index is certainly ours.
+        async with withdrawal_lock:
+            pre = await self._retry("get_pending_withdrawals", self._get_pending_withdrawals)
+            pre_indices = {w.index for w in pre.pending_withdrawals}
 
-        async def _get_nonce():
+            async def _get_nonce():
+                client = await self._client_factory()
+                return await client.get_withdrawal_nonce(self._lp_address)
+
+            nonce = (await self._retry("get_withdrawal_nonce", _get_nonce)).nonce
+            signature = sign_withdraw_message(
+                SignWithdrawParams(
+                    account=Account.from_key(self._lp_key),
+                    network=self._network,
+                    verifying_contract=self._contract,
+                    message=WithdrawMessage(token_id=token_id, amount=amount, nonce=nonce),
+                )
+            )
             client = await self._client_factory()
-            return await client.get_withdrawal_nonce(self._lp_address)
-
-        nonce = (await self._retry("get_withdrawal_nonce", _get_nonce)).nonce
-        signature = sign_withdraw_message(
-            SignWithdrawParams(
-                account=Account.from_key(self._lp_key),
-                network=self._network,
-                verifying_contract=self._contract,
-                message=WithdrawMessage(token_id=token_id, amount=amount, nonce=nonce),
+            submission = await client.request_withdrawal(
+                WithdrawalRequest(token_id=token_id, amount=amount, nonce=nonce, signature=signature)
             )
-        )
-        client = await self._client_factory()
-        submission = await client.request_withdrawal(
-            WithdrawalRequest(token_id=token_id, amount=amount, nonce=nonce, signature=signature)
-        )
-        if submission.status not in ACCEPTED_SUBMISSION_STATUSES:
-            raise RuntimeError(
-                f"withdrawal rejected: status={submission.status} detail={submission.detail}"
-            )
+            if submission.status not in ACCEPTED_SUBMISSION_STATUSES:
+                raise RuntimeError(
+                    f"withdrawal rejected: status={submission.status} detail={submission.detail}"
+                )
+            own_index = await self._await_new_index(pre_indices)
 
-        own_index: Optional[int] = None
+        for _ in range(self._max_poll_attempts):
+            async def _get_info():
+                fresh = await self._client_factory()
+                return await fresh.get_withdrawal_info(own_index)
+
+            info = await self._retry("get_withdrawal_info", _get_info)
+            if info.resolved:
+                logger.info(
+                    "bridge.withdraw_to_chain: resolved index=%d tx=%s",
+                    own_index, info.tx_identifier,
+                )
+                return own_index
+            await asyncio.sleep(self._poll_interval_sec)
+        raise RuntimeError(f"withdrawal unresolved after {self._max_poll_attempts} polls")
+
+    async def _await_new_index(self, pre_indices: set[int]) -> int:
         for _ in range(self._max_poll_attempts):
             pending = await self._retry(
                 "get_pending_withdrawals", self._get_pending_withdrawals
             )
-            current = {w.index for w in pending.pending_withdrawals}
-            if own_index is None:
-                new = current - pre_indices
-                if new:
-                    own_index = min(new)
-            if own_index is not None:
-                idx = own_index
-
-                async def _get_info():
-                    fresh = await self._client_factory()
-                    return await fresh.get_withdrawal_info(idx)
-
-                info = await self._retry("get_withdrawal_info", _get_info)
-                if info.resolved:
-                    logger.info(
-                        "bridge.withdraw_to_chain: resolved index=%d tx=%s",
-                        own_index, info.tx_identifier,
-                    )
-                    return own_index
+            new = {w.index for w in pending.pending_withdrawals} - pre_indices
+            if new:
+                return min(new)
             await asyncio.sleep(self._poll_interval_sec)
         raise RuntimeError(f"withdrawal unresolved after {self._max_poll_attempts} polls")
 

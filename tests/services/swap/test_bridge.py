@@ -1,7 +1,14 @@
+import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from privana.client.errors import NetworkError
+
+
+@pytest.fixture(autouse=True)
+def fresh_withdrawal_lock(monkeypatch):
+    """Each test runs on its own event loop; the service runs on one."""
+    monkeypatch.setattr("src.services.swap.bridge.withdrawal_lock", asyncio.Lock())
 
 
 def _pending(indices):
@@ -58,6 +65,77 @@ class TestWithdrawToChain:
         bridge._max_poll_attempts = 3
         with pytest.raises(RuntimeError, match="unresolved"):
             await bridge.withdraw_to_chain("0x" + "aa" * 32, 1_000_000)
+
+
+class FakeAccounting:
+    """The LP's withdrawal nonce and pending list the way the relay keeps them:
+    a request signed with anything but the current nonce is rejected, and an
+    accepted one shows up in the pending list a moment later."""
+
+    def __init__(self):
+        self.nonce = 9
+        self.pending = []
+        self.next_index = 40
+        self.token_by_index = {}
+
+    async def get_withdrawal_nonce(self, _address):
+        await asyncio.sleep(0)
+        return MagicMock(nonce=self.nonce)
+
+    async def get_pending_withdrawals(self, _address):
+        await asyncio.sleep(0)
+        return _pending(list(self.pending))
+
+    async def request_withdrawal(self, request):
+        await asyncio.sleep(0)
+        if request.nonce != self.nonce:
+            return MagicMock(
+                status="error",
+                detail="Transaction reverted: InvalidNonce (module: evm, code: 8)",
+            )
+        self.nonce += 1
+        index = self.next_index
+        self.next_index += 1
+        self.token_by_index[index] = request.token_id
+
+        async def appear():
+            await asyncio.sleep(0.01)
+            self.pending.append(index)
+
+        asyncio.get_running_loop().create_task(appear())
+        return MagicMock(status="submitted", detail=None)
+
+    async def get_withdrawal_info(self, index):
+        await asyncio.sleep(0)
+        return MagicMock(resolved=index in self.pending, tx_identifier="0x11")
+
+
+class TestConcurrentWithdrawals:
+    async def test_parallel_swaps_each_get_their_own_nonce_and_index(self):
+        accounting = FakeAccounting()
+        bridge = _make_bridge(accounting)
+        tokens = ["0x" + "aa" * 32, "0x" + "bb" * 32, "0x" + "cc" * 32]
+
+        # LiFi swaps run as parallel tasks; before, two of them read the same
+        # withdrawal nonce and the relay rejected one with InvalidNonce.
+        indices = await asyncio.gather(
+            *(bridge.withdraw_to_chain(token, 1_000_000) for token in tokens)
+        )
+
+        assert accounting.nonce == 12
+        assert len(set(indices)) == 3
+        assert [accounting.token_by_index[i] for i in indices] == tokens
+
+    async def test_a_second_bridge_instance_waits_its_turn_too(self):
+        accounting = FakeAccounting()
+        first, second = _make_bridge(accounting), _make_bridge(accounting)
+
+        await asyncio.gather(
+            first.withdraw_to_chain("0x" + "aa" * 32, 1),
+            second.withdraw_to_chain("0x" + "bb" * 32, 1),
+        )
+
+        assert accounting.nonce == 11
 
 
 class TestAwaitDepositCredit:

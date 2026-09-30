@@ -6,16 +6,11 @@ with nonce N and one signed with N+1 can be submitted in the opposite order,
 and the later nonce then fails for good. Each worker asks here before it
 claims.
 """
-import asyncio
 import logging
 
 from src.core.db import get_db
 
 logger = logging.getLogger(__name__)
-
-# A spent-nonce check is a courtesy to the caller, so a slow chain read must
-# not hold the request up for long.
-NONCE_READ_TIMEOUT_SEC = 3.0
 
 # Taken off the queue and possibly already holding the user's nonce. Scheduled
 # rows are not here: nothing has been signed against a nonce yet. The two
@@ -72,7 +67,7 @@ class StaleNonceError(Exception):
         return {"detail": str(self), "code": "stale_nonce", "current_nonce": self.current_nonce}
 
 
-async def assert_nonce_unspent(accounting, user_address: str, input_nonce: int) -> None:
+def assert_nonce_unspent(accounting, user_address: str, input_nonce: int) -> None:
     """Refuse a request signed with a transfer nonce the chain has moved past.
 
     It could only revert with InvalidNonce once executed, after showing up as
@@ -82,9 +77,7 @@ async def assert_nonce_unspent(accounting, user_address: str, input_nonce: int) 
     request path reads nothing from a chain.
     """
     try:
-        current = await asyncio.wait_for(
-            accounting.get_transfer_nonce(user_address), NONCE_READ_TIMEOUT_SEC
-        )
+        current = accounting.transfer_nonce(user_address)
     except Exception as exc:
         logger.warning("Transfer nonce read failed; not checking it: %s", type(exc).__name__)
         return

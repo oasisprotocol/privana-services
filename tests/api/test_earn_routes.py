@@ -232,7 +232,7 @@ class TestDepositRoute:
         Callers follow the outcome on /v1/operations/unsettled by deposit_id."""
         with patch("src.api.earn.get_vault_service") as mock_svc:
             svc = MagicMock()
-            svc.schedule_deposit = AsyncMock(return_value={"id": "op-1", "status": "scheduled"})
+            svc.schedule_deposit = MagicMock(return_value={"id": "op-1", "status": "scheduled"})
             mock_svc.return_value = svc
 
             r = await api_client.post("/v1/earn/deposit", json={
@@ -252,7 +252,7 @@ class TestDepositRoute:
         ones that mean the operation definitively never happened."""
         with patch("src.api.earn.get_vault_service") as mock_svc:
             svc = MagicMock()
-            svc.schedule_deposit = AsyncMock(side_effect=ValueError("Invalid amount"))
+            svc.schedule_deposit = MagicMock(side_effect=ValueError("Invalid amount"))
             mock_svc.return_value = svc
 
             r = await api_client.post("/v1/earn/deposit", json={
@@ -268,7 +268,7 @@ class TestDepositRoute:
     async def test_a_held_nonce_is_a_409_naming_the_earlier_operation(self, api_client):
         with patch("src.api.earn.get_vault_service") as mock_svc:
             svc = MagicMock()
-            svc.schedule_deposit = AsyncMock(side_effect=OperationPendingError("earn_deposit", "op-0"))
+            svc.schedule_deposit = MagicMock(side_effect=OperationPendingError("earn_deposit", "op-0"))
             mock_svc.return_value = svc
 
             r = await api_client.post("/v1/earn/deposit", json={
@@ -288,7 +288,7 @@ class TestDepositRoute:
 
         with patch("src.api.earn.get_vault_service") as mock_svc:
             svc = MagicMock()
-            svc.schedule_deposit = AsyncMock(side_effect=PendingLimitReached("5 earn requests"))
+            svc.schedule_deposit = MagicMock(side_effect=PendingLimitReached("5 earn requests"))
             mock_svc.return_value = svc
 
             r = await api_client.post("/v1/earn/deposit", json={
@@ -307,7 +307,7 @@ class TestDepositRoute:
 
         with patch("src.api.earn.get_vault_service") as mock_svc:
             svc = MagicMock()
-            svc.schedule_deposit = AsyncMock(side_effect=StaleNonceError(3, 4))
+            svc.schedule_deposit = MagicMock(side_effect=StaleNonceError(3, 4))
             mock_svc.return_value = svc
 
             r = await api_client.post("/v1/earn/deposit", json={
@@ -326,7 +326,7 @@ class TestWithdrawRoute:
     async def test_queues_the_withdraw_and_returns_its_id(self, api_client):
         with patch("src.api.earn.get_vault_service") as mock_svc:
             svc = MagicMock()
-            svc.schedule_withdraw = AsyncMock(return_value={"id": "op-3", "status": "scheduled"})
+            svc.schedule_withdraw = MagicMock(return_value={"id": "op-3", "status": "scheduled"})
             mock_svc.return_value = svc
 
             r = await api_client.post("/v1/earn/withdraw", json={
@@ -344,7 +344,7 @@ class TestWithdrawRoute:
     async def test_returns_400_on_insufficient_shares(self, api_client):
         with patch("src.api.earn.get_vault_service") as mock_svc:
             svc = MagicMock()
-            svc.schedule_withdraw = AsyncMock(side_effect=ValueError("Insufficient shares"))
+            svc.withdraw = AsyncMock(side_effect=ValueError("Insufficient shares"))
             mock_svc.return_value = svc
 
             r = await api_client.post("/v1/earn/withdraw", json={
@@ -597,7 +597,7 @@ class TestWithdrawPendingLimit:
 
         with patch("src.api.earn.get_vault_service") as mock_svc:
             svc = MagicMock()
-            svc.schedule_withdraw = AsyncMock(side_effect=PendingLimitReached("5 earn requests"))
+            svc.schedule_withdraw = MagicMock(side_effect=PendingLimitReached("5 earn requests"))
             mock_svc.return_value = svc
 
             r = await api_client.post("/v1/earn/withdraw", json={

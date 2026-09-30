@@ -535,7 +535,7 @@ class VaultService:
             raise RuntimeError(f"Transaction reverted: {tx_hash}")
         return tx_hash
 
-    async def _schedule(
+    def _schedule(
         self,
         *,
         operation: str,
@@ -620,7 +620,7 @@ class VaultService:
             raise ValueError(f"{operation} was not signed by user_address")
         if operation == EARN_OP_DEPOSIT:
             assert_nonce_free(user_address, nonce)
-            await assert_nonce_unspent(self.accounting, user_address, nonce)
+            assert_nonce_unspent(self.accounting, user_address, nonce)
 
         tx_id = str(uuid.uuid4())
         now = int(time.time())
@@ -644,18 +644,18 @@ class VaultService:
         )
         return {"id": tx_id, "status": EARN_STATUS_SCHEDULED}
 
-    async def schedule_deposit(
+    def schedule_deposit(
         self, *, pool_id_hex: str, user_address: str, amount: str, nonce: int, signature: str
     ) -> dict:
-        return await self._schedule(
+        return self._schedule(
             operation=EARN_OP_DEPOSIT, pool_id_hex=pool_id_hex,
             user_address=user_address, amount=amount, nonce=nonce, signature=signature,
         )
 
-    async def schedule_withdraw(
+    def schedule_withdraw(
         self, *, pool_id_hex: str, user_address: str, amount: str, nonce: int, signature: str
     ) -> dict:
-        return await self._schedule(
+        return self._schedule(
             operation=EARN_OP_WITHDRAW, pool_id_hex=pool_id_hex,
             user_address=user_address, amount=amount, nonce=nonce, signature=signature,
         )

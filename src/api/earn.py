@@ -177,7 +177,7 @@ async def deposit(payload: DepositRequest) -> DepositResponse | JSONResponse:
         # Queued, not executed: the strategy leg bridges and supplies on another
         # chain and routinely outlives the gateway's patience. The client polls
         # GET /v1/operations/unsettled for the outcome, keyed by deposit_id.
-        scheduled = await service.schedule_deposit(
+        scheduled = service.schedule_deposit(
             pool_id_hex=payload.pool_id,
             user_address=payload.user_address,
             amount=payload.amount,
@@ -203,7 +203,7 @@ async def withdraw(payload: WithdrawRequest) -> WithdrawResponse:
     _pool_id_bytes(payload.pool_id)
     try:
         service = get_vault_service()
-        scheduled = await service.schedule_withdraw(
+        scheduled = service.schedule_withdraw(
             pool_id_hex=payload.pool_id,
             user_address=payload.user_address,
             amount=payload.amount,

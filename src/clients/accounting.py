@@ -249,6 +249,9 @@ class AccountingClient:
         return entries
 
     async def get_transfer_nonce(self, user_address: str) -> int:
+        return await asyncio.to_thread(self.transfer_nonce, user_address)
+
+    def transfer_nonce(self, user_address: str) -> int:
         """Read ``transferNonces[user]`` directly from the Accounting contract.
 
         Bypasses the ROFL REST endpoint because the staged service has been
@@ -265,11 +268,9 @@ class AccountingClient:
                 abi=load_abi("Accounting"),
             )
 
-        return await asyncio.to_thread(
-            self._accounting_contract.functions.transferNonces(
-                Web3.to_checksum_address(user_address)
-            ).call
-        )
+        return self._accounting_contract.functions.transferNonces(
+            Web3.to_checksum_address(user_address)
+        ).call()
 
     async def close(self) -> None:
         await self.client.aclose()

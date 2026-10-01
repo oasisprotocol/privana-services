@@ -7,6 +7,9 @@ from src.core.config import load_settings
 
 logger = logging.getLogger(__name__)
 
+# Applied by LiFi when a request names no slippage.
+LIFI_DEFAULT_SLIPPAGE_BPS = 50
+
 
 class LiFiClient:
     def __init__(self) -> None:
@@ -25,6 +28,7 @@ class LiFiClient:
         from_token_address: str,
         to_token_address: str,
         from_amount: str,
+        slippage_bps: int,
     ) -> dict[str, Any]:
         payload = {
             "fromChainId": from_chain_id,
@@ -32,6 +36,7 @@ class LiFiClient:
             "fromTokenAddress": from_token_address,
             "toTokenAddress": to_token_address,
             "fromAmount": from_amount,
+            "options": {"slippage": slippage_bps / 10_000},
         }
         logger.info(f"Li.Fi routes request: {payload}")
         response = await self.client.post(
@@ -52,7 +57,7 @@ class LiFiClient:
         to_token_address: str,
         from_amount: str,
         from_address: str,
-        slippage: float = 0.03,
+        slippage_bps: int,
     ) -> dict[str, Any]:
         params: dict[str, Any] = {
             "fromChain": from_chain_id,
@@ -61,7 +66,7 @@ class LiFiClient:
             "toToken": to_token_address,
             "fromAmount": from_amount,
             "fromAddress": from_address,
-            "slippage": slippage,
+            "slippage": slippage_bps / 10_000,
         }
         if self.integrator:
             params["integrator"] = self.integrator

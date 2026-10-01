@@ -44,6 +44,7 @@ class QuoteRecord(BaseModel):
     expires_at: int
     created_at: int
     venue: str = "internal"
+    slippage_bps: Optional[int] = None
 
 
 class SwapRecord(BaseModel):

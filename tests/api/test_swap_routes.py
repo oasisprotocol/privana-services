@@ -99,7 +99,24 @@ class TestQuoteRoute:
             })
 
             call_kwargs = svc.get_quote.call_args.kwargs
-            assert call_kwargs["slippage"] == 0.03
+            assert call_kwargs["slippage_bps"] == 50
+
+    async def test_slippage_rounds_to_the_nearest_bps(self, api_client):
+        # 0.57 * 10_000 is 5699.999..., which int() would truncate.
+        with patch("src.api.swap.get_quote_service") as mock_svc:
+            svc = MagicMock()
+            svc.get_quote = AsyncMock(return_value=MOCK_QUOTE)
+            mock_svc.return_value = svc
+
+            await api_client.get("/v1/quote", params={
+                "from_token_id": USDC_TOKEN_ID,
+                "to_token_id": WETH_TOKEN_ID,
+                "from_amount": "1000000",
+                "user_address": USER_ADDRESS,
+                "slippage": 0.57,
+            })
+
+            assert svc.get_quote.call_args.kwargs["slippage_bps"] == 5700
 
 
 class TestSwapRoute:

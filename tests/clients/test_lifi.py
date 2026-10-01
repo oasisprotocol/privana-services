@@ -69,6 +69,7 @@ class TestLiFiClient:
             from_token_address="0xfrom",
             to_token_address="0xto",
             from_amount="1000000",
+            slippage_bps=100,
         )
 
         mock_http_client.post.assert_called_once_with(
@@ -79,6 +80,7 @@ class TestLiFiClient:
                 "fromTokenAddress": "0xfrom",
                 "toTokenAddress": "0xto",
                 "fromAmount": "1000000",
+                "options": {"slippage": 0.01},
             },
         )
 
@@ -91,6 +93,7 @@ class TestLiFiClient:
             from_token_address="0xfrom",
             to_token_address="0xto",
             from_amount="1000000",
+            slippage_bps=100,
         )
 
         assert result == SAMPLE_ROUTES_RESPONSE
@@ -110,6 +113,7 @@ class TestLiFiClient:
                 from_token_address="0xfrom",
                 to_token_address="0xto",
                 from_amount="1000000",
+                slippage_bps=100,
             )
 
     async def test_get_tokens_calls_correct_endpoint(self, client, mock_http_client):
@@ -159,6 +163,7 @@ class TestLiFiClient:
             to_token_address="0xto",
             from_amount="1000000",
             from_address="0xlp",
+            slippage_bps=300,
         )
 
         assert result == SAMPLE_EXECUTION_QUOTE
@@ -189,6 +194,7 @@ class TestLiFiClient:
                 to_token_address="0xto",
                 from_amount="1000000",
                 from_address="0xlp",
+                slippage_bps=300,
             )
 
     async def test_get_status_sends_correct_params(self, client, mock_http_client):

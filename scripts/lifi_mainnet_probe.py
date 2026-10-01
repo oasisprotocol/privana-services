@@ -67,6 +67,7 @@ async def main() -> int:
         to_token_address=BASE_WETH,
         from_amount=str(amount),
         from_address=evm.address,
+        slippage_bps=50,
     )
     estimate = quote["estimate"]
     print(f"\nroute tool: {quote.get('tool')}")

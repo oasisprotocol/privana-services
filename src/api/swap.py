@@ -24,7 +24,7 @@ async def get_quote(
     to_token_id: str = Query(..., description="Destination token bytes32 ID"),
     from_amount: str = Query(..., description="Amount in base units"),
     user_address: str = Query(..., description="User wallet address"),
-    slippage: float = Query(default=0.03, ge=0.0, le=1.0),
+    slippage: float = Query(default=0.005, ge=0.0, le=1.0),
 ) -> QuoteResponse:
     try:
         service = get_quote_service()
@@ -33,7 +33,7 @@ async def get_quote(
             to_token_id=to_token_id,
             from_amount=from_amount,
             user_address=user_address,
-            slippage=slippage,
+            slippage_bps=round(slippage * 10_000),
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

@@ -5,7 +5,7 @@ services:
       dockerfile: docker/Dockerfile
       args:
         - ENV_FILE=.env.mainnet
-    image: "ghcr.io/oasisprotocol/privana-services@sha256:fd3a11f18b5b51708a831bb262d3fc85764590eba3461e0e63bc760a5e1da5c9"
+    image: "ghcr.io/oasisprotocol/privana-services@sha256:5109197a777cfcc333b4fc7f66227ca1ce354cffe767b73f62a884a14b4bad7f"
     platform: linux/amd64
     environment:
       - LIQUIDITY_PROVIDER_SECRET_KEY

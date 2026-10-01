@@ -56,6 +56,10 @@ class Settings:
     hyperevm_rpc_url: str = ""
     lifi_max_swap_amount_usd: int = 0
 
+    # Accounting token ids the swap pool holds. A swap fills internally only
+    # when both of its tokens are listed.
+    internal_swap_token_ids: frozenset[str] = frozenset()
+
     pool_admin_secret_key: str = ""
 
     # Account that holds every earn pool's underlying balance. Must be its own

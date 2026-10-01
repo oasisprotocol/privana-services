@@ -11,6 +11,7 @@ from src.api.portfolio import router as portfolio_router
 from src.api.swap import router as swap_router
 from src.core.config import load_settings
 from src.core.db import close_db, get_db
+from src.core.validation import validate_token_id
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +37,13 @@ def _validate_settings() -> None:
         errors.append("PRIVANA_API_BASE_URL is not set")
     if not settings.base_rpc_url:
         errors.append("BASE_RPC_URL is not set")
+    if not settings.internal_swap_token_ids:
+        errors.append("INTERNAL_SWAP_TOKEN_IDS is not set")
+    for token_id in sorted(settings.internal_swap_token_ids):
+        try:
+            validate_token_id(token_id, f"INTERNAL_SWAP_TOKEN_IDS entry {token_id!r}")
+        except ValueError as exc:
+            errors.append(str(exc))
     try:
         from src.core.fee_policy import get_fee_policies
 

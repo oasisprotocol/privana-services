@@ -97,6 +97,25 @@ def test_validate_settings_flags_missing_base_rpc_url(monkeypatch):
         main_module._validate_settings()
 
 
+@pytest.mark.parametrize("token_ids,error", [
+    (frozenset(), "INTERNAL_SWAP_TOKEN_IDS is not set"),
+    (frozenset({"0xabc"}), "INTERNAL_SWAP_TOKEN_IDS entry '0xabc' must be a bytes32"),
+])
+def test_validate_settings_flags_bad_internal_swap_token_ids(monkeypatch, token_ids, error):
+    crafted = _settings_with(
+        liquidity_provider_secret_key="0x" + "1" * 64,
+        accounting_contract_address="0x" + "a" * 40,
+        swap_manager_contract_address="0x" + "b" * 40,
+        earn_manager_contract_address="0x" + "c" * 40,
+        privana_api_base_url="https://example.test",
+        internal_swap_token_ids=token_ids,
+        environment="production",
+    )
+    monkeypatch.setattr(main_module, "settings", crafted)
+    with pytest.raises(RuntimeError, match=error):
+        main_module._validate_settings()
+
+
 def test_validate_settings_passes_with_real_addresses(monkeypatch):
     crafted = _settings_with(
         liquidity_provider_secret_key="0x" + "1" * 64,
@@ -104,6 +123,7 @@ def test_validate_settings_passes_with_real_addresses(monkeypatch):
         swap_manager_contract_address="0x" + "b" * 40,
         earn_manager_contract_address="0x" + "c" * 40,
         privana_api_base_url="https://example.test",
+        internal_swap_token_ids=frozenset({"0x" + "d" * 64}),
         environment="production",
     )
     monkeypatch.setattr(main_module, "settings", crafted)
@@ -132,3 +152,9 @@ def test_earn_batch_settings_from_env(monkeypatch):
     assert settings.earn_buffer_min == 1_000_000
     assert settings.earn_buffer_bps == 250
     assert settings.earn_max_pending_per_user == 2
+
+
+def test_internal_swap_token_ids_parses_a_multiline_list(monkeypatch):
+    monkeypatch.setenv("INTERNAL_SWAP_TOKEN_IDS", "\n    0xAA,\n    0xbb,\n")
+    settings = config_module.load_settings(refresh=True)
+    assert settings.internal_swap_token_ids == {"0xaa", "0xbb"}

@@ -63,10 +63,6 @@ class AccountingBridge:
         client = await self._client_factory()
         return await client.get_pending_withdrawals(self._lp_address)
 
-    async def _get_balance(self, token_id: str):
-        client = await self._client_factory()
-        return await client.get_balance(token_id)
-
     async def withdraw_to_chain(self, token_id: str, amount: int) -> int:
         # LiFi swaps run in parallel and all withdraw from the LP account. Hold
         # the lock until this request shows up as pending: by then its nonce is
@@ -124,35 +120,27 @@ class AccountingBridge:
             await asyncio.sleep(self._poll_interval_sec)
         raise RuntimeError(f"withdrawal unresolved after {self._max_poll_attempts} polls")
 
-    async def await_deposit_credit(
-        self, chain_id: int, tx_hash: str, amount: int, token_id: str, pre_balance: int
-    ) -> None:
-        client = await self._client_factory()
-        try:
-            check = await client.check_deposit(
-                DepositCheckRequest(
-                    chain_id=chain_id, tx_hash=_normalize_tx_hash(tx_hash), amount=amount
-                )
-            )
-            if check.status == "error":
-                logger.warning(
-                    "bridge.check_deposit reported error: %s; relying on relay auto-pickup",
-                    check.detail,
-                )
-        except Exception as exc:
-            logger.warning(
-                "bridge.check_deposit nudge failed (%s); relying on relay auto-pickup", exc
-            )
-
-        target = pre_balance + amount
+    async def await_deposit_credit(self, chain_id: int, tx_hash: str, amount: int) -> None:
+        # Accounting has no deposit watcher and rejects a transfer until it is
+        # final on the source chain, so keep reporting it. Replays are
+        # idempotent: pending while the sweep runs, then credited.
+        tx_hash = _normalize_tx_hash(tx_hash)
+        request = DepositCheckRequest(chain_id=chain_id, tx_hash=tx_hash, amount=amount)
+        last: object = None
         for _ in range(self._max_poll_attempts):
-            balance = int(
-                (await self._retry("get_balance", lambda: self._get_balance(token_id))).balance
-            )
-            if balance >= target:
-                return
+            try:
+                client = await self._client_factory()
+                check = await client.check_deposit(request)
+                if check.status == "credited":
+                    return
+                last = f"status={check.status} detail={check.detail}"
+            except Exception as exc:
+                last = exc
+                logger.warning("bridge.check_deposit %s not accepted yet: %s", tx_hash, exc)
             await asyncio.sleep(self._poll_interval_sec)
-        raise RuntimeError(f"deposit credit not observed after {self._max_poll_attempts} polls")
+        raise RuntimeError(
+            f"deposit {tx_hash} not credited after {self._max_poll_attempts} polls: {last}"
+        )
 
     async def get_deposit_address(self) -> str:
         async def _get_address():
@@ -161,8 +149,3 @@ class AccountingBridge:
 
         deposit = await self._retry("get_deposit_address", _get_address)
         return deposit.deposit_address
-
-    async def lp_internal_balance(self, token_id: str) -> int:
-        return int(
-            (await self._retry("get_balance", lambda: self._get_balance(token_id))).balance
-        )

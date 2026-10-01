@@ -6,7 +6,7 @@ from typing import Any, Awaitable, Callable, Optional
 from privana.types import TransferFundsRequest
 
 from src.clients.accounting import get_accounting_client
-from src.clients.base_evm import NATIVE_TOKEN, get_evm_client, is_native
+from src.clients.base_evm import NATIVE_TOKEN, TransactionPendingError, get_evm_client, is_native
 from src.clients.lifi import LIFI_DEFAULT_SLIPPAGE_BPS, get_lifi_client
 from src.clients.privana import get_swap_lp_privana_client
 from src.core.config import load_settings
@@ -86,7 +86,7 @@ class LifiSwapPipeline:
             await self._confirm_input(quote, input_nonce)
             await self._withdraw(swap_id, quote)
             received, to_info = await self._lifi_execute(swap_id, quote)
-            await self._deposit_with_retries(swap_id, quote, to_info, received)
+            await self._deposit_with_retries(swap_id, to_info, received)
             self._update_swap(swap_id, step=LifiSwapStep.CREDIT.value)
             credited = await self._credit(quote, received)
             self._update_swap(
@@ -144,15 +144,8 @@ class LifiSwapPipeline:
         else:
             raise RuntimeError("input tokens not returned on-chain")
 
-        deposit_address = await self.bridge.get_deposit_address()
-        pre_internal = await self.bridge.lp_internal_balance(quote["from_token_id"])
-        async with evm.tx_lock:
-            deposit_tx = await asyncio.to_thread(
-                evm.transfer, from_info.token_address, deposit_address, amount
-            )
-        await self.bridge.await_deposit_credit(
-            from_info.chain_id, deposit_tx, amount, quote["from_token_id"], pre_internal
-        )
+        deposit_tx = await self._transfer_to_deposit_address(evm, from_info.token_address, amount)
+        await self.bridge.await_deposit_credit(from_info.chain_id, deposit_tx, amount)
 
     async def _submit_input(
         self, quote: dict, input_nonce: int, input_signature: str
@@ -272,17 +265,23 @@ class LifiSwapPipeline:
             await asyncio.sleep(self._poll_interval_sec)
         raise RuntimeError(f"lifi execution status polling exhausted for {tx_hash}")
 
-    async def _deposit_with_retries(
-        self, swap_id: str, quote: dict, to_info: Any, received: int
-    ) -> None:
+    async def _deposit_with_retries(self, swap_id: str, to_info: Any, received: int) -> None:
         self._update_swap(swap_id, step=LifiSwapStep.DEPOSIT.value)
+        deposit_tx: Optional[str] = None
         last_error: Optional[Exception] = None
         for attempt in range(self._deposit_max_retries):
             logger.info(
                 "lifi swap %s deposit attempt %d/%d", swap_id, attempt + 1, self._deposit_max_retries
             )
             try:
-                await self._deposit(swap_id, quote, to_info, received)
+                # Once broadcast, the output is bound for the deposit address: a
+                # resend would spend funds this swap no longer holds, so retry the credit.
+                if deposit_tx is None:
+                    deposit_tx = await self._transfer_to_deposit_address(
+                        self._evm_for(to_info.chain_id), to_info.token_address, received
+                    )
+                    self._update_swap(swap_id, deposit_tx_hash=deposit_tx)
+                await self.bridge.await_deposit_credit(to_info.chain_id, deposit_tx, received)
                 logger.info("lifi swap %s deposit attempt %d succeeded", swap_id, attempt + 1)
                 return
             except Exception as exc:
@@ -291,24 +290,19 @@ class LifiSwapPipeline:
                     "lifi swap %s deposit attempt %d failed: %s", swap_id, attempt + 1, exc
                 )
                 await asyncio.sleep(self._poll_interval_sec)
-        raise RuntimeError(
-            f"deposit retries exhausted; output held at LP wallet: {last_error}"
-        )
+        raise RuntimeError(f"deposit retries exhausted: {last_error}")
 
-    async def _deposit(
-        self, swap_id: str, quote: dict, to_info: Any, received: int
-    ) -> None:
+    async def _transfer_to_deposit_address(
+        self, evm: Any, token_address: Optional[str], amount: int
+    ) -> str:
         deposit_address = await self.bridge.get_deposit_address()
-        pre_internal = await self.bridge.lp_internal_balance(quote["to_token_id"])
-        evm = self._evm_for(to_info.chain_id)
         async with evm.tx_lock:
-            deposit_tx = await asyncio.to_thread(
-                evm.transfer, to_info.token_address, deposit_address, received
-            )
-        self._update_swap(swap_id, deposit_tx_hash=deposit_tx)
-        await self.bridge.await_deposit_credit(
-            to_info.chain_id, deposit_tx, received, quote["to_token_id"], pre_internal
-        )
+            try:
+                return await asyncio.to_thread(evm.transfer, token_address, deposit_address, amount)
+            except TransactionPendingError as exc:
+                # Possibly sent. A resend could pay twice, and the deposit
+                # check keeps polling until this one lands.
+                return exc.tx_hash
 
     def _quote_fee_bps(self, quote: dict) -> int:
         # Recovery rebuilds a partial quote without fee columns, and rows

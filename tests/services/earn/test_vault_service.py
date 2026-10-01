@@ -1807,7 +1807,7 @@ class TestDeployIdle:
             (tx_id, pool, USDC_TOKEN_ID, str(amount), POOL_ADDRESS),
         )
 
-    async def test_one_reclaim_covers_every_waiting_withdrawal_and_the_buffer(self, test_db):
+    async def test_one_reclaim_covers_every_waiting_withdrawal(self, test_db):
         service, strategy = self._service(idle=50, buffer_min=100)
         strategy.total_assets = AsyncMock(return_value=10_000)
         service.sync_total_assets = AsyncMock(return_value=10_050)
@@ -1821,10 +1821,11 @@ class TestDeployIdle:
 
         strategy.withdraw_from_earn = AsyncMock(side_effect=reclaim)
 
-        assert await service.deploy_reclaim(POOL_ID_HEX) == -550
+        assert await service.deploy_reclaim(POOL_ID_HEX) == -450
 
-        strategy.withdraw_from_earn.assert_awaited_once_with(550)
-        strategy.withdraw_ready.assert_awaited_once_with(550)
+        # Exactly what the two withdrawals are short of, nothing for the buffer.
+        strategy.withdraw_from_earn.assert_awaited_once_with(450)
+        strategy.withdraw_ready.assert_awaited_once_with(450)
         # The credit is spotted by the pool balance rising, so nothing else
         # may touch that balance until it lands.
         assert during == [(True, frozenset({POOL_ID_HEX}))]
@@ -1832,13 +1833,24 @@ class TestDeployIdle:
         service.sync_total_assets.assert_awaited_once()
         strategy.deposit_to_earn.assert_not_awaited()
 
-    async def test_a_short_buffer_is_refilled_with_nobody_waiting(self, test_db):
-        service, strategy = self._service(idle=10, buffer_min=50_000_000)
-        strategy.total_assets = AsyncMock(return_value=100_000_000)
+    async def test_an_empty_buffer_is_not_refilled_from_the_strategy(self, test_db):
+        # Mainnet, 30 Sep: a 50 USDC floor on a Midas pool holding ~71 USDC,
+        # nothing waiting. The round redeemed 50 USDC to fill the buffer and
+        # every holder paid Midas's 7 bps redeem fee through the next sync.
+        service, strategy = self._service(idle=0, buffer_min=50_000_000)
+        strategy.total_assets = AsyncMock(return_value=70_896_496)
         strategy.withdraw_from_earn = AsyncMock()
 
-        assert await service.deploy_reclaim(POOL_ID_HEX) == -(50_000_000 - 10)
-        strategy.deposit_to_earn.assert_not_awaited()
+        assert await service.deploy_reclaim(POOL_ID_HEX) == 0
+        strategy.withdraw_from_earn.assert_not_awaited()
+
+    async def test_a_buffer_covering_the_waiting_withdrawals_needs_no_reclaim(self, test_db):
+        service, strategy = self._service(idle=500, buffer_min=1_000)
+        strategy.withdraw_from_earn = AsyncMock()
+        self._waiting(400, "w1")
+
+        assert await service.deploy_reclaim(POOL_ID_HEX) == 0
+        strategy.withdraw_from_earn.assert_not_awaited()
 
     async def test_a_reclaim_never_asks_for_more_than_is_deployed(self, test_db):
         service, strategy = self._service(idle=0, buffer_min=100)

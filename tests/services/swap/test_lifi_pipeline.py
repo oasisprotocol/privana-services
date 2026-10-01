@@ -195,6 +195,148 @@ class TestRun:
         assert privana.transfer_funds.await_count == 3
 
 
+def _min_at(to_amount, slippage_bps):
+    """LiFi's toAmountMin for `to_amount` at `slippage_bps`."""
+    return to_amount * (10_000 - slippage_bps) // 10_000
+
+
+class TestSlippageFloor:
+    """The floor stored on a quote and the execution check must use one slippage.
+
+    The fake LiFi derives toAmountMin from the slippage it is asked for, as the
+    live API does, so these tests hold for the invariant rather than for numbers.
+    """
+
+    FEE_BPS = 10  # _make_pipeline's fee
+    PRICE = 60000  # LiFi's toAmount for the quoted input
+
+    def _floor(self, to_amount, slippage_bps):
+        # Mirrors QuoteService: toAmountMin of the priced route, less the fee on gross.
+        _, fee = calculate_fee(to_amount, self.FEE_BPS)
+        return _min_at(to_amount, slippage_bps) - fee
+
+    def _lifi_at(self, pipeline, *to_amounts):
+        """LiFi pricing the input at each of `to_amounts` in turn."""
+        prices = iter(to_amounts)
+
+        async def get_execution_quote(**kwargs):
+            to_amount = next(prices)
+            to_amount_min = _min_at(to_amount, kwargs["slippage_bps"])
+            estimate = {**EXEC_QUOTE["estimate"], "toAmount": str(to_amount),
+                        "toAmountMin": str(to_amount_min)}
+            return {**EXEC_QUOTE, "estimate": estimate}
+        pipeline.lifi.get_execution_quote = AsyncMock(side_effect=get_execution_quote)
+
+    async def _run(self, test_db, pipeline, quote):
+        pipeline.spawn_background = MagicMock()
+        swap_id = _seed_swap(get_db(), quote)
+        record = await pipeline.launch(quote, USER, 5, "0x" + "ab" * 65, swap_id)
+        await pipeline._run(record.id, quote, 5)
+        return dict(test_db.execute("SELECT * FROM swaps WHERE id=?", (swap_id,)).fetchone())
+
+    @pytest.mark.parametrize("slippage_bps", [50, 300, 1000])
+    async def test_an_unchanged_price_clears_the_floor(
+        self, test_db, settings, insert_quote, slippage_bps
+    ):
+        insert_quote("qs", venue="lifi", user_address=USER,
+                     from_token_id=FROM_TOKEN, to_token_id=TO_TOKEN, slippage_bps=slippage_bps)
+        pipeline = _make_pipeline(settings)
+        self._lifi_at(pipeline, self.PRICE)
+        quote = {**_quote("qs"), "slippage_bps": slippage_bps,
+                 "to_amount_min": str(self._floor(self.PRICE, slippage_bps))}
+
+        row = await self._run(test_db, pipeline, quote)
+
+        assert row["status"] == "completed"
+        assert pipeline.lifi.get_execution_quote.call_args.kwargs["slippage_bps"] == slippage_bps
+
+    async def test_a_drop_beyond_the_slippage_fails_before_sending(self, test_db, settings, insert_quote):
+        insert_quote("qd", venue="lifi", user_address=USER,
+                     from_token_id=FROM_TOKEN, to_token_id=TO_TOKEN)
+        pipeline = _make_pipeline(settings)
+        self._lifi_at(pipeline, int(self.PRICE * 0.96))
+        quote = {**_quote("qd"), "slippage_bps": 300,
+                 "to_amount_min": str(self._floor(self.PRICE, 300))}
+
+        row = await self._run(test_db, pipeline, quote)
+
+        assert row["status"] == "failed"
+        assert "execution quote below floor" in row["error"]
+        assert pipeline.lifi.get_execution_quote.await_count == 1
+        pipeline.evm.send_transaction_request.assert_not_called()
+
+    async def test_a_drop_within_the_slippage_narrows_it_to_keep_the_floor(
+        self, test_db, settings, insert_quote
+    ):
+        insert_quote("qn", venue="lifi", user_address=USER,
+                     from_token_id=FROM_TOKEN, to_token_id=TO_TOKEN)
+        pipeline = _make_pipeline(settings)
+        dropped = int(self.PRICE * 0.99)
+        self._lifi_at(pipeline, dropped, dropped)
+        floor = self._floor(self.PRICE, 300)
+        quote = {**_quote("qn"), "slippage_bps": 300, "to_amount_min": str(floor)}
+
+        row = await self._run(test_db, pipeline, quote)
+
+        assert row["status"] == "completed"
+        narrowed = pipeline.lifi.get_execution_quote.call_args_list[1].kwargs["slippage_bps"]
+        assert 0 < narrowed < 300
+        # The minimum LiFi enforces on chain still credits the floor.
+        credited_min, _ = calculate_fee(_min_at(dropped, narrowed), self.FEE_BPS)
+        assert credited_min >= floor
+
+    async def test_a_further_drop_before_the_narrowed_quote_fails_before_sending(
+        self, test_db, settings, insert_quote
+    ):
+        insert_quote("qf", venue="lifi", user_address=USER,
+                     from_token_id=FROM_TOKEN, to_token_id=TO_TOKEN)
+        pipeline = _make_pipeline(settings)
+        self._lifi_at(pipeline, int(self.PRICE * 0.99), int(self.PRICE * 0.95))
+        quote = {**_quote("qf"), "slippage_bps": 300,
+                 "to_amount_min": str(self._floor(self.PRICE, 300))}
+
+        row = await self._run(test_db, pipeline, quote)
+
+        assert row["status"] == "failed"
+        assert "execution quote below floor" in row["error"]
+        pipeline.evm.send_transaction_request.assert_not_called()
+
+    async def test_a_quote_without_a_slippage_executes_at_lifis_default(
+        self, test_db, settings, insert_quote
+    ):
+        # Such a floor was priced at LiFi's 0.5% default.
+        insert_quote("ql", venue="lifi", user_address=USER,
+                     from_token_id=FROM_TOKEN, to_token_id=TO_TOKEN, slippage_bps=None)
+        pipeline = _make_pipeline(settings)
+        self._lifi_at(pipeline, self.PRICE)
+        quote = {**_quote("ql"), "to_amount_min": str(self._floor(self.PRICE, 50))}
+
+        row = await self._run(test_db, pipeline, quote)
+
+        assert row["status"] == "completed"
+        assert pipeline.lifi.get_execution_quote.call_args.kwargs["slippage_bps"] == 50
+
+
+class TestSlippageBpsToFloor:
+    @pytest.mark.parametrize("fee_bps", [0, 10, 150])
+    @pytest.mark.parametrize("to_amount", [10**6, 58_141, 10**18 + 7])
+    @pytest.mark.parametrize("shortfall_bps", [0, 10, 200])
+    def test_its_minimum_credits_the_floor(self, fee_bps, to_amount, shortfall_bps):
+        from src.services.swap.lifi_pipeline import _slippage_bps_to_floor
+
+        gross_floor = _min_at(to_amount, shortfall_bps)
+        floor, _ = calculate_fee(gross_floor, fee_bps)
+        slippage_bps = _slippage_bps_to_floor(to_amount, floor, fee_bps)
+        assert slippage_bps is not None and slippage_bps >= 0
+        credited, _ = calculate_fee(_min_at(to_amount, slippage_bps), fee_bps)
+        assert credited >= floor
+
+    def test_none_when_the_expected_output_misses_the_floor(self):
+        from src.services.swap.lifi_pipeline import _slippage_bps_to_floor
+
+        assert _slippage_bps_to_floor(57_000, 58_140, 10) is None
+
+
 class TestRefund:
     async def _launch_and_run(self, pipeline, quote):
         pipeline.spawn_background = MagicMock()

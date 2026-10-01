@@ -47,7 +47,7 @@ class TestQuoteDeduplication:
         future = int(time.time()) + 300
         insert_quote("q1", expires_at=future)
         service = self._make_service()
-        result = await service._find_existing_quote("0xuser", TOKEN_A, TOKEN_B, "1000000")
+        result = await service._find_existing_quote("0xuser", TOKEN_A, TOKEN_B, "1000000", 300)
         assert result is not None
         assert result.quote_id == "q1"
 
@@ -55,28 +55,41 @@ class TestQuoteDeduplication:
         past = int(time.time()) - 10
         insert_quote("q2", expires_at=past)
         service = self._make_service()
-        result = await service._find_existing_quote("0xuser", TOKEN_A, TOKEN_B, "1000000")
+        result = await service._find_existing_quote("0xuser", TOKEN_A, TOKEN_B, "1000000", 300)
         assert result is None
 
     async def test_returns_none_for_different_user(self, insert_quote):
         future = int(time.time()) + 300
         insert_quote("q3", expires_at=future, user_address="0xother")
         service = self._make_service()
-        result = await service._find_existing_quote("0xuser", TOKEN_A, TOKEN_B, "1000000")
+        result = await service._find_existing_quote("0xuser", TOKEN_A, TOKEN_B, "1000000", 300)
         assert result is None
 
     async def test_returns_none_for_different_amount(self, insert_quote):
         future = int(time.time()) + 300
         insert_quote("q4", expires_at=future)
         service = self._make_service()
-        result = await service._find_existing_quote("0xuser", TOKEN_A, TOKEN_B, "9999999")
+        result = await service._find_existing_quote("0xuser", TOKEN_A, TOKEN_B, "9999999", 300)
+        assert result is None
+
+    async def test_returns_none_for_different_slippage(self, insert_quote):
+        # The stored to_amount_min holds only for the slippage it was priced at.
+        insert_quote("q5", expires_at=int(time.time()) + 300)
+        service = self._make_service()
+        result = await service._find_existing_quote("0xuser", TOKEN_A, TOKEN_B, "1000000", 100)
+        assert result is None
+
+    async def test_never_reuses_a_quote_without_a_recorded_slippage(self, insert_quote):
+        insert_quote("q6", expires_at=int(time.time()) + 300, slippage_bps=None)
+        service = self._make_service()
+        result = await service._find_existing_quote("0xuser", TOKEN_A, TOKEN_B, "1000000", 300)
         assert result is None
 
     async def test_reuse_resolves_the_global_fee_for_a_non_exempt_wallet(self, insert_quote):
         future = int(time.time()) + 300
         insert_quote("q5", expires_at=future, venue="internal")
         service = self._make_service()
-        result = await service._find_existing_quote("0xuser", TOKEN_A, TOKEN_B, "1000000")
+        result = await service._find_existing_quote("0xuser", TOKEN_A, TOKEN_B, "1000000", 300)
         assert result.fee_bps == service.settings.fee_bps
         expected_fee = 1000000 * service.settings.fee_bps // 10_000
         assert result.fee_amount == str(expected_fee)
@@ -98,7 +111,7 @@ class TestQuoteDeduplication:
         insert_quote("q6", expires_at=now + 300, venue="internal", user_address="0x" + "d8" * 20)
         service = self._make_service()
         result = await service._find_existing_quote(
-            "0x" + "d8" * 20, TOKEN_A, TOKEN_B, "1000000"
+            "0x" + "d8" * 20, TOKEN_A, TOKEN_B, "1000000", 300
         )
         assert result.fee_bps == 0
         assert result.fee_amount == "0"
@@ -120,7 +133,7 @@ class TestQuoteDeduplication:
         insert_quote("q7", expires_at=now + 300, venue="lifi", user_address="0x" + "d8" * 20)
         service = self._make_service()
         result = await service._find_existing_quote(
-            "0x" + "d8" * 20, TOKEN_A, TOKEN_B, "1000000"
+            "0x" + "d8" * 20, TOKEN_A, TOKEN_B, "1000000", 300
         )
         assert result.fee_bps == service.settings.fee_bps
         assert result.fee_policy_id is None
@@ -249,6 +262,7 @@ class TestGetQuote:
             to_token_id=TOKEN_B,
             from_amount="1000000",
             user_address="0x" + "a" * 40,
+            slippage_bps=300,
         )
         assert result.quote_id is not None
         assert result.from_token_id == TOKEN_A
@@ -266,6 +280,21 @@ class TestGetQuote:
         assert result.transfer_nonce == 5
         assert result.expires_at > int(time.time())
 
+    async def test_prices_and_stores_the_requested_slippage(self, test_db):
+        service = self._make_service()
+        result = await service.get_quote(
+            from_token_id=TOKEN_A,
+            to_token_id=TOKEN_B,
+            from_amount="1000000",
+            user_address="0x" + "a" * 40,
+            slippage_bps=100,
+        )
+        assert service.lifi.get_routes.call_args.kwargs["slippage_bps"] == 100
+        row = test_db.execute(
+            "SELECT slippage_bps FROM quotes WHERE id = ?", (result.quote_id,)
+        ).fetchone()
+        assert row["slippage_bps"] == 100
+
     async def test_no_routes_raises_value_error(self, test_db):
         service = self._make_service()
         service.lifi.get_routes = AsyncMock(return_value={"routes": []})
@@ -275,6 +304,7 @@ class TestGetQuote:
                 to_token_id=TOKEN_B,
                 from_amount="1000000",
                 user_address="0x" + "a" * 40,
+                slippage_bps=300,
             )
 
     async def test_insufficient_liquidity_raises_value_error(self, test_db):
@@ -287,6 +317,7 @@ class TestGetQuote:
                 to_token_id=TOKEN_B,
                 from_amount="1000000",
                 user_address="0x" + "a" * 40,
+                slippage_bps=300,
             )
 
     async def test_passes_accounting_chain_and_token_to_lifi(self, test_db):
@@ -296,6 +327,7 @@ class TestGetQuote:
             to_token_id=TOKEN_B,
             from_amount="1000000",
             user_address="0x" + "a" * 40,
+            slippage_bps=300,
         )
         call_kwargs = service.lifi.get_routes.call_args
         assert call_kwargs.kwargs["from_chain_id"] == 84532
@@ -317,6 +349,7 @@ class TestVenueSelection(TestGetQuote):
                 to_token_id=TOKEN_B,
                 from_amount="1000000",
                 user_address="0x" + "a" * 40,
+                slippage_bps=300,
             )
         assert service.lifi.get_routes.call_count == 1
 
@@ -328,6 +361,7 @@ class TestVenueSelection(TestGetQuote):
             to_token_id=TOKEN_B,
             from_amount="1000000",
             user_address="0x" + "a" * 40,
+            slippage_bps=300,
         )
         assert result.venue == "internal"
         assert service.lifi.get_routes.call_count == 1
@@ -345,6 +379,7 @@ class TestVenueSelection(TestGetQuote):
             to_token_id=TOKEN_B,
             from_amount="1000000",
             user_address="0x" + "a" * 40,
+            slippage_bps=300,
         )
         assert result.venue == "lifi"
         assert service.lifi.get_routes.call_count == 2
@@ -366,6 +401,7 @@ class TestVenueSelection(TestGetQuote):
                 to_token_id=TOKEN_B,
                 from_amount="1000000",
                 user_address="0x" + "a" * 40,
+                slippage_bps=300,
             )
         assert service.lifi.get_routes.call_count == 1
 
@@ -384,6 +420,7 @@ class TestVenueSelection(TestGetQuote):
             to_token_id=TOKEN_B,
             from_amount="1000000",
             user_address="0x" + "a" * 40,
+            slippage_bps=300,
         )
 
         assert result.venue == "lifi"
@@ -406,6 +443,7 @@ class TestVenueSelection(TestGetQuote):
                 to_token_id=TOKEN_B,
                 from_amount="1000000",
                 user_address="0x" + "a" * 40,
+                slippage_bps=300,
             )
 
     async def test_internal_swap_over_max_usd_cap_raises(self, test_db):
@@ -424,6 +462,7 @@ class TestVenueSelection(TestGetQuote):
                 to_token_id=TOKEN_B,
                 from_amount="1000000",
                 user_address="0x" + "a" * 40,
+                slippage_bps=300,
             )
 
     async def test_max_usd_cap_disabled_when_zero(self, test_db):
@@ -441,6 +480,7 @@ class TestVenueSelection(TestGetQuote):
             to_token_id=TOKEN_B,
             from_amount="1000000",
             user_address="0x" + "a" * 40,
+            slippage_bps=300,
         )
         assert result.quote_id is not None
 
@@ -458,6 +498,7 @@ class TestVenueSelection(TestGetQuote):
             to_token_id=TOKEN_B,
             from_amount="1000000",
             user_address="0x" + "a" * 40,
+            slippage_bps=300,
         )
         assert result.quote_id is not None
 
@@ -480,6 +521,7 @@ class TestVenueSelection(TestGetQuote):
                 to_token_id=TOKEN_B,
                 from_amount="1000000",
                 user_address="0x" + "a" * 40,
+                slippage_bps=300,
             )
 
     async def test_lifi_swap_cap_disabled_when_zero(self, test_db):
@@ -500,6 +542,7 @@ class TestVenueSelection(TestGetQuote):
             to_token_id=TOKEN_B,
             from_amount="1000000",
             user_address="0x" + "a" * 40,
+            slippage_bps=300,
         )
         assert result.venue == "lifi"
 
@@ -513,9 +556,10 @@ class TestVenueSelection(TestGetQuote):
             to_token_id=TOKEN_B,
             from_amount="1000000",
             user_address=user,
+            slippage_bps=300,
         )
         assert first.venue == "lifi"
-        existing = await service._find_existing_quote(user, TOKEN_A, TOKEN_B, "1000000")
+        existing = await service._find_existing_quote(user, TOKEN_A, TOKEN_B, "1000000", 300)
         assert existing is not None
         assert existing.venue == "lifi"
 
@@ -547,7 +591,7 @@ class TestFeeExemption(TestGetQuote):
     async def test_exempt_wallet_pays_zero_fee_on_internal_fill(self, test_db):
         self.set_policies([self._campaign()])
         service = self._make_service()
-        result = await service.get_quote(TOKEN_A, TOKEN_B, "1000000", self.USER)
+        result = await service.get_quote(TOKEN_A, TOKEN_B, "1000000", self.USER, 300)
         assert result.venue == "internal"
         assert result.fee_bps == 0
         assert result.fee_amount == "0"
@@ -557,7 +601,7 @@ class TestFeeExemption(TestGetQuote):
     async def test_unlisted_wallet_still_pays_default_fee(self, test_db):
         self.set_policies([self._campaign(wallets=["0x" + "b" * 40])])
         service = self._make_service()
-        result = await service.get_quote(TOKEN_A, TOKEN_B, "1000000", self.USER)
+        result = await service.get_quote(TOKEN_A, TOKEN_B, "1000000", self.USER, 300)
         assert result.fee_bps == 10
         assert result.fee_policy_id is None
 
@@ -565,7 +609,7 @@ class TestFeeExemption(TestGetQuote):
         now = int(time.time())
         self.set_policies([self._campaign(valid_until=now + 5)])
         service = self._make_service()
-        result = await service.get_quote(TOKEN_A, TOKEN_B, "1000000", self.USER)
+        result = await service.get_quote(TOKEN_A, TOKEN_B, "1000000", self.USER, 300)
         assert result.fee_bps == 0
         assert result.expires_at <= now + 6
 
@@ -579,7 +623,7 @@ class TestFeeExemption(TestGetQuote):
             user_address="0xlp", token_id=TOKEN_B, balance=str(2 * 10**18 - 10**15)
         )
         service.accounting.get_lp_balance = AsyncMock(return_value=near_gross)
-        result = await service.get_quote(TOKEN_A, TOKEN_B, "1000000", self.USER)
+        result = await service.get_quote(TOKEN_A, TOKEN_B, "1000000", self.USER, 300)
         assert result.venue == "lifi"
         assert result.fee_bps == 10
         assert result.fee_policy_id is None
@@ -593,10 +637,10 @@ class TestFeeExemption(TestGetQuote):
         that is the accepted tradeoff for not storing a commitment."""
         self.set_policies([self._campaign()])
         service = self._make_service()
-        first = await service.get_quote(TOKEN_A, TOKEN_B, "1000000", self.USER)
+        first = await service.get_quote(TOKEN_A, TOKEN_B, "1000000", self.USER, 300)
         assert first.fee_bps == 0
         fee_policy_module._policies = ()
-        existing = await service._find_existing_quote(self.USER, TOKEN_A, TOKEN_B, "1000000")
+        existing = await service._find_existing_quote(self.USER, TOKEN_A, TOKEN_B, "1000000", 300)
         assert existing is not None
         assert existing.quote_id == first.quote_id
         assert existing.fee_bps == service.settings.fee_bps
@@ -621,6 +665,7 @@ class TestQuoteExpiresIn:
             to_token_id=TOKEN_B,
             from_amount="1000000",
             user_address="0x" + "a" * 40,
+            slippage_bps=300,
         )
         assert result.expires_at == 1_800_000_030
         assert result.expires_in == 25
@@ -630,5 +675,5 @@ class TestQuoteExpiresIn:
         monkeypatch.setattr(time, "time", lambda: clock[0])
         insert_quote("q-reuse", expires_at=1_800_000_012)
         service = TestQuoteDeduplication()._make_service()
-        result = await service._find_existing_quote("0xuser", TOKEN_A, TOKEN_B, "1000000")
+        result = await service._find_existing_quote("0xuser", TOKEN_A, TOKEN_B, "1000000", 300)
         assert result.expires_in == 11  # rounded down, never overstated

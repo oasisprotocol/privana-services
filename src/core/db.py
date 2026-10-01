@@ -143,6 +143,10 @@ MIGRATIONS = [
     # changes, as a JSON list of {stage, at, detail}, so the feed can say more
     # than "pending".
     "ALTER TABLE earn_transactions ADD COLUMN history TEXT;",
+    # Slippage the quote's to_amount_min was priced at; execution must ask
+    # LiFi for the same one. NULL on quotes stored before it, which were
+    # priced at LiFi's default.
+    "ALTER TABLE quotes ADD COLUMN slippage_bps INTEGER;",
 
 ]
 

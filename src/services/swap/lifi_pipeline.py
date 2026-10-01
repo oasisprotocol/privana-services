@@ -7,7 +7,7 @@ from privana.types import TransferFundsRequest
 
 from src.clients.accounting import get_accounting_client
 from src.clients.base_evm import NATIVE_TOKEN, get_evm_client, is_native
-from src.clients.lifi import get_lifi_client
+from src.clients.lifi import LIFI_DEFAULT_SLIPPAGE_BPS, get_lifi_client
 from src.clients.privana import get_swap_lp_privana_client
 from src.core.config import load_settings
 from src.core.db import db_write, get_db
@@ -194,7 +194,7 @@ class LifiSwapPipeline:
         from_evm = self._evm_for(from_info.chain_id)
         to_evm = self._evm_for(to_info.chain_id)
 
-        exec_quote = await self.lifi.get_execution_quote(
+        request = dict(
             from_chain_id=from_info.chain_id,
             to_chain_id=to_info.chain_id,
             from_token_address=_lifi_token(from_info.token_address),
@@ -202,12 +202,30 @@ class LifiSwapPipeline:
             from_amount=quote["from_amount"],
             from_address=from_evm.address,
         )
-        net_min, _ = calculate_fee(
-            int(exec_quote["estimate"]["toAmountMin"]), self._quote_fee_bps(quote)
-        )
-        if net_min < int(quote["to_amount_min"]):
+        fee_bps = self._quote_fee_bps(quote)
+        floor = int(quote["to_amount_min"])
+        # Quotes stored before the slippage_bps column existed were priced at LiFi's default.
+        slippage_bps = quote.get("slippage_bps")
+        if slippage_bps is None:
+            slippage_bps = LIFI_DEFAULT_SLIPPAGE_BPS
+        # The floor came from a route priced at this slippage. A different one
+        # moves toAmountMin, not the price.
+        exec_quote = await self.lifi.get_execution_quote(**request, slippage_bps=slippage_bps)
+        if _net_min(exec_quote, fee_bps) < floor:
+            # The price fell since the quote. Spend less of the tolerance so
+            # the minimum LiFi enforces on chain still pays out the floor.
+            narrowed_bps = _slippage_bps_to_floor(
+                int(exec_quote["estimate"]["toAmount"]), floor, fee_bps
+            )
+            if narrowed_bps is not None:
+                logger.info("lifi swap %s narrowing slippage to %s bps", swap_id, narrowed_bps)
+                exec_quote = await self.lifi.get_execution_quote(
+                    **request, slippage_bps=narrowed_bps
+                )
+        net_min = _net_min(exec_quote, fee_bps)
+        if net_min < floor:
             raise RuntimeError(
-                f"execution quote below floor: net_min={net_min} floor={quote['to_amount_min']}"
+                f"execution quote below floor: net_min={net_min} floor={floor}"
             )
 
         pre_out = await asyncio.to_thread(
@@ -376,6 +394,26 @@ class LifiSwapPipeline:
 
 def _lifi_token(token_address: Optional[str]) -> str:
     return NATIVE_TOKEN if is_native(token_address) else token_address
+
+
+def _net_min(exec_quote: dict, fee_bps: int) -> int:
+    """The least the user is credited if LiFi pays out its toAmountMin."""
+    net, _ = calculate_fee(int(exec_quote["estimate"]["toAmountMin"]), fee_bps)
+    return net
+
+
+def _slippage_bps_to_floor(to_amount: int, floor: int, fee_bps: int) -> Optional[int]:
+    """The largest slippage whose toAmountMin still credits `floor` after the
+    fee, or None when the expected output itself falls short of it."""
+    # Smallest gross output whose net is at least the floor. The fee rounds
+    # down, so the estimate can sit a unit or two above it.
+    gross_min = -(-floor * 10_000 // (10_000 - fee_bps))
+    while gross_min > 0 and calculate_fee(gross_min - 1, fee_bps)[0] >= floor:
+        gross_min -= 1
+    if to_amount < gross_min:
+        return None
+    # Rounded down: a smaller slippage only raises the minimum.
+    return (to_amount - gross_min) * 10_000 // to_amount
 
 
 async def recover_inflight_lifi_swaps(pipeline: Optional[LifiSwapPipeline] = None) -> None:

@@ -50,7 +50,7 @@ class QuoteService:
         to_token_id: str,
         from_amount: str,
         user_address: str,
-        slippage: float = 0.03,
+        slippage_bps: int,
     ) -> QuoteResponse:
         self.cleanup_expired_quotes()
         validate_token_id(from_token_id, "from_token_id")
@@ -58,7 +58,9 @@ class QuoteService:
         validate_amount(from_amount, "from_amount")
         validate_address(user_address, "user_address")
 
-        existing = await self._find_existing_quote(user_address, from_token_id, to_token_id, from_amount)
+        existing = await self._find_existing_quote(
+            user_address, from_token_id, to_token_id, from_amount, slippage_bps
+        )
         if existing is not None:
             return existing
 
@@ -95,6 +97,7 @@ class QuoteService:
             from_token_address=lifi_from_token,
             to_token_address=lifi_to_token,
             from_amount=from_amount,
+            slippage_bps=slippage_bps,
         )
 
         routes = lifi_response.get("routes", [])
@@ -121,7 +124,7 @@ class QuoteService:
         venue = SwapVenue.INTERNAL.value
         if int(lp_balance.balance) < to_amount_after_fee:
             venue = await self._select_lifi_venue_or_raise(
-                from_chain_id, to_chain_id, from_on_chain, to_on_chain, from_amount
+                from_chain_id, to_chain_id, from_on_chain, to_on_chain, from_amount, slippage_bps
             )
             # Exemptions never apply to LiFi routed swaps.
             decision = FeeDecision(fee_bps=self.settings.fee_bps)
@@ -143,13 +146,13 @@ class QuoteService:
             """INSERT INTO quotes
                (id, user_address, from_token_id, to_token_id, from_chain_id, to_chain_id,
                 from_amount, to_amount_gross, to_amount_estimate, to_amount_min,
-                route_tool, liquidity_provider, expires_at, created_at, venue)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                route_tool, liquidity_provider, expires_at, created_at, venue, slippage_bps)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 quote_id, user_address.lower(), from_token_id.lower(), to_token_id.lower(),
                 from_chain_id, to_chain_id,
                 from_amount, to_amount_str, str(to_amount_after_fee), str(max(to_amount_min, 0)),
-                route_tool, liquidity_provider, expires_at, now, venue,
+                route_tool, liquidity_provider, expires_at, now, venue, slippage_bps,
             ),
         )
 
@@ -203,6 +206,7 @@ class QuoteService:
         from_token_address: str,
         to_token_address: str,
         from_amount: str,
+        slippage_bps: int,
     ) -> str:
         if not self.settings.lifi_execution_enabled:
             raise ValueError("Insufficient liquidity for this swap")
@@ -219,6 +223,7 @@ class QuoteService:
             from_token_address=from_token_address,
             to_token_address=to_token_address,
             from_amount=from_amount,
+            slippage_bps=slippage_bps,
         )
         if not real_routes.get("routes"):
             raise ValueError("Insufficient liquidity for this swap")
@@ -234,15 +239,18 @@ class QuoteService:
         from_token_id: str,
         to_token_id: str,
         from_amount: str,
+        slippage_bps: int,
     ) -> Optional[QuoteResponse]:
         db = get_db()
         now = int(time.time())
+        # A quote's to_amount_min holds only for the slippage it was priced at.
         row = db.execute(
             """SELECT * FROM quotes
                WHERE user_address = ? AND from_token_id = ? AND to_token_id = ?
-               AND from_amount = ? AND expires_at > ?
+               AND from_amount = ? AND slippage_bps = ? AND expires_at > ?
                ORDER BY created_at DESC LIMIT 1""",
-            (user_address.lower(), from_token_id.lower(), to_token_id.lower(), from_amount, now),
+            (user_address.lower(), from_token_id.lower(), to_token_id.lower(), from_amount,
+             slippage_bps, now),
         ).fetchone()
 
         if row is None:

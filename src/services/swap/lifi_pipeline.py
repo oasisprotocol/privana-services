@@ -109,17 +109,19 @@ class LifiSwapPipeline:
     ) -> None:
         refundable = {LifiSwapStep.WITHDRAW.value, LifiSwapStep.LIFI_EXECUTE.value}
         if step not in refundable:
+            logger.info("lifi swap %s failed at step %s, nothing to refund: %s", swap_id, step, reason)
             self._update_swap(swap_id, status=SwapStatus.FAILED.value, error=reason)
             return
 
+        logger.info("lifi swap %s refunding from step %s: %s", swap_id, step, reason)
         self._update_swap(swap_id, status=SwapStatus.REFUNDING.value, error=reason)
         try:
             if step == LifiSwapStep.LIFI_EXECUTE.value:
+                logger.info("lifi swap %s re-depositing input tokens", swap_id)
                 await self._redeposit_input(quote)
-            await self._lp_transfer(
-                quote["user_address"], quote["from_token_id"], int(quote["from_amount"])
-            )
+            await self._lp_transfer(quote["user_address"], quote["from_token_id"], int(quote["from_amount"]))
             self._update_swap(swap_id, status=SwapStatus.REFUNDED.value)
+            logger.info("lifi swap %s refunded", swap_id)
         except Exception as exc:
             logger.exception("lifi swap %s refund failed", swap_id)
             self._update_swap(
@@ -258,8 +260,12 @@ class LifiSwapPipeline:
         self._update_swap(swap_id, step=LifiSwapStep.DEPOSIT.value)
         last_error: Optional[Exception] = None
         for attempt in range(self._deposit_max_retries):
+            logger.info(
+                "lifi swap %s deposit attempt %d/%d", swap_id, attempt + 1, self._deposit_max_retries
+            )
             try:
                 await self._deposit(swap_id, quote, to_info, received)
+                logger.info("lifi swap %s deposit attempt %d succeeded", swap_id, attempt + 1)
                 return
             except Exception as exc:
                 last_error = exc
@@ -298,6 +304,7 @@ class LifiSwapPipeline:
         return credited
 
     async def _lp_transfer(self, to_address: str, token_id: str, amount: int) -> None:
+        logger.info("lifi swap _lp_transfer %s of token %s to %s", amount, token_id, to_address)
         client = await self._privana_factory()
         # Waiting for internal settlement does not consume payout retries.
         while True:
@@ -314,6 +321,7 @@ class LifiSwapPipeline:
             await asyncio.sleep(self._poll_interval_sec)
 
     async def _submit_lp_transfer(self, client, to_address: str, token_id: str, amount: int) -> None:
+        logger.info("lifi swap _submit_lp_transfer %s of token %s to %s", amount, token_id, to_address)
         # Caller owns lp_transfer_lock through acceptance AND confirmation.
         last_detail = None
         for _ in range(self._credit_max_retries):

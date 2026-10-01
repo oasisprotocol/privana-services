@@ -108,17 +108,16 @@ class EvmClient:
         tx_hash = Web3.to_hex(Web3.keccak(signed.raw_transaction))
         logger.info("Sending transaction %s via %s: %s", tx_hash, self.w3.provider.endpoint_uri, tx)
         try:
-            tx_hash = self.w3.eth.send_raw_transaction(signed.raw_transaction)
+            tx_hash = Web3.to_hex(self.w3.eth.send_raw_transaction(signed.raw_transaction))
             logger.info("Transaction %s accepted by %s", tx_hash, self.w3.provider.endpoint_uri)
             receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash)
         except Exception as exc:
             self._log_send_failure(tx_hash, tx, exc)
             raise
-        tx_hex = Web3.to_hex(tx_hash)
         if receipt.status != 1:
-            raise RuntimeError(f"transaction reverted: {tx_hex}")
-        logger.info("Transaction %s succeeded in block %s", tx_hex, receipt.blockNumber)
-        return tx_hex
+            raise RuntimeError(f"transaction reverted: {tx_hash}")
+        logger.info("Transaction %s succeeded in block %s", tx_hash, receipt.blockNumber)
+        return tx_hash
 
     def _log_send_failure(self, tx_hex: str, tx: dict, exc: Exception) -> None:
         """Record what the chain says about a send whose outcome is unknown."""

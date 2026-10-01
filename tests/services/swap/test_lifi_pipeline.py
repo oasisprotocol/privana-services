@@ -2,7 +2,7 @@ import asyncio
 import time
 import uuid
 from dataclasses import replace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -51,7 +51,6 @@ def _make_pipeline(settings):
     bridge = MagicMock()
     bridge.withdraw_to_chain = AsyncMock(return_value=17)
     bridge.get_deposit_address = AsyncMock(return_value="0x" + "dd" * 20)
-    bridge.lp_internal_balance = AsyncMock(return_value=100)
     bridge.await_deposit_credit = AsyncMock(return_value=None)
 
     evm = MagicMock()
@@ -193,6 +192,51 @@ class TestRun:
         row = dict(test_db.execute("SELECT * FROM swaps WHERE id=?", (swap_id,)).fetchone())
         assert row["status"] == "completed"
         assert privana.transfer_funds.await_count == 3
+
+    async def test_failed_deposit_transfer_is_resent(self, test_db, settings, insert_quote):
+        insert_quote("q5", venue="lifi", user_address=USER,
+                     from_token_id=FROM_TOKEN, to_token_id=TO_TOKEN)
+        pipeline = _make_pipeline(settings)
+        pipeline.evm.transfer = MagicMock(side_effect=[RuntimeError("transaction reverted: 0x01"), "0x" + "ef" * 32])
+        swap_id = await self._launch_and_run(pipeline, _quote("q5"))
+        row = dict(test_db.execute("SELECT * FROM swaps WHERE id=?", (swap_id,)).fetchone())
+        assert row["status"] == "completed"
+        assert pipeline.evm.transfer.call_count == 2
+        pipeline.bridge.await_deposit_credit.assert_awaited_once()
+
+    async def test_a_lost_deposit_send_is_awaited_not_resent(
+        self, test_db, settings, insert_quote
+    ):
+        # The send's response is lost and the probed node lags: it lacks the tx
+        # and still reports nonce 7 free. A resend would take nonce 8 and pay twice.
+        from web3 import Web3
+        from web3.exceptions import TransactionNotFound
+
+        from src.clients.base_evm import EvmClient
+        insert_quote("q6", venue="lifi", user_address=USER,
+                     from_token_id=FROM_TOKEN, to_token_id=TO_TOKEN)
+        pipeline = _make_pipeline(settings)
+        client = EvmClient("http://localhost:1", "0x" + "11" * 32)
+        client.w3 = MagicMock()
+        token = client.w3.eth.contract.return_value
+        token.functions.transfer.return_value.build_transaction = lambda tx: tx
+        # The tx's nonce and the probe's latest and pending are 7. A resend gets 8.
+        nonces = iter([7, 7, 7])
+        client.w3.eth.get_transaction_count.side_effect = lambda *_: next(nonces, 8)
+        client.w3.eth.send_raw_transaction.side_effect = ValueError("already known")
+        client.w3.eth.get_transaction.side_effect = TransactionNotFound("unknown")
+        pipeline.evm.transfer = client.transfer
+        signed = MagicMock(raw_transaction=b"raw")
+        with patch.object(client._account, "sign_transaction", return_value=signed):
+            swap_id = await self._launch_and_run(pipeline, _quote("q6"))
+        row = dict(test_db.execute("SELECT * FROM swaps WHERE id=?", (swap_id,)).fetchone())
+        sent = Web3.to_hex(Web3.keccak(b"raw"))
+        assert row["status"] == "completed"
+        assert row["deposit_tx_hash"] == sent
+        client.w3.eth.send_raw_transaction.assert_called_once()
+        pipeline.bridge.await_deposit_credit.assert_awaited_once_with(
+            TO_INFO.chain_id, sent, 60000
+        )
 
 
 def _min_at(to_amount, slippage_bps):
@@ -375,6 +419,25 @@ class TestRefund:
         pipeline.evm.transfer.assert_called_once()
         pipeline.bridge.await_deposit_credit.assert_awaited_once()
 
+    async def test_unconfirmed_redeposit_is_awaited_not_resent(self, test_db, settings, insert_quote):
+        from src.clients.base_evm import TransactionPendingError
+        insert_quote("q_p", venue="lifi", user_address=USER,
+                     from_token_id=FROM_TOKEN, to_token_id=TO_TOKEN)
+        pipeline = _make_pipeline(settings)
+        pipeline.evm.send_transaction_request = MagicMock(side_effect=RuntimeError("revert"))
+        pipeline.evm.balance_of = MagicMock(side_effect=[0, 1000000])
+        pending = "0x" + "aa" * 32
+        pipeline.evm.transfer = MagicMock(side_effect=TransactionPendingError(pending))
+        pipeline.accounting.get_transfer_nonce = AsyncMock(side_effect=[6, 70, 71])
+        pipeline.accounting.get_token_info = AsyncMock(
+            side_effect=[FROM_INFO, TO_INFO, FROM_INFO])
+        swap_id = await self._launch_and_run(pipeline, _quote("q_p"))
+        row = dict(test_db.execute("SELECT * FROM swaps WHERE id=?", (swap_id,)).fetchone())
+        assert row["status"] == "refunded"
+        pipeline.evm.transfer.assert_called_once()
+        pipeline.bridge.await_deposit_credit.assert_awaited_once_with(
+            FROM_INFO.chain_id, pending, 1000000)
+
     async def test_deposit_exhaustion_fails_without_refund(self, test_db, settings, insert_quote):
         insert_quote("q_d", venue="lifi", user_address=USER,
                      from_token_id=FROM_TOKEN, to_token_id=TO_TOKEN)
@@ -385,6 +448,7 @@ class TestRefund:
         row = dict(test_db.execute("SELECT * FROM swaps WHERE id=?", (swap_id,)).fetchone())
         assert row["status"] == "failed"
         assert "deposit" in row["error"]
+        pipeline.evm.transfer.assert_called_once()
         assert pipeline.bridge.await_deposit_credit.await_count == 2
 
     async def test_credit_exhaustion_fails_without_refund(self, test_db, settings, insert_quote):

@@ -2,7 +2,7 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from privana.client.errors import NetworkError
+from privana.client.errors import AccountingApiError, NetworkError
 
 
 @pytest.fixture(autouse=True)
@@ -142,28 +142,34 @@ class TestConcurrentWithdrawals:
 class TestAwaitDepositCredit:
     async def test_normalizes_tx_hash_and_polls_to_credit(self):
         client = AsyncMock()
-        client.check_deposit = AsyncMock(return_value=MagicMock(status="pending", detail=None))
-        client.get_balance = AsyncMock(side_effect=[MagicMock(balance="100"), MagicMock(balance="1000100")])
+        client.check_deposit = AsyncMock(side_effect=[
+            MagicMock(status="pending", detail=None), MagicMock(status="credited", detail=None),
+        ])
         bridge = _make_bridge(client)
-        await bridge.await_deposit_credit(84532, "ab" * 32, 1_000_000, "0x" + "aa" * 32, pre_balance=100)
+        await bridge.await_deposit_credit(84532, "ab" * 32, 1_000_000)
+        assert client.check_deposit.await_count == 2
         sent = client.check_deposit.call_args.args[0]
         assert sent.tx_hash.startswith("0x")
 
-    async def test_check_deposit_error_is_tolerated(self):
+    async def test_check_deposit_rejected_before_finality_is_retried(self):
         client = AsyncMock()
-        client.check_deposit = AsyncMock(side_effect=Exception("400"))
-        client.get_balance = AsyncMock(return_value=MagicMock(balance="1000100"))
+        client.check_deposit = AsyncMock(side_effect=[
+            AccountingApiError("API request failed: 400 Bad Request", 400,
+                               "Insufficient finality: 3/32 confirmations"),
+            MagicMock(status="credited", detail=None),
+        ])
         bridge = _make_bridge(client)
-        await bridge.await_deposit_credit(84532, "0x" + "ab" * 32, 1_000_000, "0x" + "aa" * 32, pre_balance=100)
+        await bridge.await_deposit_credit(1, "0x" + "ab" * 32, 1_000_000)
+        assert client.check_deposit.await_count == 2
 
     async def test_credit_never_observed_raises(self):
         client = AsyncMock()
-        client.check_deposit = AsyncMock(return_value=MagicMock(status="pending", detail=None))
-        client.get_balance = AsyncMock(return_value=MagicMock(balance="100"))
+        client.check_deposit = AsyncMock(return_value=MagicMock(status="error", detail="sweep failed"))
         bridge = _make_bridge(client)
         bridge._max_poll_attempts = 3
-        with pytest.raises(RuntimeError, match="credit"):
-            await bridge.await_deposit_credit(84532, "0x" + "ab" * 32, 1_000_000, "0x" + "aa" * 32, pre_balance=100)
+        with pytest.raises(RuntimeError, match="not credited after 3 polls: status=error detail=sweep failed"):
+            await bridge.await_deposit_credit(84532, "0x" + "ab" * 32, 1_000_000)
+        assert client.check_deposit.await_count == 3
 
 
 class TestHelpers:
@@ -172,9 +178,3 @@ class TestHelpers:
         client.get_deposit_address = AsyncMock(return_value=MagicMock(deposit_address="0xdeposit"))
         bridge = _make_bridge(client)
         assert await bridge.get_deposit_address() == "0xdeposit"
-
-    async def test_lp_internal_balance(self):
-        client = AsyncMock()
-        client.get_balance = AsyncMock(return_value=MagicMock(balance="42"))
-        bridge = _make_bridge(client)
-        assert await bridge.lp_internal_balance("0x" + "aa" * 32) == 42

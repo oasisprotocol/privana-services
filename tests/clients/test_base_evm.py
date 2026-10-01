@@ -2,6 +2,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from web3 import Web3
+from web3.exceptions import TimeExhausted, TransactionNotFound
 
 TOKEN = "0x" + "aa" * 20
 SPENDER = "0x" + "bb" * 20
@@ -62,6 +63,31 @@ class TestSendTransactionRequest:
         client = _make_client(_w3(receipt_status=0))
         with pytest.raises(RuntimeError, match="reverted"):
             client.send_transaction_request(self.TX_REQUEST)
+
+    @pytest.mark.parametrize("error", [TimeExhausted("not in the chain"), ConnectionError("rpc down")])
+    def test_a_failed_receipt_wait_raises_with_the_sent_hash(self, error):
+        from src.clients.base_evm import TransactionPendingError
+        w3 = _w3()
+        w3.eth.wait_for_transaction_receipt.side_effect = error
+        client = _make_client(w3)
+        with pytest.raises(TransactionPendingError) as exc:
+            client.send_transaction_request(self.TX_REQUEST)
+        assert exc.value.tx_hash == "0x" + "ab" * 32
+
+    # A node lacking the tx proves nothing: another backend may hold it.
+    @pytest.mark.parametrize("lookup", [None, TransactionNotFound("unknown"), ConnectionError("rpc down")])
+    def test_a_failed_send_raises_with_the_signed_hash(self, lookup):
+        from src.clients.base_evm import TransactionPendingError
+        w3 = _w3()
+        w3.eth.send_raw_transaction.side_effect = ValueError("already known")
+        w3.eth.get_transaction.side_effect = lookup
+        client = _make_client(w3)
+        with patch.object(client._account, "sign_transaction") as mock_sign:
+            mock_sign.return_value = MagicMock(raw_transaction=b"raw")
+            with pytest.raises(TransactionPendingError) as exc:
+                client.send_transaction_request(self.TX_REQUEST)
+        assert exc.value.tx_hash == Web3.to_hex(Web3.keccak(b"raw"))
+        w3.eth.wait_for_transaction_receipt.assert_not_called()
 
 
 class TestEnsureAllowance:

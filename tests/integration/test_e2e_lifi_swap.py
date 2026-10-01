@@ -93,7 +93,6 @@ def _stub_pipeline(settings, lifi_status="DONE"):
     bridge = MagicMock()
     bridge.withdraw_to_chain = AsyncMock(return_value=17)
     bridge.get_deposit_address = AsyncMock(return_value="0x" + "dd" * 20)
-    bridge.lp_internal_balance = AsyncMock(return_value=100)
     bridge.await_deposit_credit = AsyncMock(return_value=None)
     evm = MagicMock()
     evm.address = "0x152E6a7125665764a4F1F1df80E8f5D49Bf0239c"

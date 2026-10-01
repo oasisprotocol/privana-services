@@ -20,6 +20,15 @@ APPROVE_GAS_LIMIT = 80_000
 NATIVE_TOKEN = "0x0000000000000000000000000000000000000000"
 
 
+class TransactionPendingError(RuntimeError):
+    """The transaction may have been sent but its receipt is unknown, so it may
+    still be mined. Callers that must not send twice keep `tx_hash`."""
+
+    def __init__(self, tx_hash: str) -> None:
+        super().__init__(f"transaction {tx_hash} may have been sent, outcome unknown")
+        self.tx_hash = tx_hash
+
+
 def is_native(token: Optional[str]) -> bool:
     """Accounting reports a native coin with no contract address."""
     return not token or int(token, 16) == 0
@@ -112,8 +121,10 @@ class EvmClient:
             logger.info("Transaction %s accepted by %s", tx_hash, self.w3.provider.endpoint_uri)
             receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash)
         except Exception as exc:
+            # Even a send that raised may have reached a node: web3 retries one
+            # whose response was lost, and the retry fails as "already known".
             self._log_send_failure(tx_hash, tx, exc)
-            raise
+            raise TransactionPendingError(tx_hash) from exc
         if receipt.status != 1:
             raise RuntimeError(f"transaction reverted: {tx_hash}")
         logger.info("Transaction %s succeeded in block %s", tx_hash, receipt.blockNumber)

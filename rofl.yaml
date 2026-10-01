@@ -1,5 +1,5 @@
 name: privana-services
-version: 0.1.19
+version: 0.1.22
 tee: tdx
 kind: container
 resources:
@@ -58,8 +58,8 @@ deployments:
           min_tcb_evaluation_data_number: 18
           tdx: {}
       enclaves:
-        - id: 1/UrxnPCpuBBbkwc8iHlwF3Cw8NYXGWkq4IcJ824eM4AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
-        - id: 0Ug0zZfRVMtK3zPBDjGWn1pyk1cV0haS4522p1WhB7wAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
+        - id: cJXPa3/bayiXCcTt4ZvZQ8GhuhIug/elTfF3fkbJVSYAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
+        - id: roFyVEDYMaUUCzpuDg1R/3rBXJS/eIDvHG2mnk7TbTkAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
       endorsements:
         - provider_instance_admin: oasis1qrljut7rndrl74cnnatlxnadnnazjxdy6yleagwu
       fees: endorsing_node
@@ -75,6 +75,10 @@ deployments:
         value: pGJwa1ggCOUPgWrf2fL6lf5C93jlgpDrqcvBLShRIDGRyWUXviFkbmFtZVgckyCjl35DvRaUTCG3b6QuntJWjLaDq69pNkY07mVub25jZU8/J5NWrn5oz9Lf8F80yQ9ldmFsdWVYS4eRWWQMZeLj/jy6n1GOikiUi2oaihFEkvPAt5VcjKK8NBN/6laf06Hh9MsiVjcrKGyBhpgppKU+6lJi5pyDC5U4R0dywFu2dKI0QA==
       - name: SAPPHIRE_RPC_HEADERS
         value: pGJwa1ggXE/tZOYebphTtds1dMt1DDHHepJUMZAyJD+4hXaAdytkbmFtZVgkuSUSsX9IK79669jYB5yN+CXO28l++upK5rGNixERLkW6Ou6wZW5vbmNlT02elUuyB2LGs8rrENUUwmV2YWx1ZVheGqEyTfuBLk2VEhKpRsfa0Jh6gptfOzGROij1T312VmZWEEN7fyVqpcYweMvvICKaw5EXj5LD0NwlBU+PUxX9wypsltdlbGNwgR3IVD4Wh/TG3DHfwguAx9NhXEwjcA==
+      - name: HYPEREVM_RPC_URL
+        value: pGJwa1ggkruEfNd8xzOx3zrp/7okdTpdecQrI13QrX2sCuTsZwFkbmFtZVggR+zlXpS0yD+c9PgLr/pRts61Nqs3sE0GkaQp5FIbuOBlbm9uY2VP6rGEqJB/uF6+SL75+mV3ZXZhbHVlWFeSB68ddSG4mlpW92Qwt+HXYDZeMXWZtrxqBxlZj/VpWmMW4BTFLidOeMglaC0yMG1qzzVojgLUS6wgAZAWEF9DtoyJrlAxBW7PjSR0hUt+/lQb+/cfKq8=
+      - name: COINGECKO_API_KEY
+        value: pGJwa1ggKtqqfOwHmAJLmdCSv5epGkqCWodec6kf7x1SL806dj1kbmFtZVgh0Wo+rJZMgkhg+erJVbtdGPQ7VKdMhnv8sz54wsJzoofeZW5vbmNlTx93VGQqOWqp8cfnSa1xR2V2YWx1ZVgr1A9Mwpl1MHS4rKec1/QbsxrJyv9ELClsbt+MDimhsu/mqoGG6U/pHSxe3g==
     machines:
       default:
         provider: oasis1qzc8pldvm8vm3duvdrj63wgvkw34y9ucfcxzetqr
@@ -117,6 +121,10 @@ deployments:
         value: pGJwa1ggAU6q9N+tIRp4mVDQ4imPCuys/CwCFBilRUpvNwO7vEBkbmFtZVgc74cYKciKjQW8/gOW3lZ5D7QcAVCF0IMbByJZT2Vub25jZU9AK4mfSkaoNuUnZ0HKVBlldmFsdWVYS0jXSj6lha6NsAyRz5CZKJmn2Mk27Eg4/cDK44oLyUdKbM11DLMj1bweWswhNXlHI+LGqOLsbi5q7CgPjYpV1a6196aOQrwIB5o1VQ==
       - name: SAPPHIRE_RPC_HEADERS
         value: pGJwa1gg9kgMQkQGRE6enS9fw1ZXKiyI+t7WHpxKJiuBgQV0ozVkbmFtZVgk8Bt73abYEbKt5aMF6NgSU6nIHVosHrNYPZIwg34mJ+G3eHx8ZW5vbmNlT8R0LYnEI+deu9ws5221zGV2YWx1ZVhec5SQvae9DwzujqWjNh6Usq3zYwEU1qmk3D/oUNivK1dyhJ2RuLkWAkxKlTL/gxKROTKzZ5gRNCSwhXs4relZYqwx7RWgnaRVcXWYaT3JzSiB3G2HYcRSbtYigYnHGQ==
+      - name: HYPEREVM_RPC_URL
+        value: pGJwa1ggLlx2gzAzMKhEG8YMp8ssWEpQOsRkB+Yr5bmBcV2KVhpkbmFtZVggZbl5q0suPAoXxZF5NDwsdiO6QuUWr9tgBws+VjcNKwJlbm9uY2VPNQB6a2+AF3gBQd8hRzYkZXZhbHVlWFKF2ubvYEqehIytcK341p7HBlEVwOWP2uBenEKoWzU6xngTMpGFltlHt9MGZKdf82lv/EYbJfILffQXelfg7+4BTmM6lqF0x74uBkTXhHrf9yaH
+      - name: COINGECKO_API_KEY
+        value: pGJwa1ggentKIXGBryAbqxYycDVyXuNkm1QtSmnETrWAPDiPk21kbmFtZVghiXhkbRZjzBX8oHN5lvOYq+VPS744+TsONC8H9PKmM+eXZW5vbmNlT9ocKbm7ppH+2wdZ7pCxf2V2YWx1ZVgruYSZMxtLo3/Nmn5bndCxLb/2DMtJyOPt0rLh2D3+36gCE1BqFQLy/SLCKA==
     machines:
       default:
         provider: oasis1qp2ens0hsp7gh23wajxa4hpetkdek3swyyulyrmz

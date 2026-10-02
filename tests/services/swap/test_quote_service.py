@@ -211,6 +211,7 @@ class TestGetQuote:
             fee_bps=10,
             quote_ttl=30,
             liquidity_provider_address="0x152E6a7125665764a4F1F1df80E8f5D49Bf0239c",
+            internal_swap_token_ids=frozenset({TOKEN_A, TOKEN_B}),
             # LiFi needs to be disabled for unit tests.
             lifi_execution_enabled=False,
         )
@@ -365,6 +366,23 @@ class TestVenueSelection(TestGetQuote):
         )
         assert result.venue == "internal"
         assert service.lifi.get_routes.call_count == 1
+
+    @pytest.mark.parametrize("pool_tokens", [{TOKEN_A}, {TOKEN_B}])
+    async def test_a_pair_with_an_unlisted_token_routes_through_lifi(self, test_db, pool_tokens):
+        service = self._make_service()
+        service.settings = replace(
+            service.settings,
+            lifi_execution_enabled=True,
+            internal_swap_token_ids=frozenset(pool_tokens),
+        )
+        result = await service.get_quote(
+            from_token_id=TOKEN_A,
+            to_token_id=TOKEN_B,
+            from_amount="1000000",
+            user_address="0x" + "a" * 40,
+            slippage_bps=300,
+        )
+        assert result.venue == "lifi"
 
     async def test_lp_short_lifi_routable_selects_lifi_venue(self, test_db):
         service = self._make_service()

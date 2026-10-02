@@ -120,6 +120,11 @@ def load_settings(refresh: bool = False) -> Settings:
             earn_max_pending_per_user=int(os.getenv("EARN_MAX_PENDING_PER_USER", "5")),
             lifi_execution_enabled=os.getenv("LIFI_EXECUTION_ENABLED", "false").lower() == "true",
             lifi_max_swap_amount_usd=int(os.getenv("LIFI_MAX_SWAP_AMOUNT_USD", "0")),
+            internal_swap_token_ids=frozenset(
+                t.strip().lower()
+                for t in os.getenv("INTERNAL_SWAP_TOKEN_IDS", "").split(",")
+                if t.strip()
+            ),
             pool_admin_secret_key=os.getenv("POOL_ADMIN_SECRET_KEY", ""),
             earn_pool_secret_key=earn_pool_secret_key,
             earn_pool_address=earn_pool_address,

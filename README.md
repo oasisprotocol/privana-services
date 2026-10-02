@@ -51,6 +51,7 @@ cp .env.localnet .env
 | `LIFI_TOKEN_MAP`                 | JSON map for testnet→mainnet pricing fallbacks                                                            |
 | `SUPPORTED_TOKEN_IDS`            | Comma-separated accounting token ids                                                                      |
 | `SUPPORTED_CHAINS`               | JSON array of supported chains                                                                            |
+| `INTERNAL_SWAP_TOKEN_IDS`        | Comma-separated accounting token ids the swap pool holds. Pairs with any other token use LiFi             |
 | `FEE_BPS`                        | Swap fee in basis points (e.g. `150` = 1.5%)                                                              |
 | `QUOTE_TTL`                      | Quote validity window in seconds                                                                          |
 | `MAX_SWAP_AMOUNT_USD`            | Per-swap cap                                                                                              |

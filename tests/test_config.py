@@ -117,7 +117,7 @@ def test_earn_batch_settings_default(monkeypatch):
         monkeypatch.delenv(name, raising=False)
     settings = config_module.load_settings(refresh=True)
     assert settings.earn_batch_interval_sec == 300
-    assert settings.earn_buffer_min == 50_000_000
+    assert settings.earn_buffer_min == 0
     assert settings.earn_buffer_bps == 500
     assert settings.earn_max_pending_per_user == 5
 

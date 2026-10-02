@@ -115,7 +115,7 @@ def load_settings(refresh: bool = False) -> Settings:
             coingecko_api_key=os.getenv("COINGECKO_API_KEY", ""),
             earn_unrecorded_shares=_parse_unrecorded_shares(os.getenv("EARN_UNRECORDED_SHARES", "")),
             earn_batch_interval_sec=int(os.getenv("EARN_BATCH_INTERVAL_SEC", "300")),
-            earn_buffer_min=int(os.getenv("EARN_BUFFER_MIN", "50000000")),
+            earn_buffer_min=int(os.getenv("EARN_BUFFER_MIN", "0")),
             earn_buffer_bps=int(os.getenv("EARN_BUFFER_BPS", "500")),
             earn_max_pending_per_user=int(os.getenv("EARN_MAX_PENDING_PER_USER", "5")),
             lifi_execution_enabled=os.getenv("LIFI_EXECUTION_ENABLED", "false").lower() == "true",

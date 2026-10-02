@@ -1005,7 +1005,7 @@ class VaultService:
         a failed round arrive the same way, so this works from the balance
         rather than tracking which part is which. Withdrawals the account could
         not pay wait as ``awaiting_liquidity``, and one reclaim covers all of
-        them plus a buffer refill.
+        them. The buffer is refilled by deposits, never by a reclaim.
 
         Net assets do not change: the funds move from one side of the backing
         figure to the other. A deploy runs outside the lock with its amount
@@ -1043,14 +1043,14 @@ class VaultService:
             spare = idle - waiting - buffer
 
             if spare < 0:
-                # Nobody waiting and the buffer at least half full: not worth
-                # a reclaim of its own.
-                if waiting == 0 and 2 * idle >= buffer:
+                # Reclaim only what waiting withdrawals are short of. Leaving a
+                # protocol can cost a fee (Midas charges one on every redeem),
+                # and every holder pays it through the next sync, so the buffer
+                # is topped up by incoming deposits rather than by redeeming.
+                amount = min(waiting - idle, deployed)
+                if amount <= 0:
                     if stranded == 0:
                         self._complete_undeployed(pool_id_hex)
-                    return 0
-                amount = min(-spare, deployed)
-                if amount <= 0:
                     return 0
                 if not await strategy.withdraw_ready(amount):
                     logger.info(

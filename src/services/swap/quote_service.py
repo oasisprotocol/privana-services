@@ -124,9 +124,9 @@ class QuoteService:
         # The pool takes in the source token and pays out the target, so an
         # internal fill needs both to be tokens it is configured to hold.
         pool_tokens = self.settings.internal_swap_token_ids
-        holds_pair = from_token_id.lower() in pool_tokens and to_token_id.lower() in pool_tokens
+        internal_swap = from_token_id.lower() in pool_tokens and to_token_id.lower() in pool_tokens
         venue = SwapVenue.INTERNAL.value
-        if not holds_pair or int(lp_balance.balance) < to_amount_after_fee:
+        if not internal_swap or int(lp_balance.balance) < to_amount_after_fee:
             venue = await self._select_lifi_venue_or_raise(
                 from_chain_id, to_chain_id, from_on_chain, to_on_chain, from_amount, slippage_bps
             )

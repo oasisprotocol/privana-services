@@ -271,3 +271,26 @@ async def test_stop_waits_for_current_iteration(worker):
     finish.set()
     await stopping
     assert worker._tasks == []
+
+
+async def test_swap_counts_are_logged_only_when_they_change(worker, enqueue, test_db, monkeypatch):
+    import src.services.swap.internal_pipeline as module
+
+    pipeline = module.InternalSwapPipeline()
+    log = MagicMock()
+    monkeypatch.setattr(module, "logger", log)
+    await enqueue(1, venue="lifi")
+    test_db.execute("UPDATE swaps SET status = 'executing'")
+
+    # ROFL keeps a short log; a line every second pushes the errors out.
+    for _ in range(3):
+        await pipeline.run_internal_once()
+    test_db.execute("UPDATE swaps SET status = 'refunded'")
+    await pipeline.run_internal_once()
+    await pipeline.run_internal_once()
+
+    lines = [c.args[0] % c.args[1:] for c in log.info.call_args_list if c.args[0].startswith("swaps:")]
+    assert lines == [
+        "swaps: internal 0 active, 0 queued; lifi 1 in progress",
+        "swaps: internal 0 active, 0 queued; lifi 0 in progress",
+    ]

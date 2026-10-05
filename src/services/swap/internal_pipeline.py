@@ -29,6 +29,7 @@ class InternalSwapPipeline:
     def __init__(self) -> None:
         self.settings = load_settings()
         self._internal_lock = asyncio.Lock()
+        self._logged_counts: Optional[tuple[int, int, int]] = None
 
     def _update(self, swap_id: str, **fields) -> None:
         get_swap_executor()._update_swap(swap_id, **fields)
@@ -118,7 +119,17 @@ class InternalSwapPipeline:
         queued = get_db().execute(
             "SELECT COUNT(*) FROM swaps WHERE venue = 'internal' AND status = 'scheduled'"
         ).fetchone()[0]
-        logger.info("internal swap: %d active, %d queued", len(active), queued)
+        lifi_running = get_db().execute(
+            "SELECT COUNT(*) FROM swaps WHERE venue = 'lifi' AND status IN ('executing', 'refunding')"
+        ).fetchone()[0]
+        # This runs every second and ROFL keeps a short log, so an unchanged
+        # line would push the errors worth reading out of it.
+        counts = (len(active), queued, lifi_running)
+        if counts != self._logged_counts:
+            logger.info(
+                "swaps: internal %d active, %d queued; lifi %d in progress", *counts,
+            )
+            self._logged_counts = counts
         if not active and queued == 0:
             return
         sapphire = await asyncio.to_thread(get_sapphire_client)

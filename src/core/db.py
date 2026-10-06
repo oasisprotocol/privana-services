@@ -147,7 +147,14 @@ MIGRATIONS = [
     # LiFi for the same one. NULL on quotes stored before it, which were
     # priced at LiFi's default.
     "ALTER TABLE quotes ADD COLUMN slippage_bps INTEGER;",
-
+    # A LiFi swap's txs, saved before broadcast so a restart awaits or rebroadcasts
+    # them instead of signing new ones. The nonce is for manual checks.
+    "ALTER TABLE swaps ADD COLUMN lifi_tx_nonce INTEGER;",
+    "ALTER TABLE swaps ADD COLUMN deposit_tx_nonce INTEGER;",
+    "ALTER TABLE swaps ADD COLUMN lifi_tx_raw TEXT;",
+    "ALTER TABLE swaps ADD COLUMN deposit_tx_raw TEXT;",
+    # The LiFi output, for a restart at deposit.
+    "ALTER TABLE swaps ADD COLUMN to_amount_received TEXT;",
 ]
 
 

@@ -9,6 +9,10 @@ from privana import PrivanaClient
 
 from src.core.config import load_settings
 
+# rofl-proxy cuts each connection 45 s after it opens, even mid-request, so
+# each request gets its own.
+_HEADERS = {"Connection": "close"}
+
 _client: Optional[PrivanaClient] = None
 _swap_lp_client: Optional[PrivanaClient] = None
 _earn_pool_client: Optional[PrivanaClient] = None
@@ -19,7 +23,7 @@ def get_privana_client() -> PrivanaClient:
     global _client
     if _client is None:
         settings = load_settings()
-        _client = PrivanaClient(base_url=settings.privana_api_base_url)
+        _client = PrivanaClient(base_url=settings.privana_api_base_url, headers=_HEADERS)
     return _client
 
 
@@ -47,6 +51,7 @@ async def get_swap_lp_privana_client() -> PrivanaClient:
         settings = load_settings()
         _swap_lp_client = PrivanaClient(
             base_url=settings.privana_api_base_url,
+            headers=_HEADERS,
             token_provider=_siwe_login_as_lp,
         )
     return _swap_lp_client
@@ -65,6 +70,7 @@ async def get_earn_pool_privana_client() -> PrivanaClient:
         settings = load_settings()
         _earn_pool_client = PrivanaClient(
             base_url=settings.privana_api_base_url,
+            headers=_HEADERS,
             token_provider=_siwe_login_as_earn_pool,
         )
     return _earn_pool_client

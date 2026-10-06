@@ -1,10 +1,12 @@
 import asyncio
 import logging
-from typing import Optional
+from typing import Callable, Optional
 
 from eth_account import Account
+from eth_typing import HexStr
 from web3 import Web3
 from web3.exceptions import TransactionNotFound
+from web3.types import TxReceipt
 
 from src.core.abi import load_abi
 from src.core.config import load_settings
@@ -18,6 +20,10 @@ APPROVE_GAS_LIMIT = 80_000
 
 # LiFi's address for a chain's native coin.
 NATIVE_TOKEN = "0x0000000000000000000000000000000000000000"
+
+
+# Called with a signed tx's hash, nonce and hex-encoded bytes, before broadcast.
+OnSigned = Callable[[str, int, str], None]
 
 
 class TransactionPendingError(RuntimeError):
@@ -52,29 +58,36 @@ class EvmClient:
         contract = self.w3.eth.contract(address=Web3.to_checksum_address(token), abi=ERC20_ABI)
         return contract.functions.balanceOf(owner).call()
 
-    def transfer(self, token: Optional[str], to: str, amount: int) -> str:
+    def transfer(
+        self, token: Optional[str], to: str, amount: int, on_signed: Optional[OnSigned] = None
+    ) -> str:
         if is_native(token):
             tx = self._tx_params(gas=NATIVE_TRANSFER_GAS_LIMIT)
             tx.update(to=Web3.to_checksum_address(to), value=amount)
-            return self._send(tx)
+            return self._send(tx, on_signed)
         contract = self.w3.eth.contract(address=Web3.to_checksum_address(token), abi=ERC20_ABI)
         fn = contract.functions.transfer(Web3.to_checksum_address(to), amount)
-        return self._send(fn.build_transaction(self._tx_params(gas=TRANSFER_GAS_LIMIT)))
+        return self._send(fn.build_transaction(self._tx_params(gas=TRANSFER_GAS_LIMIT)), on_signed)
+
+    def allowance(self, token: str, spender: str) -> int:
+        contract = self.w3.eth.contract(address=Web3.to_checksum_address(token), abi=ERC20_ABI)
+        return contract.functions.allowance(
+            self.address, Web3.to_checksum_address(spender)
+        ).call()
 
     def ensure_allowance(self, token: Optional[str], spender: str, amount: int) -> Optional[str]:
         # A native coin travels as the transaction's value; nothing to approve.
-        if is_native(token):
+        if token is None or is_native(token):
+            return None
+        if self.allowance(token, spender) >= amount:
             return None
         contract = self.w3.eth.contract(address=Web3.to_checksum_address(token), abi=ERC20_ABI)
-        current = contract.functions.allowance(
-            self.address, Web3.to_checksum_address(spender)
-        ).call()
-        if current >= amount:
-            return None
         fn = contract.functions.approve(Web3.to_checksum_address(spender), amount)
         return self._send(fn.build_transaction(self._tx_params(gas=APPROVE_GAS_LIMIT)))
 
-    def send_transaction_request(self, tx_request: dict) -> str:
+    def send_transaction_request(
+        self, tx_request: dict, on_signed: Optional[OnSigned] = None
+    ) -> str:
         chain_id = self.w3.eth.chain_id
         # LiFi builds the calldata for one chain. Signing it for another would
         # send it to the same address there, with the same value attached.
@@ -89,32 +102,56 @@ class EvmClient:
             "data": tx_request["data"],
             "value": int(tx_request.get("value", "0x0"), 16),
             "gas": int(tx_request["gasLimit"], 16),
-            "gasPrice": (
-                int(tx_request["gasPrice"], 16)
-                if "gasPrice" in tx_request
-                else self.w3.eth.gas_price
-            ),
             "nonce": self.w3.eth.get_transaction_count(self.address, "pending"),
             "chainId": chain_id,
+            # Priced now: LiFi's gasPrice is a legacy price from quote time.
+            **self._fees(),
         }
-        return self._send(tx)
+        return self._send(tx, on_signed)
 
-    def gas_cost(self, tx_hash: str) -> int:
-        receipt = self.w3.eth.get_transaction_receipt(tx_hash)
-        return receipt["gasUsed"] * receipt["effectiveGasPrice"]
+    def get_receipt(self, tx_hash: str) -> Optional[TxReceipt]:
+        try:
+            return self.w3.eth.get_transaction_receipt(tx_hash)
+        except TransactionNotFound:
+            return None
+
+    def rebroadcast(self, raw: str) -> None:
+        """Broadcast a signed tx again for nodes that dropped it. A tx is mined
+        at most once, so this never pays twice."""
+        tx_hash = Web3.to_hex(Web3.keccak(hexstr=raw))
+        try:
+            self.w3.eth.send_raw_transaction(HexStr(raw))
+            logger.info("Rebroadcast transaction %s", tx_hash)
+        except Exception as exc:
+            # A node or block already holding the tx refuses it ("already known", "nonce too low").
+            logger.info("Rebroadcast of %s refused (%s): %s", tx_hash, type(exc).__name__, exc)
+
+    def _fees(self) -> dict:
+        # Type 2: the cap rides out base fee rises. A send pays the base fee
+        # due plus the tip, never more than the cap.
+        tip = self.w3.eth.max_priority_fee
+        base_fee = self.w3.eth.get_block("latest")["baseFeePerGas"]
+        return {"maxFeePerGas": 2 * base_fee + tip, "maxPriorityFeePerGas": tip}
+
+    def max_gas_cost(self, gas: int) -> int:
+        """`gas` at the fee cap a send sets now."""
+        return gas * self._fees()["maxFeePerGas"]
 
     def _tx_params(self, gas: int) -> dict:
         return {
             "from": self.address,
             "nonce": self.w3.eth.get_transaction_count(self.address, "pending"),
             "gas": gas,
-            "gasPrice": self.w3.eth.gas_price,
             "chainId": self.w3.eth.chain_id,
+            **self._fees(),
         }
 
-    def _send(self, tx: dict) -> str:
+    def _send(self, tx: dict, on_signed: Optional[OnSigned] = None) -> str:
         signed = self._account.sign_transaction(tx)
         tx_hash = Web3.to_hex(Web3.keccak(signed.raw_transaction))
+        if on_signed is not None:
+            # Before broadcast, so a tx that fails to record is never sent.
+            on_signed(tx_hash, tx["nonce"], Web3.to_hex(signed.raw_transaction))
         logger.info("Sending transaction %s via %s: %s", tx_hash, self.w3.provider.endpoint_uri, tx)
         try:
             tx_hash = Web3.to_hex(self.w3.eth.send_raw_transaction(signed.raw_transaction))

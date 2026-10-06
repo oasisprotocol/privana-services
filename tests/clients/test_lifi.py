@@ -209,3 +209,20 @@ class TestLiFiClient:
         params = mock_http_client.get.call_args.kwargs["params"]
         assert url == "https://li.quest/v1/status"
         assert params == {"txHash": "0xabc", "fromChain": 8453, "toChain": 8453}
+
+    async def test_get_status_of_a_tx_lifi_has_not_indexed_yet(self, client, mock_http_client):
+        mock_http_client.get.return_value = self._mock_response({}, status_code=404)
+
+        result = await client.get_status(tx_hash="0xabc", from_chain_id=8453, to_chain_id=1)
+
+        assert result == {"status": "NOT_FOUND"}
+
+    async def test_get_status_raises_on_other_http_errors(self, client, mock_http_client):
+        error_resp = self._mock_response({}, status_code=500)
+        error_resp.raise_for_status.side_effect = httpx.HTTPStatusError(
+            "server error", request=MagicMock(), response=error_resp
+        )
+        mock_http_client.get.return_value = error_resp
+
+        with pytest.raises(httpx.HTTPStatusError):
+            await client.get_status(tx_hash="0xabc", from_chain_id=8453, to_chain_id=1)

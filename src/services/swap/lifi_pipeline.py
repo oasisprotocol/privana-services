@@ -38,6 +38,8 @@ REFUND_BALANCE_POLLS = 30
 FUNDING_POLLS = 300
 # About 15 min for a sent tx to be mined.
 TX_RECEIPT_POLLS = 150
+# About 1 min for an approval with an unknown outcome to land.
+APPROVAL_POLLS = 10
 
 # Emitted by the LiFi diamond for a same-chain swap (lifinance/contracts ILiFi.sol).
 SWAP_COMPLETED_TOPIC = Web3.keccak(
@@ -134,7 +136,7 @@ class LifiSwapPipeline:
             logger.exception("lifi swap %s failed", swap_id)
             row = self._row(swap_id)
             reason = sanitize_error(str(exc))
-            if row["step"] == LifiSwapStep.DEPOSIT.value or (
+            if row["step"] in (LifiSwapStep.DEPOSIT.value, LifiSwapStep.CREDIT.value) or (
                 row["step"] == LifiSwapStep.LIFI_EXECUTE.value
                 and row["lifi_tx_hash"] is not None
                 and not isinstance(exc, TxReverted)
@@ -237,14 +239,13 @@ class LifiSwapPipeline:
         evm = self._evm_for(from_info.chain_id)
         if self._row(swap_id)["lifi_tx_hash"] is None:
             await self._send_lifi_tx(swap_id, quote, from_info, to_info, evm)
-        row = self._row(swap_id)
-        receipt = await self._await_tx(evm, row["lifi_tx_hash"], row["lifi_tx_raw"])
+        receipt = await self._await_tx(swap_id, "lifi", evm)
         # The swap's reported output, not the wallet balance, which other swaps and gas move.
         if from_info.chain_id == to_info.chain_id:
             received = _swap_output(receipt, evm.address, _lifi_token(to_info.token_address))
         else:
             received = await self._bridge_output(
-                row["lifi_tx_hash"], from_info, to_info, evm.address
+                self._row(swap_id)["lifi_tx_hash"], from_info, to_info, evm.address
             )
         return received, to_info
 
@@ -287,7 +288,7 @@ class LifiSwapPipeline:
             from_amount=quote["from_amount"],
             from_address=from_address,
         )
-        fee_bps = self._quote_fee_bps(quote)
+        fee_bps = self.settings.fee_bps
         floor = int(quote["to_amount_min"])
         # Quotes stored before the slippage_bps column existed were priced at LiFi's default.
         slippage_bps = quote.get("slippage_bps")
@@ -326,21 +327,31 @@ class LifiSwapPipeline:
             return False
 
     async def _approve(self, evm: Any, token: Optional[str], spender: str, amount: int) -> None:
-        """An approval whose receipt timed out can still be mined, so its allowance decides."""
+        """An approval whose receipt timed out can still be mined, so its allowance
+        decides. Priced out, it holds up every later tx of the wallet, so it is
+        rebroadcast like the swap's txs. Its versions stay in memory: its allowance
+        settles it, not a receipt. The wait stays short: it holds the chain's tx
+        lock, and a refund is safe until the LiFi tx is sent."""
+        signed: list[str] = []
+
+        def keep(tx_hash: str, nonce: int, raw: str) -> None:
+            signed.append(raw)
+
         try:
-            await asyncio.to_thread(evm.ensure_allowance, token, spender, amount)
+            await asyncio.to_thread(evm.ensure_allowance, token, spender, amount, on_signed=keep)
             return
         except TransactionPendingError as exc:
             logger.warning("approval %s outcome unknown: %s", exc.tx_hash, exc)
-        for _ in range(TX_RECEIPT_POLLS):
+        for _ in range(APPROVAL_POLLS):
             await asyncio.sleep(self._poll_interval_sec)
             try:
                 if await asyncio.to_thread(evm.allowance, token, spender) >= amount:
                     return
+                await asyncio.to_thread(evm.rebroadcast, signed[-1], keep)
             except Exception as exc:
-                logger.warning("allowance of %s for %s unavailable: %s", token, spender, exc)
+                logger.warning("approval of %s for %s still pending: %s", token, spender, exc)
         raise RuntimeError(
-            f"allowance of {token} for {spender} unconfirmed after {TX_RECEIPT_POLLS} polls"
+            f"allowance of {token} for {spender} unconfirmed after {APPROVAL_POLLS} polls"
         )
 
     async def _send_tx(
@@ -365,24 +376,54 @@ class LifiSwapPipeline:
                 "lifi swap %s %s tx %s outcome unknown: %s", swap_id, kind, tx_hash, exc
             )
 
-    async def _await_tx(self, evm: Any, tx_hash: str, raw: Optional[str]) -> Any:
-        """The receipt of `tx_hash`, rebroadcasting `raw` until it is mined. Nodes
-        lag, so a missing receipt proves nothing, even once the nonce is used."""
+    async def _await_tx(self, swap_id: str, kind: str, evm: Any) -> Any:
+        """The receipt of the `{kind}_tx_*` tx, rebroadcast until a version of it is
+        mined. That version becomes `{kind}_tx_hash` and the others stay in
+        `{kind}_tx_replaced`, since a receipt is not final. Nodes lag, so a missing
+        receipt proves nothing, even once the nonce is used."""
+        hash_column, raw_column = f"{kind}_tx_hash", f"{kind}_tx_raw"
+        replaced_column = f"{kind}_tx_replaced"
+
+        def replace(tx_hash: str, nonce: int, raw: str) -> None:
+            row = self._row(swap_id)
+            self._update_swap(swap_id, **{
+                hash_column: tx_hash, raw_column: raw,
+                replaced_column: " ".join(filter(None, (row[replaced_column], row[hash_column]))),
+            })
+
         for _ in range(TX_RECEIPT_POLLS):
+            row = self._row(swap_id)
+            versions = [row[hash_column], *(row[replaced_column] or "").split()]
             try:
-                receipt = await asyncio.to_thread(evm.get_receipt, tx_hash)
-                if receipt is None and raw is not None:
-                    await asyncio.to_thread(evm.rebroadcast, raw)
+                mined = await self._mined(evm, versions)
+                if mined is None:
+                    await asyncio.to_thread(evm.rebroadcast, row[raw_column], replace)
             except Exception as exc:
                 # A failed lookup says nothing about the tx.
-                logger.warning("transaction %s lookup failed: %s", tx_hash, exc)
+                logger.warning("transaction %s lookup failed: %s", row[hash_column], exc)
             else:
-                if receipt is not None:
+                if mined is not None:
+                    tx_hash, receipt = mined
+                    if tx_hash != row[hash_column]:
+                        self._update_swap(swap_id, **{
+                            hash_column: tx_hash,
+                            replaced_column: " ".join(h for h in versions if h != tx_hash),
+                        })
                     if receipt["status"] != 1:
                         raise TxReverted(f"transaction reverted: {tx_hash}")
                     return receipt
             await asyncio.sleep(self._poll_interval_sec)
-        raise RuntimeError(f"receipt of {tx_hash} unavailable after {TX_RECEIPT_POLLS} polls")
+        raise RuntimeError(
+            f"receipt of {self._row(swap_id)[hash_column]} unavailable after {TX_RECEIPT_POLLS} polls"
+        )
+
+    async def _mined(self, evm: Any, hashes: list[str]) -> Optional[tuple[str, Any]]:
+        """The first of `hashes` with a receipt, and the receipt."""
+        for tx_hash in hashes:
+            receipt = await asyncio.to_thread(evm.get_receipt, tx_hash)
+            if receipt is not None:
+                return tx_hash, receipt
+        return None
 
     async def _bridge_output(
         self, tx_hash: str, from_info: Any, to_info: Any, recipient: str
@@ -430,16 +471,16 @@ class LifiSwapPipeline:
                     await self._transfer_to_deposit_address(
                         swap_id, evm, info.token_address, amount
                     )
-                row = self._row(swap_id)
                 try:
-                    await self._await_tx(evm, row["deposit_tx_hash"], row["deposit_tx_raw"])
+                    await self._await_tx(swap_id, "deposit", evm)
                 except TxReverted:
                     self._update_swap(
-                        swap_id, deposit_tx_hash=None, deposit_tx_nonce=None, deposit_tx_raw=None
+                        swap_id, deposit_tx_hash=None, deposit_tx_nonce=None,
+                        deposit_tx_raw=None, deposit_tx_replaced=None,
                     )
                     raise
                 await self.bridge.await_deposit_credit(
-                    info.chain_id, row["deposit_tx_hash"], amount
+                    info.chain_id, self._row(swap_id)["deposit_tx_hash"], amount
                 )
                 logger.info("lifi swap %s deposit attempt %d succeeded", swap_id, attempt + 1)
                 return
@@ -460,14 +501,8 @@ class LifiSwapPipeline:
                 swap_id, "deposit", evm.transfer, token_address, deposit_address, amount
             )
 
-    def _quote_fee_bps(self, quote: dict) -> int:
-        # Recovery rebuilds a partial quote without fee columns, and rows
-        # predating them store NULL; both fall back to the global fee.
-        fee_bps = quote.get("fee_bps")
-        return self.settings.fee_bps if fee_bps is None else fee_bps
-
     async def _credit(self, quote: dict, received: int) -> int:
-        credited, _ = calculate_fee(received, self._quote_fee_bps(quote))
+        credited, _ = calculate_fee(received, self.settings.fee_bps)
         await self._lp_transfer(quote["user_address"], quote["to_token_id"], credited)
         return credited
 
@@ -609,25 +644,18 @@ async def recover_inflight_lifi_swaps(pipeline: Optional[LifiSwapPipeline] = Non
         swap = pipeline._row(row["id"])
         if swap["status"] not in (SwapStatus.EXECUTING.value, SwapStatus.REFUNDING.value):
             continue
-        # Sending the LiFi tx needs the stored quote's floor and slippage.
-        stored = db.execute("SELECT * FROM quotes WHERE id = ?", (swap["quote_id"],)).fetchone()
-        quote = dict(stored) if stored is not None else {
-            "id": swap["quote_id"],
-            "user_address": swap["user_address"],
-            "from_token_id": swap["from_token_id"],
-            "to_token_id": swap["to_token_id"],
-            "from_amount": swap["from_amount"],
-            "to_amount_estimate": swap["to_amount_estimate"],
-        }
+        # Cleanup keeps the quote of a swap in flight.
+        quote = dict(
+            db.execute("SELECT * FROM quotes WHERE id = ?", (swap["quote_id"],)).fetchone()
+        )
         step = swap.get("step")
-        if swap["status"] == SwapStatus.EXECUTING.value and (
-            step == LifiSwapStep.LIFI_EXECUTE.value
-            or (step == LifiSwapStep.DEPOSIT.value and swap["to_amount_received"] is not None)
+        if swap["status"] == SwapStatus.EXECUTING.value and step in (
+            LifiSwapStep.LIFI_EXECUTE.value, LifiSwapStep.DEPOSIT.value
         ):
             logger.info("lifi swap %s resuming at step %s", swap["id"], step)
             pipeline.spawn_background(swap["id"], quote, int(swap["input_nonce"]))
             continue
-        if step in (LifiSwapStep.DEPOSIT.value, LifiSwapStep.CREDIT.value):
+        if step == LifiSwapStep.CREDIT.value:
             pipeline._park(swap["id"], f"interrupted at step {step}")
             continue
         logger.info("lifi swap %s recovered into refund path (step=%s)", swap["id"], step)

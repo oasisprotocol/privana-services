@@ -247,27 +247,74 @@ class TestOutcome:
         w3.eth.get_transaction_receipt.return_value = {"status": 1}
         assert _make_client(w3).get_receipt(self.TX) == {"status": 1}
 
-    def test_rebroadcast_sends_the_bytes_handed_over_at_signing(self):
+    def _lost(self, w3):
+        """A transfer signed at a base fee of 1_000 and handed over, its broadcast lost."""
         from src.clients.base_evm import TransactionPendingError
-        w3 = _w3()
-        w3.eth.send_raw_transaction.side_effect = ConnectionError("rpc down")
-        signer = _make_client(w3)
         on_signed = MagicMock()
-        with patch.object(signer._account, "sign_transaction") as mock_sign:
-            mock_sign.return_value = MagicMock(raw_transaction=b"raw")
-            with pytest.raises(TransactionPendingError):
-                signer.transfer(None, RECIPIENT, 42, on_signed=on_signed)
+        w3.eth.send_raw_transaction.side_effect = ConnectionError("rpc down")
+        with pytest.raises(TransactionPendingError):
+            _make_client(w3).transfer(None, RECIPIENT, 42, on_signed=on_signed)
         w3.eth.send_raw_transaction.side_effect = None
-        _, _, raw = on_signed.call_args.args
+        return on_signed.call_args.args
+
+    def test_rebroadcast_sends_the_bytes_handed_over_at_signing(self):
+        w3 = _w3()
+        _, _, raw = self._lost(w3)
+        on_signed = MagicMock()
         # A fresh client, as after a restart.
-        _make_client(w3).rebroadcast(raw)
+        _make_client(w3).rebroadcast(raw, on_signed)
         first, again = w3.eth.send_raw_transaction.call_args_list
-        assert HexBytes(again.args[0]) == HexBytes(first.args[0]) == b"raw"
+        assert HexBytes(again.args[0]) == HexBytes(first.args[0]) == HexBytes(raw)
+        on_signed.assert_not_called()
 
     def test_a_refused_rebroadcast_is_not_an_error(self):
         w3 = _w3()
+        _, _, raw = self._lost(w3)
         w3.eth.send_raw_transaction.side_effect = ValueError("already known")
-        _make_client(w3).rebroadcast(Web3.to_hex(b"raw"))
+        _make_client(w3).rebroadcast(raw, MagicMock())
+
+    def test_a_tx_the_base_fee_priced_out_is_re_signed_at_its_nonce(self):
+        from eth_account import Account
+        from eth_account.typed_transactions import TypedTransaction
+        w3 = _w3()
+        _, nonce, raw = self._lost(w3)
+        # Past the cap of 2 * 1_000 + 100.
+        w3.eth.get_block.return_value = {"baseFeePerGas": 3_000}
+        w3.eth.get_balance.return_value = 10**18
+        signer = _make_client(w3)
+        handed = []
+
+        def on_signed(*version):
+            # Saved before any node sees it.
+            assert w3.eth.send_raw_transaction.call_count == 1
+            handed.append(version)
+
+        signer.rebroadcast(raw, on_signed)
+
+        [(tx_hash, new_nonce, new_raw)] = handed
+        assert HexBytes(w3.eth.send_raw_transaction.call_args.args[0]) == HexBytes(new_raw)
+        assert tx_hash == Web3.to_hex(Web3.keccak(hexstr=new_raw))
+        assert Account.recover_transaction(new_raw) == signer.address
+        old, new = (TypedTransaction.from_bytes(HexBytes(r)).as_dict() for r in (raw, new_raw))
+        assert new_nonce == nonce == new["nonce"]
+        for field in ("chainId", "to", "value", "data", "gas", "accessList"):
+            assert new[field] == old[field]
+        # Priced as a send now, with both fees raised by at least the 10% nodes require.
+        assert new["maxFeePerGas"] == 2 * 3_000 + new["maxPriorityFeePerGas"]
+        for fee in ("maxFeePerGas", "maxPriorityFeePerGas"):
+            assert new[fee] * 100 >= old[fee] * 110
+
+    def test_a_replacement_the_balance_cannot_pay_leaves_the_tx_as_signed(self):
+        w3 = _w3()
+        _, _, raw = self._lost(w3)
+        w3.eth.get_block.return_value = {"baseFeePerGas": 3_000}
+        w3.eth.get_balance.return_value = 0
+        on_signed = MagicMock()
+
+        _make_client(w3).rebroadcast(raw, on_signed)
+
+        on_signed.assert_not_called()
+        assert HexBytes(w3.eth.send_raw_transaction.call_args.args[0]) == HexBytes(raw)
 
 
 class TestClientPerChain:

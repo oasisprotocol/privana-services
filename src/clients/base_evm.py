@@ -3,7 +3,9 @@ import logging
 from typing import Callable, Optional
 
 from eth_account import Account
+from eth_account.typed_transactions import TypedTransaction
 from eth_typing import HexStr
+from hexbytes import HexBytes
 from web3 import Web3
 from web3.exceptions import TransactionNotFound
 from web3.types import TxReceipt
@@ -75,7 +77,9 @@ class EvmClient:
             self.address, Web3.to_checksum_address(spender)
         ).call()
 
-    def ensure_allowance(self, token: Optional[str], spender: str, amount: int) -> Optional[str]:
+    def ensure_allowance(
+        self, token: Optional[str], spender: str, amount: int, on_signed: Optional[OnSigned] = None
+    ) -> Optional[str]:
         # A native coin travels as the transaction's value; nothing to approve.
         if token is None or is_native(token):
             return None
@@ -83,7 +87,7 @@ class EvmClient:
             return None
         contract = self.w3.eth.contract(address=Web3.to_checksum_address(token), abi=ERC20_ABI)
         fn = contract.functions.approve(Web3.to_checksum_address(spender), amount)
-        return self._send(fn.build_transaction(self._tx_params(gas=APPROVE_GAS_LIMIT)))
+        return self._send(fn.build_transaction(self._tx_params(gas=APPROVE_GAS_LIMIT)), on_signed)
 
     def send_transaction_request(
         self, tx_request: dict, on_signed: Optional[OnSigned] = None
@@ -111,13 +115,39 @@ class EvmClient:
 
     def get_receipt(self, tx_hash: str) -> Optional[TxReceipt]:
         try:
-            return self.w3.eth.get_transaction_receipt(tx_hash)
+            return self.w3.eth.get_transaction_receipt(HexStr(tx_hash))
         except TransactionNotFound:
             return None
 
-    def rebroadcast(self, raw: str) -> None:
-        """Broadcast a signed tx again for nodes that dropped it. A tx is mined
-        at most once, so this never pays twice."""
+    def rebroadcast(self, raw: str, on_signed: OnSigned) -> None:
+        """Broadcast a signed tx again for nodes that dropped it. Once the base fee
+        prices it out, a version re-signed at fees priced now goes out instead,
+        handed to `on_signed` first. Versions share the nonce, so at most one is
+        mined and none pays twice."""
+        tx = TypedTransaction.from_bytes(HexBytes(raw)).as_dict()
+        base_fee = self.w3.eth.get_block("latest")["baseFeePerGas"]
+        # Priced out: at this base fee, the cap no longer covers the tip.
+        if tx["maxFeePerGas"] < base_fee + tx["maxPriorityFeePerGas"]:
+            # Nodes take a replacement only with both fees raised by at least 10%.
+            tip = max(self.w3.eth.max_priority_fee, tx["maxPriorityFeePerGas"] * 9 // 8 + 1)
+            cap = max(2 * base_fee + tip, tx["maxFeePerGas"] * 9 // 8 + 1)
+            if self.w3.eth.get_balance(self.address) >= tx["value"] + tx["gas"] * cap:
+                del tx["v"], tx["r"], tx["s"]
+                signed = self._account.sign_transaction(
+                    {**tx, "maxFeePerGas": cap, "maxPriorityFeePerGas": tip}
+                )
+                tx_hash = Web3.to_hex(Web3.keccak(signed.raw_transaction))
+                logger.info(
+                    "Re-signed transaction at nonce %s as %s: max fee %s, tip %s",
+                    tx["nonce"], tx_hash, cap, tip,
+                )
+                raw = Web3.to_hex(signed.raw_transaction)
+                on_signed(tx_hash, tx["nonce"], raw)
+            else:
+                logger.warning(
+                    "Transaction at nonce %s is priced out, and the balance cannot pay a replacement",
+                    tx["nonce"],
+                )
         tx_hash = Web3.to_hex(Web3.keccak(hexstr=raw))
         try:
             self.w3.eth.send_raw_transaction(HexStr(raw))

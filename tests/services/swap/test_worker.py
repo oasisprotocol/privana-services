@@ -253,7 +253,7 @@ async def test_migration_renames_pending_but_preserves_queue(worker, enqueue, te
     assert [r["status"] for r in rows(test_db)] == ["executing", "scheduled"]
 
 
-async def test_stop_waits_for_current_iteration(worker):
+async def test_stop_waits_for_current_iteration(worker, monkeypatch):
     entered = asyncio.Event()
     finish = asyncio.Event()
 
@@ -262,7 +262,8 @@ async def test_stop_waits_for_current_iteration(worker):
         await finish.wait()
 
     worker.settings = replace(worker.settings, lifi_execution_enabled=False)
-    worker._internal_pipeline.run_internal_once = iteration
+    # The pipeline is a shared instance, so the stub must not outlive this test.
+    monkeypatch.setattr(worker._internal_pipeline, "run_internal_once", iteration)
     await worker.start()
     await entered.wait()
     stopping = asyncio.create_task(worker.stop())
@@ -271,3 +272,42 @@ async def test_stop_waits_for_current_iteration(worker):
     finish.set()
     await stopping
     assert worker._tasks == []
+
+
+async def test_swap_counts_are_logged_only_when_they_change(worker, enqueue, test_db, monkeypatch):
+    import src.services.swap.internal_pipeline as module
+
+    pipeline = worker._internal_pipeline
+    monkeypatch.setattr(pipeline, "_logged_counts", None)
+    log = MagicMock()
+    monkeypatch.setattr(module, "logger", log)
+
+    # ROFL keeps a short log; a line every second pushes the errors out.
+    await pipeline.run_internal_once()
+    await pipeline.run_internal_once()
+    # One internal swap: queued, then active while its receipt is late, then settled.
+    worker.sapphire.wait_for_receipt.side_effect = [
+        TimeoutError("receipt late"), {"status": 1, "blockNumber": 100},
+    ]
+    await enqueue(1)
+    await pipeline.run_internal_once()
+    await pipeline.run_internal_once()
+    await pipeline.run_internal_once()
+    # A LiFi swap counts while executing and while refunding.
+    await enqueue(2, venue="lifi")
+    test_db.execute("UPDATE swaps SET status = 'executing' WHERE venue = 'lifi'")
+    await pipeline.run_internal_once()
+    test_db.execute("UPDATE swaps SET status = 'refunding' WHERE venue = 'lifi'")
+    await pipeline.run_internal_once()
+    test_db.execute("UPDATE swaps SET status = 'refunded' WHERE venue = 'lifi'")
+    await pipeline.run_internal_once()
+
+    lines = [c.args[0] % c.args[1:] for c in log.info.call_args_list if c.args[0].startswith("swaps:")]
+    assert lines == [
+        "swaps: internal 0 active, 0 queued; lifi 0 in progress",
+        "swaps: internal 0 active, 1 queued; lifi 0 in progress",
+        "swaps: internal 1 active, 0 queued; lifi 0 in progress",
+        "swaps: internal 0 active, 0 queued; lifi 0 in progress",
+        "swaps: internal 0 active, 0 queued; lifi 1 in progress",
+        "swaps: internal 0 active, 0 queued; lifi 0 in progress",
+    ]

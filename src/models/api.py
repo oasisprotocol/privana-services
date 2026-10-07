@@ -57,6 +57,7 @@ class SwapStatusResponse(BaseModel):
     to_amount_actual: Optional[str] = None
     swap_tx_hash: Optional[str] = None
     error: Optional[str] = None
+    reason: Optional[str] = None
     created_at: int
     updated_at: int
 

@@ -72,6 +72,11 @@ READ_RETRY_BACKOFF_SEC = 0.5
 # so re-reading it on every quote buys nothing and costs a signed query.
 SEED_CACHE_TTL_SEC = 30
 
+# A healthy strategy probe is reused for this long on the deposit path. Midas
+# probes with three RPC reads, and on a shared RPC a burst of deposits gets
+# rate limited into refusals. A failed probe is never reused.
+HEALTH_CACHE_SEC = 30
+
 
 class ReceiptUnknown(Exception):
     """Broadcast, but the receipt could not be read. Recovery settles it."""
@@ -115,6 +120,7 @@ class VaultService:
         self._registry = registry if registry is not None else get_strategy_registry()
         self._seed_read_warned = False
         self._seed_cache: dict[str, tuple[float, int]] = {}
+        self._healthy_until: dict[str, float] = {}
         self.contract_address = Web3.to_checksum_address(
             self.settings.earn_manager_contract_address
         )
@@ -660,6 +666,17 @@ class VaultService:
             user_address=user_address, amount=amount, nonce=nonce, signature=signature,
         )
 
+    async def _strategy_healthy(self, pool_id_hex: str) -> bool:
+        key = pool_key(pool_id_hex)
+        if time.monotonic() < self._healthy_until.get(key, 0.0):
+            return True
+        healthy = await self._registry.get(pool_id_hex).is_healthy()
+        if healthy:
+            self._healthy_until[key] = time.monotonic() + HEALTH_CACHE_SEC
+        else:
+            self._healthy_until.pop(key, None)
+        return healthy
+
     async def deposit(
         self,
         pool_id_hex: str,
@@ -695,7 +712,7 @@ class VaultService:
         # user's funds in their balance instead of minting shares that land
         # undeployed. Withdraw stays ungated — exits must not depend on the
         # external protocol looking healthy.
-        if not await self._registry.get(pool_id_hex).is_healthy():
+        if not await self._strategy_healthy(pool_id_hex):
             raise ValueError(
                 "Pool strategy is unhealthy; deposits are temporarily refused"
             )

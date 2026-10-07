@@ -1488,6 +1488,64 @@ class TestSeedAwareQuotesAndExits:
         strategy.withdraw_from_earn.assert_not_awaited()
 
 
+class TestHealthCache:
+    @staticmethod
+    def _service(*results):
+        from src.services.earn.registry import StrategyRegistry
+
+        registry = StrategyRegistry()
+        strategy = MagicMock()
+        strategy.name = "midas-mtbill"
+        strategy.is_healthy = AsyncMock(side_effect=list(results))
+        registry.register(POOL_ID_HEX, strategy)
+        service, _, _, _ = _make_service(registry=registry)
+        return service, strategy
+
+    async def test_a_healthy_probe_is_reused_for_thirty_seconds(self, monkeypatch):
+        import src.services.earn.vault_service as module
+
+        service, strategy = self._service(True, True)
+        now = [1_000.0]
+        monkeypatch.setattr(module.time, "monotonic", lambda: now[0])
+
+        # A burst of deposits on a shared RPC would otherwise each probe three times.
+        assert await service._strategy_healthy(POOL_ID_HEX)
+        now[0] += 29
+        assert await service._strategy_healthy(POOL_ID_HEX.removeprefix("0x"))
+        assert strategy.is_healthy.await_count == 1
+
+        now[0] += 2
+        assert await service._strategy_healthy(POOL_ID_HEX)
+        assert strategy.is_healthy.await_count == 2
+
+    async def test_a_failed_probe_is_never_reused(self, monkeypatch):
+        import src.services.earn.vault_service as module
+
+        service, strategy = self._service(True, False, True)
+        now = [1_000.0]
+        monkeypatch.setattr(module.time, "monotonic", lambda: now[0])
+
+        assert await service._strategy_healthy(POOL_ID_HEX)
+        now[0] += 31
+        assert not await service._strategy_healthy(POOL_ID_HEX)
+        # Unhealthy is rechecked straight away, so recovery is seen at once.
+        assert await service._strategy_healthy(POOL_ID_HEX)
+        assert strategy.is_healthy.await_count == 3
+
+    async def test_two_deposits_probe_the_strategy_once(self, test_db):
+        service, strategy = self._service(True, True)
+        strategy.total_assets = AsyncMock(return_value=1050)
+        strategy.idle_assets = AsyncMock(return_value=0)
+        service.contract.functions.pools.return_value.call.return_value = (
+            bytes.fromhex(USDC_TOKEN_ID[2:]), POOL_ADDRESS, 1000, 1050, True,
+        )
+
+        for nonce in (5, 6):
+            await service.deposit(POOL_ID_HEX, USER_ADDRESS, "1000", nonce, "0x" + "aa" * 65)
+
+        assert strategy.is_healthy.await_count == 1
+
+
 class TestDeployIdle:
     @staticmethod
     def _service(*, idle, minimum=0, healthy=True, name="midas-mtbill", buffer_min=0, buffer_bps=0):
@@ -1937,6 +1995,14 @@ class TestDeployIdle:
 
         assert self._status(test_db, "before") == "completed"
         assert self._status(test_db, "during") == "undeployed"
+
+    async def test_a_deploy_probes_the_strategy_afresh(self, test_db):
+        service, strategy = self._service(idle=100_000, healthy=False)
+        service._healthy_until[POOL_ID_HEX] = float("inf")
+
+        # Money is about to move, so a deposit's cached probe does not count.
+        assert await service.deploy_reclaim(POOL_ID_HEX) == 0
+        strategy.deposit_to_earn.assert_not_awaited()
 
     async def test_does_nothing_when_there_is_nothing_idle(self, test_db):
         service, strategy = self._service(idle=0)

@@ -209,3 +209,13 @@ class TestLiFiClient:
         params = mock_http_client.get.call_args.kwargs["params"]
         assert url == "https://li.quest/v1/status"
         assert params == {"txHash": "0xabc", "fromChain": 8453, "toChain": 8453}
+
+    async def test_get_status_raises_on_http_error(self, client, mock_http_client):
+        error_resp = self._mock_response({}, status_code=404)
+        error_resp.raise_for_status.side_effect = httpx.HTTPStatusError(
+            "not indexed", request=MagicMock(), response=error_resp
+        )
+        mock_http_client.get.return_value = error_resp
+
+        with pytest.raises(httpx.HTTPStatusError):
+            await client.get_status(tx_hash="0xabc", from_chain_id=8453, to_chain_id=1)

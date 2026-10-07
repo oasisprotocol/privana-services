@@ -6,6 +6,7 @@ from privana import PrivanaClient
 
 from src.clients.privana import (
     _siwe_login_as_lp,
+    get_earn_pool_privana_client,
     get_privana_client,
     get_swap_lp_privana_client,
     reset_privana_client,
@@ -101,6 +102,22 @@ async def test_authenticated_client_is_a_separate_singleton():
     # The SDK owns refreshing it; the service only supplies the login.
     assert authed._http._token_provider is not None
     assert plain._http._token_provider is None
+    reset_privana_client()
+
+
+@pytest.mark.asyncio
+async def test_every_client_sends_connection_close():
+    reset_privana_client()
+
+    with patch("src.clients.privana.load_settings", return_value=_settings()):
+        clients = [
+            get_privana_client(),
+            await get_swap_lp_privana_client(),
+            await get_earn_pool_privana_client(),
+        ]
+
+    for client in clients:
+        assert client._http._client.headers["connection"] == "close"
     reset_privana_client()
 
 

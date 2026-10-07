@@ -311,3 +311,26 @@ async def test_swap_counts_are_logged_only_when_they_change(worker, enqueue, tes
         "swaps: internal 0 active, 0 queued; lifi 1 in progress",
         "swaps: internal 0 active, 0 queued; lifi 0 in progress",
     ]
+
+
+async def test_stop_cancels_lifi_runners(worker):
+    from src.services.swap.lifi_pipeline import LifiSwapPipeline
+
+    running = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def run(*_):
+        running.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    pipeline = LifiSwapPipeline(accounting=MagicMock(), lifi=MagicMock(), bridge=MagicMock())
+    pipeline._run = run
+    pipeline.spawn_background("swap", {}, 5)
+    await running.wait()
+    worker._pipeline = pipeline
+    await worker.stop()
+    assert cancelled.is_set()
+    assert pipeline._tasks == {}

@@ -147,7 +147,17 @@ MIGRATIONS = [
     # LiFi for the same one. NULL on quotes stored before it, which were
     # priced at LiFi's default.
     "ALTER TABLE quotes ADD COLUMN slippage_bps INTEGER;",
-
+    # A LiFi swap's signed txs, saved before broadcast so a restart awaits or
+    # rebroadcasts them instead of signing new ones.
+    "ALTER TABLE swaps ADD COLUMN lifi_tx_raw TEXT;",
+    "ALTER TABLE swaps ADD COLUMN deposit_tx_raw TEXT;",
+    # The hashes of a tx's versions other than `*_tx_hash`, space-separated. A
+    # re-sign at a higher fee keeps the nonce, so whichever version is mined
+    # settles the tx.
+    "ALTER TABLE swaps ADD COLUMN lifi_tx_replaced TEXT;",
+    "ALTER TABLE swaps ADD COLUMN deposit_tx_replaced TEXT;",
+    # The LiFi output, for a restart at deposit.
+    "ALTER TABLE swaps ADD COLUMN to_amount_received TEXT;",
 ]
 
 
@@ -211,4 +221,15 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
             conn.execute(
                 "UPDATE earn_transactions SET shares_delta = NULL, exchange_rate = NULL, "
                 "settled_at = NULL WHERE tx_hash IS NOT NULL"
+            )
+        # The old LiFi pipeline saved a tx only once mined, so its in-flight swaps
+        # do not show whether a tx went out. Park them for manual recovery.
+        if conn.execute(
+            "INSERT OR IGNORE INTO data_migrations (name) VALUES ('lifi_park_inflight_v1')"
+        ).rowcount:
+            conn.execute(
+                "UPDATE swaps SET status = 'failed', error = COALESCE(error || '; ', '') "
+                "|| 'interrupted by upgrade; manual recovery required', "
+                "updated_at = CAST(strftime('%s', 'now') AS INTEGER) "
+                "WHERE venue = 'lifi' AND status IN ('executing', 'refunding')"
             )

@@ -36,7 +36,7 @@ class SwapWorker:
         await asyncio.gather(*self._tasks, return_exceptions=True)
         self._tasks.clear()
         if self._pipeline is not None:
-            tasks = list(self._pipeline._tasks)
+            tasks = list(self._pipeline._tasks.values())
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)

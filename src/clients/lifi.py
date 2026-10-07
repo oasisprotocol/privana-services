@@ -83,9 +83,6 @@ class LiFiClient:
     ) -> dict[str, Any]:
         params = {"txHash": tx_hash, "fromChain": from_chain_id, "toChain": to_chain_id}
         response = await self.client.get(f"{self.api_url}/status", params=params)
-        # LiFi answers 404 for a tx it has not indexed yet.
-        if response.status_code == 404:
-            return {"status": "NOT_FOUND"}
         response.raise_for_status()
         return response.json()
 

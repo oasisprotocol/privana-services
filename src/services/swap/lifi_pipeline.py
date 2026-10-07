@@ -3,6 +3,7 @@ import logging
 import time
 from typing import Any, Awaitable, Callable, Optional
 
+import httpx
 from eth_abi import decode
 from hexbytes import HexBytes
 from privana.types import TransferFundsRequest
@@ -124,7 +125,10 @@ class LifiSwapPipeline:
                     await self._confirm_input(quote, input_nonce)
                     await self._withdraw(swap_id, quote)
                 received, to_info = await self._lifi_execute(swap_id, quote)
-            await self._deposit_output(swap_id, to_info, received)
+                self._update_swap(
+                    swap_id, step=LifiSwapStep.DEPOSIT.value, to_amount_received=str(received)
+                )
+            await self._deposit(swap_id, to_info, received)
             self._update_swap(swap_id, step=LifiSwapStep.CREDIT.value)
             credited = await self._credit(quote, received)
             self._update_swap(
@@ -173,7 +177,18 @@ class LifiSwapPipeline:
         try:
             if step == LifiSwapStep.LIFI_EXECUTE.value:
                 logger.info("lifi swap %s re-depositing input tokens", swap_id)
-                await self._redeposit_input(swap_id, quote)
+                from_info = await self.accounting.get_token_info(quote["from_token_id"])
+                amount = int(quote["from_amount"])
+                # A saved redeposit is settled by its receipt, not by the balance it spends.
+                if self._row(swap_id)["deposit_tx_hash"] is None:
+                    evm = self._evm_for(from_info.chain_id)
+                    for _ in range(REFUND_BALANCE_POLLS):
+                        if await self._holds(evm, from_info.token_address, amount):
+                            break
+                        await asyncio.sleep(self._poll_interval_sec)
+                    else:
+                        raise RuntimeError("input tokens not returned on-chain")
+                await self._deposit(swap_id, from_info, amount)
             await self._lp_transfer(quote["user_address"], quote["from_token_id"], int(quote["from_amount"]))
             self._update_swap(swap_id, status=SwapStatus.REFUNDED.value)
             logger.info("lifi swap %s refunded", swap_id)
@@ -184,20 +199,6 @@ class LifiSwapPipeline:
                 status=SwapStatus.FAILED.value,
                 error=f"{reason}; refund failed, manual recovery required: {sanitize_error(str(exc))}",
             )
-
-    async def _redeposit_input(self, swap_id: str, quote: dict) -> None:
-        from_info = await self.accounting.get_token_info(quote["from_token_id"])
-        amount = int(quote["from_amount"])
-        # A saved redeposit is settled by its receipt, not by the balance it spends.
-        if self._row(swap_id)["deposit_tx_hash"] is None:
-            evm = self._evm_for(from_info.chain_id)
-            for _ in range(REFUND_BALANCE_POLLS):
-                if await self._holds(evm, from_info.token_address, amount):
-                    break
-                await asyncio.sleep(self._poll_interval_sec)
-            else:
-                raise RuntimeError("input tokens not returned on-chain")
-        await self._deposit(swap_id, from_info, amount)
 
     async def _submit_input(
         self, quote: dict, input_nonce: int, input_signature: str
@@ -254,7 +255,7 @@ class LifiSwapPipeline:
     ) -> None:
         """Send the swap once the wallet holds its input, and gas for a native
         input. Sent earlier, it reverts. The wallet is shared, so its balance
-        does not prove this swap's withdrawal arrived (#186)."""
+        does not prove this swap's withdrawal arrived."""
         amount = int(quote["from_amount"])
         for _ in range(FUNDING_POLLS):
             if await self._holds(evm, from_info.token_address, amount):
@@ -362,9 +363,8 @@ class LifiSwapPipeline:
         hash_column = f"{kind}_tx_hash"
 
         def record(tx_hash: str, nonce: int, raw: str) -> None:
-            self._update_swap(swap_id, **{
-                hash_column: tx_hash, f"{kind}_tx_nonce": nonce, f"{kind}_tx_raw": raw,
-            })
+            self._update_swap(swap_id, **{hash_column: tx_hash, f"{kind}_tx_raw": raw})
+            logger.info("lifi swap %s submitting %s tx %s at nonce %d", swap_id, kind, tx_hash, nonce)
 
         try:
             await asyncio.to_thread(send, *args, on_signed=record)
@@ -390,6 +390,7 @@ class LifiSwapPipeline:
                 hash_column: tx_hash, raw_column: raw,
                 replaced_column: " ".join(filter(None, (row[replaced_column], row[hash_column]))),
             })
+            logger.info("lifi swap %s submitting %s tx %s at nonce %d", swap_id, kind, tx_hash, nonce)
 
         for _ in range(TX_RECEIPT_POLLS):
             row = self._row(swap_id)
@@ -434,9 +435,13 @@ class LifiSwapPipeline:
             try:
                 status = await self.lifi.get_status(tx_hash, from_info.chain_id, to_info.chain_id)
             except Exception as exc:
-                logger.warning("lifi status of %s unavailable: %s", tx_hash, exc)
+                # LiFi answers 404 until it indexes the tx.
+                if not (isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 404):
+                    logger.warning("lifi status of %s unavailable: %s", tx_hash, exc)
                 status = {}
             state, substatus = status.get("status"), status.get("substatus")
+            # Only DONE with COMPLETED is a full delivery. DONE with PARTIAL or
+            # REFUNDED, FAILED and INVALID are final. Anything else keeps polling.
             if state == LIFI_STATUS_DONE and substatus == LIFI_SUBSTATUS_COMPLETED:
                 receiving = status["receiving"]
                 if (
@@ -451,15 +456,10 @@ class LifiSwapPipeline:
             await asyncio.sleep(self._poll_interval_sec)
         raise RuntimeError(f"lifi execution status polling exhausted for {tx_hash}")
 
-    async def _deposit_output(self, swap_id: str, to_info: Any, received: int) -> None:
-        self._update_swap(
-            swap_id, step=LifiSwapStep.DEPOSIT.value, to_amount_received=str(received)
-        )
-        await self._deposit(swap_id, to_info, received)
-
     async def _deposit(self, swap_id: str, info: Any, amount: int) -> None:
-        """Deposit `amount` from the swap pool wallet to its ledger balance. A
-        new transfer is signed only after the last one reverts."""
+        """Transfer `amount` from the swap pool wallet to its Accounting deposit
+        address, then wait for Accounting to credit the swap pool account's
+        private balance. A new transfer is signed only after the last one reverts."""
         evm = self._evm_for(info.chain_id)
         last_error: Optional[Exception] = None
         for attempt in range(self._deposit_max_retries):
@@ -475,8 +475,8 @@ class LifiSwapPipeline:
                     await self._await_tx(swap_id, "deposit", evm)
                 except TxReverted:
                     self._update_swap(
-                        swap_id, deposit_tx_hash=None, deposit_tx_nonce=None,
-                        deposit_tx_raw=None, deposit_tx_replaced=None,
+                        swap_id, deposit_tx_hash=None, deposit_tx_raw=None,
+                        deposit_tx_replaced=None,
                     )
                     raise
                 await self.bridge.await_deposit_credit(

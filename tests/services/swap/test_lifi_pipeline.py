@@ -294,8 +294,7 @@ class TestRun:
         swap_id = await self._launch_and_run(pipeline, _quote("q5"))
         row = dict(test_db.execute("SELECT * FROM swaps WHERE id=?", (swap_id,)).fetchone())
         assert row["status"] == "completed"
-        assert (row["deposit_tx_hash"], row["deposit_tx_nonce"], row["deposit_tx_raw"]) == (
-            DEPOSIT_TX, 42, _raw(DEPOSIT_TX))
+        assert (row["deposit_tx_hash"], row["deposit_tx_raw"]) == (DEPOSIT_TX, _raw(DEPOSIT_TX))
         assert pipeline.evm.transfer.call_count == 2
         pipeline.bridge.await_deposit_credit.assert_awaited_once_with(
             TO_INFO.chain_id, DEPOSIT_TX, 60000)
@@ -351,8 +350,7 @@ class TestRun:
         row = _swap_row(swap_id)
         assert row["status"] == "completed"
         # The new transfer starts its own versions: the old revert never settles it.
-        assert (row["deposit_tx_hash"], row["deposit_tx_nonce"], row["deposit_tx_replaced"]) == (
-            DEPOSIT_TX, 42, None)
+        assert (row["deposit_tx_hash"], row["deposit_tx_replaced"]) == (DEPOSIT_TX, None)
         assert pipeline.evm.transfer.call_count == 2
         pipeline.bridge.await_deposit_credit.assert_awaited_once_with(
             TO_INFO.chain_id, DEPOSIT_TX, 60000)
@@ -927,7 +925,7 @@ class TestSettleByOutcome:
         def send(*_, on_signed):
             on_signed(LIFI_TX, 40, _raw(LIFI_TX))
             row = _swap_row(swap_id)
-            recorded.append((row["lifi_tx_hash"], row["lifi_tx_nonce"], row["lifi_tx_raw"]))
+            recorded.append((row["lifi_tx_hash"], row["lifi_tx_raw"]))
             return LIFI_TX
         pipeline.evm.send_transaction_request = MagicMock(side_effect=send)
         insert_quote("qb", venue="lifi", user_address=USER,
@@ -939,7 +937,7 @@ class TestSettleByOutcome:
 
         await pipeline._run(swap_id, quote, 5)
 
-        assert recorded == [(LIFI_TX, 40, _raw(LIFI_TX))]
+        assert recorded == [(LIFI_TX, _raw(LIFI_TX))]
 
     async def test_a_reverted_lifi_tx_refunds_once(self, settings, insert_quote):
         pipeline = _make_pipeline(settings)
@@ -992,7 +990,10 @@ class TestSettleByOutcome:
         pipeline.evm.send_transaction_request.assert_called_once()
 
     @pytest.mark.parametrize("mined", [LIFI_TX, "0x" + "c1" * 32], ids=["original", "re-signed"])
-    async def test_a_re_signed_tx_settles_by_the_version_mined(self, settings, insert_quote, mined):
+    async def test_a_re_signed_tx_settles_by_the_version_mined(
+        self, settings, insert_quote, mined, caplog
+    ):
+        caplog.set_level("INFO")
         # Cross-chain: LiFi reports the bridge by the source tx hash.
         re_signed = "0x" + "c1" * 32
         pipeline = _make_pipeline(settings)
@@ -1019,6 +1020,7 @@ class TestSettleByOutcome:
         pipeline.evm.rebroadcast.assert_called_once_with(_raw(LIFI_TX), ANY)
         pipeline.lifi.get_status.assert_awaited_once_with(mined, FROM_INFO.chain_id, 1)
         pipeline.evm.send_transaction_request.assert_called_once()
+        assert f"submitting lifi tx {re_signed} at nonce 40" in caplog.text
 
     async def test_lookup_errors_are_not_outcomes(self, settings, insert_quote):
         pipeline = _make_pipeline(settings)
@@ -1145,10 +1147,14 @@ class TestBridgeOutcome:
         pipeline.lifi.get_status = AsyncMock(side_effect=list(statuses))
         return pipeline
 
-    async def test_credits_the_delivery_once_lifi_has_indexed_it(self, settings, insert_quote):
+    async def test_credits_the_delivery_once_lifi_has_indexed_it(
+        self, settings, insert_quote, caplog
+    ):
         pipeline = self._pipeline(
             settings,
-            {"status": "NOT_FOUND"},
+            httpx.HTTPStatusError(
+                "not indexed", request=MagicMock(), response=httpx.Response(404)
+            ),
             httpx.ConnectError("lifi down"),
             {"status": "PENDING", "substatus": "WAIT_DESTINATION_TRANSACTION"},
             _bridged(60000, chain_id=1),
@@ -1159,6 +1165,8 @@ class TestBridgeOutcome:
         assert row["status"] == "completed"
         assert row["to_amount_actual"] == str(calculate_fee(60000, 10)[0])
         pipeline.bridge.await_deposit_credit.assert_awaited_once_with(1, DEPOSIT_TX, 60000)
+        # The 404 is LiFi not having indexed the tx yet. Only the outage warns.
+        assert caplog.text.count("lifi status of") == 1
 
     @pytest.mark.parametrize("status", [
         {"status": "FAILED"},
@@ -1319,7 +1327,7 @@ class TestResume:
         pipeline = _make_pipeline(settings)
         swap_id, quote = self._seed(
             pipeline, insert_quote, "qr1", step="lifi_execute",
-            lifi_tx_hash=LIFI_TX, lifi_tx_nonce=40, lifi_tx_raw=_raw(LIFI_TX))
+            lifi_tx_hash=LIFI_TX, lifi_tx_raw=_raw(LIFI_TX))
 
         await pipeline._run(swap_id, quote, 5)
 
@@ -1344,7 +1352,7 @@ class TestResume:
         pipeline = _make_pipeline(settings)
         swap_id, quote = self._seed(
             pipeline, insert_quote, "qr8", step="lifi_execute",
-            lifi_tx_hash=LIFI_TX, lifi_tx_nonce=40, lifi_tx_raw=raw)
+            lifi_tx_hash=LIFI_TX, lifi_tx_raw=raw)
         restarted = EvmClient("http://localhost:1", key)
         restarted.w3 = MagicMock()
         restarted.w3.eth.get_block.return_value = {"baseFeePerGas": 1_000}
@@ -1374,7 +1382,7 @@ class TestResume:
         pipeline.accounting.get_token_info = AsyncMock(return_value=TO_INFO)
         swap_id, quote = self._seed(
             pipeline, insert_quote, "qr3", step="deposit", lifi_tx_hash=LIFI_TX,
-            to_amount_received="60000", deposit_tx_hash=DEPOSIT_TX, deposit_tx_nonce=41,
+            to_amount_received="60000", deposit_tx_hash=DEPOSIT_TX,
             deposit_tx_raw=_raw(DEPOSIT_TX))
 
         await pipeline._run(swap_id, quote, 5)
@@ -1426,7 +1434,7 @@ class TestResume:
         pipeline.accounting.get_token_info = AsyncMock(return_value=TO_INFO)
         resumed, _ = self._seed(
             pipeline, insert_quote, "qr9", step="deposit", lifi_tx_hash=LIFI_TX,
-            to_amount_received="60000", deposit_tx_hash=DEPOSIT_TX, deposit_tx_nonce=41,
+            to_amount_received="60000", deposit_tx_hash=DEPOSIT_TX,
             deposit_tx_raw=_raw(DEPOSIT_TX))
         later, _ = self._seed(pipeline, insert_quote, "qr10", step="credit")
         # The first pass fails at the later row, so the worker runs it again.

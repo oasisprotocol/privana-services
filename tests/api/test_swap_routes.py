@@ -267,8 +267,9 @@ class TestSwapStatusRoute:
 
             r = await api_client.get("/v1/swap/swap-789/status")
 
-        assert r.json()["reason"] == "price_moved"
-        assert r.json()["error"] == "The swap did not go through, and your funds were returned."
+        assert r.json()["reason"] == "refunded"
+        assert r.json()["error"] == "This swap did not go through, and your funds were returned."
+        assert "floor" not in r.json()["error"]
 
     async def test_returns_404_for_missing_swap(self, api_client):
         with patch("src.api.swap.get_swap_executor") as mock_exec:

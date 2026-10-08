@@ -17,6 +17,7 @@ from src.core.fee_policy import resolve_internal_fee
 from src.core.fees import calculate_fee
 from src.core.validation import sanitize_error
 from src.services.swap.executor import get_swap_executor
+from src.services.swap.failure import log_swap_failure
 from src.services.swap.quote_service import get_quote_service
 from src.services.swap.worker import lp_transfer_lock
 from src.services.user_queue import users_with_inflight_work
@@ -134,8 +135,8 @@ class InternalSwapPipeline:
 
     def _defer_unpriced(self, swap: dict, exc: Exception) -> None:
         if int(time.time()) - swap["created_at"] >= PRICING_GIVE_UP_SEC:
-            logger.warning("internal swap %s failed: no price for %ds", swap["id"], PRICING_GIVE_UP_SEC)
             self._update(swap["id"], status="failed", error="pricing unavailable")
+            log_swap_failure(swap["id"], f"no price for {PRICING_GIVE_UP_SEC}s", exc)
             return
         logger.info("internal swap %s waiting for a price: %s", swap["id"], exc)
         self._update(swap["id"], status="scheduled")
@@ -155,6 +156,7 @@ class InternalSwapPipeline:
                                swap["id"], swap["swap_tx_hash"])
                 self._update(swap["id"], status="failed",
                              error=f"Transaction does not exist on-chain: {swap['swap_tx_hash']}")
+                log_swap_failure(swap["id"], "transaction never mined", exc)
             else:
                 self._update(swap["id"], error=sanitize_error(str(exc)))
             return
@@ -166,6 +168,7 @@ class InternalSwapPipeline:
             logger.warning("internal swap %s tx hash %s failed", swap["id"], swap['swap_tx_hash'])
             self._update(swap["id"], status="failed",
                          error=f"Transaction reverted: {swap['swap_tx_hash']}")
+            log_swap_failure(swap["id"], "transaction reverted")
 
     async def run_internal_once(self) -> None:
         async with self._internal_lock:
@@ -206,6 +209,7 @@ class InternalSwapPipeline:
                         )
                         self._update(swap["id"],
                                      error="Submission outcome unknown; manual recovery required")
+                        log_swap_failure(swap["id"], "submission outcome unknown; manual recovery required")
                     else:
                         logger.warning("internal swap %s changing status from 'executing' to 'scheduled'", swap["id"])
                         self._update(swap["id"], status="scheduled")
@@ -232,8 +236,8 @@ class InternalSwapPipeline:
                     )
                     candidates.append(swap)
                 except Exception as exc:
-                    logger.warning("internal swap %s preflight failed: %s", swap["id"], exc)
                     self._update(swap["id"], status="failed", error=sanitize_error(str(exc)))
+                    log_swap_failure(swap["id"], "simulation failed", exc)
             # A swap signed for an amount before keeps it: that signature may
             # already have paid out.
             prices = await asyncio.gather(*(
@@ -262,8 +266,8 @@ class InternalSwapPipeline:
                     balances[token] -= amount
                     prepared.append(swap)
                 except Exception as exc:
-                    logger.warning("internal swap %s preflight failed: %s", swap["id"], exc)
                     self._update(swap["id"], status="failed", error=sanitize_error(str(exc)))
+                    log_swap_failure(swap["id"], "preflight failed", exc)
             sent = []
             for index, swap in enumerate(prepared):
                 try:
@@ -280,11 +284,11 @@ class InternalSwapPipeline:
                     swap["submitted_at"] = submitted_at
                     sent.append(swap)
                 except Exception as exc:
-                    logger.exception("internal swap %s submission outcome unknown", swap["id"])
                     self._update(swap["id"],
                                  status="scheduled",
                                  error="Submission outcome unknown; retrying: "
                                  + sanitize_error(str(exc)))
+                    log_swap_failure(swap["id"], "submission outcome unknown; retrying", exc)
                     # Don't leave a gap in the LP nonce sequence after a send error.
                     for unsent in prepared[index + 1:]:
                         self._update(unsent["id"], status="scheduled")

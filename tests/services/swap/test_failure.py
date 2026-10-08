@@ -1,37 +1,60 @@
+import time
+
 import pytest
 
-from src.services.swap.failure import swap_failure
+from src.core.db import db_write
+from src.services.swap.failure import log_swap_failure, swap_failure
 
 
-@pytest.mark.parametrize("status,error,reason", [
-    # The three errors quoted in #183, as users saw them.
-    ("refunded", "execution quote below floor: net_min=7690063 floor=7799419", "price_moved"),
-    ("failed", "Network request failed: Server disconnected without sending a response.; "
-               "refund failed, manual recovery required: Network request failed", "under_review"),
-    ("failed", "transaction 0x04244d2a may have been sent, outcome unknown; "
-               "manual recovery required", "under_review"),
-    ("failed", "Transaction reverted: 0x" + "ab" * 32, "no_funds_moved"),
-    ("failed", "input transfer rejected: status=error detail=bad sig", "no_funds_moved"),
-    ("failed", "input transfer not confirmed on ledger", "under_review"),
-    ("scheduled", "Submission outcome unknown; retrying: Transaction reverted", "delayed"),
-    ("executing", "Submission outcome unknown; manual recovery required", "under_review"),
-    ("refunded", "lifi route of 0xab ended FAILED", "no_funds_moved"),
-    ("refunded", None, "no_funds_moved"),
+@pytest.mark.parametrize("venue,step", [
+    ("lifi", "input_transfer"), ("lifi", "withdraw"), ("lifi", "lifi_execute"),
+    ("lifi", "deposit"), ("lifi", "credit"),
 ])
-def test_every_failure_gets_a_reason_users_can_read(status, error, reason):
-    code, message = swap_failure(status, error)
+def test_a_failed_swap_holding_the_users_funds_says_how_to_get_them_back(venue, step):
+    reason, message = swap_failure("swap-123", "failed", venue, step)
 
-    assert code == reason
-    # Nothing internal reaches the user: no hashes, amounts or provider text.
-    assert "0x" not in message and "floor" not in message and "Network" not in message
-
-
-def test_a_refund_says_the_funds_came_back():
-    assert swap_failure("refunded", "execution quote below floor: net_min=1 floor=2")[1] == (
-        "The swap did not go through, and your funds were returned."
-    )
+    assert reason == "needs_support"
+    assert "swap ID swap-123" in message
 
 
-@pytest.mark.parametrize("status", ["completed", "executing", "scheduled"])
-def test_a_swap_without_an_error_has_nothing_to_explain(status):
-    assert swap_failure(status, None) == (None, None)
+@pytest.mark.parametrize("venue,step", [("internal", None), ("lifi", None)])
+def test_a_failed_swap_that_never_took_funds_says_so(venue, step):
+    assert swap_failure("swap-123", "failed", venue, step)[0] == "no_funds_moved"
+
+
+def test_a_refunded_swap_says_the_funds_came_back():
+    reason, message = swap_failure("swap-123", "refunded", "lifi", "lifi_execute")
+
+    assert reason == "refunded"
+    assert "returned" in message
+
+
+@pytest.mark.parametrize("status", ["scheduled", "executing", "refunding", "completed"])
+def test_a_swap_still_running_or_done_has_nothing_to_explain(status):
+    assert swap_failure("swap-123", status, "lifi", "withdraw") == (None, None)
+
+
+def test_the_log_carries_the_provider_error_and_the_swap_state(test_db, caplog, monkeypatch):
+    import src.services.swap.failure as module
+
+    now = int(time.time())
+    db_write(test_db, """INSERT INTO swaps (id, quote_id, user_address, from_token_id, to_token_id,
+        from_amount, to_amount_estimate, status, venue, step, lifi_tx_hash, created_at, updated_at)
+        VALUES ('s1', 'q1', '0xuser', '0xaa', '0xbb', '1000', '990', 'failed', 'lifi',
+                'lifi_execute', '0xabc', ?, ?)""", (now, now))
+    records = []
+    monkeypatch.setattr(module.logger, "error", lambda msg, *args: records.append(msg % args))
+
+    try:
+        raise RuntimeError("route reverted at https://eth.example/v2/SECRETKEY?x=1: STF")
+    except RuntimeError as exc:
+        log_swap_failure("s1", "lifi swap failed", exc)
+
+    line = records[0]
+    assert "swap s1 lifi swap failed" in line
+    # The provider's own words and the swap's state, for tracing.
+    assert "route reverted" in line and "STF" in line
+    assert '"step": "lifi_execute"' in line and '"lifi_tx_hash": "0xabc"' in line
+    assert "Traceback" in line
+    # A key in a provider URL never reaches the logs.
+    assert "SECRETKEY" not in line and "https://eth.example/…" in line

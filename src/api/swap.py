@@ -72,7 +72,7 @@ async def get_swap_status(swap_id: str) -> SwapStatusResponse:
     try:
         executor = get_swap_executor()
         swap = executor._get_swap(swap_id)
-        reason, message = swap_failure(swap.status, swap.error)
+        reason, message = swap_failure(swap.id, swap.status, swap.venue, swap.step)
         return SwapStatusResponse(
             swap_id=swap.id,
             status=swap.status,

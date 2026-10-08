@@ -155,14 +155,14 @@ class TestSwapRoute:
             assert data["tx_hash"] is None
             assert data["message"] == "Swap scheduled"
 
-    async def test_returns_400_on_expired_quote(self, api_client):
+    async def test_returns_400_on_a_rejected_quote(self, api_client):
         with patch("src.api.swap.get_swap_executor") as mock_exec:
             executor = MagicMock()
-            executor.schedule_swap = AsyncMock(side_effect=ValueError("Quote has expired"))
+            executor.schedule_swap = AsyncMock(side_effect=ValueError("Quote not found"))
             mock_exec.return_value = executor
 
             r = await api_client.post("/v1/swap", json={
-                "quote_id": "expired-quote",
+                "quote_id": "missing-quote",
                 "input_nonce": 0,
                 "input_signature": "0x" + "aa" * 65,
             })

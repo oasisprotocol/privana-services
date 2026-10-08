@@ -20,6 +20,9 @@ logger = logging.getLogger(__name__)
 
 
 CLEANUP_INTERVAL = 60
+# Quotes no longer expire, but nothing reads one a day after it was issued
+# unless a swap still needs it.
+QUOTE_RETENTION_SEC = 86_400
 
 
 def _seconds_left(expires_at: int) -> int:
@@ -52,7 +55,7 @@ class QuoteService:
         user_address: str,
         slippage_bps: int,
     ) -> QuoteResponse:
-        self.cleanup_expired_quotes()
+        self.cleanup_old_quotes()
         validate_token_id(from_token_id, "from_token_id")
         validate_token_id(to_token_id, "to_token_id")
         validate_amount(from_amount, "from_amount")
@@ -298,18 +301,18 @@ class QuoteService:
             venue=quote["venue"],
         )
 
-    def cleanup_expired_quotes(self) -> int:
+    def cleanup_old_quotes(self) -> int:
         now = int(time.time())
         if now - self._last_cleanup < CLEANUP_INTERVAL:
             return 0
         db = get_db()
-        # A swap accepted before its quote expired can still be waiting in the
-        # queue, and it reads the quote when it runs. Keep those until it settles.
+        # A queued swap reads its quote when it runs, so keep those until it settles.
         cursor = db_write(
             db,
-            "DELETE FROM quotes WHERE expires_at <= ? AND id NOT IN "
+            "DELETE FROM quotes WHERE created_at <= ? AND id NOT IN "
             "(SELECT quote_id FROM swaps WHERE status IN (?, ?, ?))",
-            (now, SwapStatus.SCHEDULED.value, SwapStatus.EXECUTING.value, SwapStatus.REFUNDING.value),
+            (now - QUOTE_RETENTION_SEC, SwapStatus.SCHEDULED.value, SwapStatus.EXECUTING.value,
+             SwapStatus.REFUNDING.value),
         )
         self._last_cleanup = now
         deleted = cursor.rowcount

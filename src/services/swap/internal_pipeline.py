@@ -23,11 +23,12 @@ from src.services.user_queue import users_with_inflight_work
 logger = logging.getLogger(__name__)
 # The Sapphire client node will relay transactions with up to 10 future nonces.
 BATCH_SIZE = 10
-# Number of seconds after quote expiry to consider an in-flight swap stale.
-STALE_SWAP_TIMEOUT = 13
+# Seconds after submission, beyond the receipt wait, before a swap whose
+# transaction cannot be found is considered never mined.
+STALE_SWAP_TIMEOUT = 60
 SWAP_MANAGER_ABI = load_abi("SwapManager")
-# Each swap is re-priced when it runs. The batch holds the LP transfer lock
-# meanwhile, so a slow price must not hold it for long.
+# Quotes do not expire: each swap is re-priced when it runs. The batch holds
+# the LP transfer lock meanwhile, so a slow price must not hold it for long.
 REPRICE_TIMEOUT_SEC = 5
 # A swap that cannot be priced goes back to the queue, and fails once it has
 # waited this long since it was scheduled.
@@ -139,13 +140,9 @@ class InternalSwapPipeline:
         self._update(swap["id"], status="scheduled")
 
     async def _is_stale(self, sapphire, swap: dict) -> bool:
-        """True when the quote has expired and there is no sensible way it was completed."""
-        quote = get_db().execute(
-            "SELECT expires_at FROM quotes WHERE id = ?", (swap["quote_id"],)
-        ).fetchone()
-        if quote and int(time.time()) < quote["expires_at"] + STALE_SWAP_TIMEOUT:
-            return False
-        return True
+        """True when the transaction has been out long enough that it would have been mined."""
+        submitted_at = swap.get("submitted_at") or swap["updated_at"]
+        return int(time.time()) >= submitted_at + STALE_SWAP_TIMEOUT
 
     async def _settle(self, sapphire, swap: dict) -> None:
         try:
@@ -276,8 +273,10 @@ class InternalSwapPipeline:
                     tx_hash = await asyncio.to_thread(
                         sapphire.submit_contract_call, **self._call(args), gas_limit=1_000_000, nonce=tx_nonce + index
                     )
-                    self._update(swap["id"], swap_tx_hash=tx_hash)
+                    submitted_at = int(time.time())
+                    self._update(swap["id"], swap_tx_hash=tx_hash, submitted_at=submitted_at)
                     swap["swap_tx_hash"] = tx_hash
+                    swap["submitted_at"] = submitted_at
                     sent.append(swap)
                 except Exception as exc:
                     logger.exception("internal swap %s submission outcome unknown", swap["id"])

@@ -139,7 +139,9 @@ class TestQuoteDeduplication:
         assert result.fee_policy_id is None
 
 
-class TestExpiredQuoteCleanup:
+class TestOldQuoteCleanup:
+    DAY = 86_400
+
     def _make_service(self):
         from src.services.swap.quote_service import QuoteService
         service = QuoteService.__new__(QuoteService)
@@ -147,35 +149,29 @@ class TestExpiredQuoteCleanup:
         service._last_cleanup = 0
         return service
 
-    def test_deletes_expired_quotes(self, test_db, insert_quote):
-        past = int(time.time()) - 10
-        insert_quote("expired_1", expires_at=past)
-        insert_quote("expired_2", expires_at=past)
-        service = self._make_service()
-        deleted = service.cleanup_expired_quotes()
+    def test_deletes_quotes_older_than_a_day(self, test_db, insert_quote):
+        old = int(time.time()) - self.DAY - 10
+        insert_quote("old_1", created_at=old)
+        insert_quote("old_2", created_at=old)
+        deleted = self._make_service().cleanup_old_quotes()
         assert deleted == 2
-        row = test_db.execute("SELECT COUNT(*) as cnt FROM quotes").fetchone()
-        assert row["cnt"] == 0
+        assert test_db.execute("SELECT COUNT(*) AS cnt FROM quotes").fetchone()["cnt"] == 0
 
-    def test_preserves_valid_quotes(self, test_db, insert_quote):
-        future = int(time.time()) + 300
-        past = int(time.time()) - 10
-        insert_quote("valid_1", expires_at=future)
-        insert_quote("expired_1", expires_at=past)
-        service = self._make_service()
-        deleted = service.cleanup_expired_quotes()
-        assert deleted == 1
-        row = test_db.execute("SELECT id FROM quotes").fetchone()
-        assert row["id"] == "valid_1"
+    def test_keeps_a_quote_past_its_reuse_window(self, test_db, insert_quote):
+        # Quotes no longer expire: a quote minutes old is still good to swap.
+        insert_quote("recent", expires_at=int(time.time()) - 600, created_at=int(time.time()) - 630)
+        insert_quote("old", created_at=int(time.time()) - self.DAY - 10)
+        assert self._make_service().cleanup_old_quotes() == 1
+        assert test_db.execute("SELECT id FROM quotes").fetchone()["id"] == "recent"
 
     @pytest.mark.parametrize("status,kept", [
         ("scheduled", True), ("executing", True), ("refunding", True),
         ("completed", False), ("failed", False), ("refunded", False),
     ])
-    def test_keeps_expired_quotes_an_unsettled_swap_still_needs(self, test_db, insert_quote, status, kept):
+    def test_keeps_old_quotes_an_unsettled_swap_still_needs(self, test_db, insert_quote, status, kept):
         from src.core.db import db_write
 
-        insert_quote("q1", expires_at=int(time.time()) - 10)
+        insert_quote("q1", created_at=int(time.time()) - self.DAY - 10)
         db_write(
             test_db,
             """INSERT INTO swaps (id, quote_id, user_address, from_token_id, to_token_id,
@@ -184,22 +180,20 @@ class TestExpiredQuoteCleanup:
             (status,),
         )
 
-        deleted = self._make_service().cleanup_expired_quotes()
+        deleted = self._make_service().cleanup_old_quotes()
 
         assert deleted == (0 if kept else 1)
         remaining = test_db.execute("SELECT COUNT(*) AS cnt FROM quotes").fetchone()["cnt"]
         assert remaining == (1 if kept else 0)
 
     def test_throttles_cleanup(self, test_db, insert_quote):
-        past = int(time.time()) - 10
-        insert_quote("expired_1", expires_at=past)
+        old = int(time.time()) - self.DAY - 10
+        insert_quote("old_1", created_at=old)
         service = self._make_service()
-        service.cleanup_expired_quotes()
-        insert_quote("expired_2", expires_at=past)
-        deleted = service.cleanup_expired_quotes()
-        assert deleted == 0
-        row = test_db.execute("SELECT COUNT(*) as cnt FROM quotes").fetchone()
-        assert row["cnt"] == 1
+        service.cleanup_old_quotes()
+        insert_quote("old_2", created_at=old)
+        assert service.cleanup_old_quotes() == 0
+        assert test_db.execute("SELECT COUNT(*) AS cnt FROM quotes").fetchone()["cnt"] == 1
 
 
 class TestGetQuote:

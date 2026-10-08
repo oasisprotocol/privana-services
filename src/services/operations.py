@@ -5,6 +5,7 @@ from typing import Optional
 
 from src.core.db import get_db
 from src.models.operations import UnsettledOperation
+from src.services.swap.failure import swap_failure
 
 # "canceled" is part of the read contract even though current writers only
 # produce pending, completed, failed, and undeployed rows. "undeployed" is
@@ -35,7 +36,9 @@ _SWAP_SELECT = """
         NULL AS token_id,
         NULL AS amount,
         input_nonce AS nonce,
-        NULL AS stages
+        NULL AS stages,
+        venue,
+        step
     FROM swaps
     WHERE user_address = ?"""
 
@@ -58,9 +61,22 @@ _EARN_SELECT = """
         token_id,
         amount,
         CAST(input_nonce AS TEXT) AS nonce,
-        history AS stages
+        history AS stages,
+        NULL AS venue,
+        NULL AS step
     FROM earn_transactions
     WHERE user_address = ?"""
+
+
+def _operation(row) -> UnsettledOperation:
+    fields = dict(row)
+    if fields["operation_type"] == "swap":
+        fields["reason"], fields["error"] = swap_failure(
+            fields["operation_id"], fields["status"], fields.pop("venue"), fields.pop("step"),
+        )
+    fields.pop("venue", None)
+    fields.pop("step", None)
+    return UnsettledOperation(**fields)
 
 
 def _union(extra_where: str, order_by: str) -> str:
@@ -87,7 +103,7 @@ def list_unsettled_operations(user_address: str, limit: int) -> list[UnsettledOp
         )
         .fetchall()
     )
-    return [UnsettledOperation(**dict(row)) for row in rows]
+    return [_operation(row) for row in rows]
 
 
 # Cursor over (created_at, operation_id), newest first. Both are immutable once
@@ -128,7 +144,7 @@ def list_operations(
         )
         .fetchall()
     )
-    operations = [UnsettledOperation(**dict(row)) for row in rows]
+    operations = [_operation(row) for row in rows]
     next_cursor = (
         encode_cursor(operations[-1].created_at, operations[-1].operation_id)
         if len(operations) == limit

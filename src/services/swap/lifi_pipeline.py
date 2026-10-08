@@ -20,6 +20,7 @@ from src.core.fees import calculate_fee
 from src.core.validation import sanitize_error
 from src.models.swap import LifiSwapStep, SwapRecord, SwapStatus, SwapVenue
 from src.services.swap.bridge import AccountingBridge
+from src.services.swap.failure import log_swap_failure
 from src.services.swap.worker import lp_transfer_lock
 
 logger = logging.getLogger(__name__)
@@ -86,6 +87,7 @@ class LifiSwapPipeline:
             self._update_swap(
                 swap_id, status=SwapStatus.FAILED.value, error=sanitize_error(str(exc))
             )
+            log_swap_failure(swap_id, "input transfer rejected", exc)
             return self._get_swap(swap_id)
 
         self._update_swap(
@@ -137,7 +139,7 @@ class LifiSwapPipeline:
                 to_amount_actual=str(credited),
             )
         except Exception as exc:
-            logger.exception("lifi swap %s failed", swap_id)
+            log_swap_failure(swap_id, "lifi swap failed", exc)
             row = self._row(swap_id)
             reason = sanitize_error(str(exc))
             if row["step"] in (LifiSwapStep.DEPOSIT.value, LifiSwapStep.CREDIT.value) or (
@@ -156,7 +158,7 @@ class LifiSwapPipeline:
 
     def _park(self, swap_id: str, reason: str) -> None:
         """Mark the swap for manual recovery. Moves nothing."""
-        logger.error("lifi swap %s parked for manual recovery: %s", swap_id, reason)
+        log_swap_failure(swap_id, f"parked for manual recovery: {reason}")
         self._update_swap(
             swap_id,
             status=SwapStatus.FAILED.value,
@@ -193,12 +195,12 @@ class LifiSwapPipeline:
             self._update_swap(swap_id, status=SwapStatus.REFUNDED.value)
             logger.info("lifi swap %s refunded", swap_id)
         except Exception as exc:
-            logger.exception("lifi swap %s refund failed", swap_id)
             self._update_swap(
                 swap_id,
                 status=SwapStatus.FAILED.value,
                 error=f"{reason}; refund failed, manual recovery required: {sanitize_error(str(exc))}",
             )
+            log_swap_failure(swap_id, "refund failed", exc)
 
     async def _submit_input(
         self, quote: dict, input_nonce: int, input_signature: str

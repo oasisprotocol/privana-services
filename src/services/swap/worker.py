@@ -5,6 +5,7 @@ from typing import Optional
 
 from src.core.config import load_settings
 from src.core.db import get_db
+from src.services.swap.failure import log_swap_failure
 
 logger = logging.getLogger(__name__)
 POLL_INTERVAL = 1.0
@@ -91,6 +92,7 @@ class SwapWorker:
                 )
             except Exception as exc:
                 self._internal_pipeline._update(swap["id"], status="failed", error=str(exc))
+                log_swap_failure(swap["id"], "lifi dispatch failed", exc)
 
     async def _pause(self) -> None:
         try:

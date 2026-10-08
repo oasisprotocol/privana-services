@@ -10,6 +10,7 @@ from src.models.api import (
     SwapStatusResponse,
 )
 from src.services.swap.executor import get_swap_executor
+from src.services.swap.failure import swap_failure
 from src.services.swap.quote_service import get_quote_service
 from src.services.user_queue import OperationPendingError
 
@@ -71,6 +72,7 @@ async def get_swap_status(swap_id: str) -> SwapStatusResponse:
     try:
         executor = get_swap_executor()
         swap = executor._get_swap(swap_id)
+        reason, message = swap_failure(swap.id, swap.status, swap.venue, swap.step)
         return SwapStatusResponse(
             swap_id=swap.id,
             status=swap.status,
@@ -80,7 +82,8 @@ async def get_swap_status(swap_id: str) -> SwapStatusResponse:
             to_amount_estimate=swap.to_amount_estimate,
             to_amount_actual=swap.to_amount_actual,
             swap_tx_hash=swap.swap_tx_hash,
-            error=swap.error,
+            error=message,
+            reason=reason,
             created_at=swap.created_at,
             updated_at=swap.updated_at,
         )

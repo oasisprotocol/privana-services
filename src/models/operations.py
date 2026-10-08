@@ -22,6 +22,9 @@ class UnsettledOperation(BaseModel):
     updated_at: int
     tx_hash: Optional[str] = None
     error: Optional[str] = None
+    # For swaps: price_moved, no_funds_moved, delayed or under_review, with
+    # `error` the matching sentence for users rather than the internal error.
+    reason: Optional[str] = None
 
     quote_id: Optional[str] = None
     from_token_id: Optional[str] = None

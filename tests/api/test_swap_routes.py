@@ -246,6 +246,31 @@ class TestSwapStatusRoute:
             assert data["swap_id"] == "swap-456"
             assert data["status"] == "completed"
 
+    async def test_a_refunded_swap_explains_itself_without_internal_detail(self, api_client):
+        swap = SwapRecord(
+            id="swap-789",
+            quote_id="quote-789",
+            user_address=USER_ADDRESS,
+            from_token_id=USDC_TOKEN_ID,
+            to_token_id=WETH_TOKEN_ID,
+            from_amount="1000000",
+            to_amount_estimate="495000000000000",
+            status="refunded",
+            error="execution quote below floor: net_min=7690063 floor=7799419",
+            created_at=1000,
+            updated_at=1000,
+        )
+        with patch("src.api.swap.get_swap_executor") as mock_exec:
+            executor = MagicMock()
+            executor._get_swap.return_value = swap
+            mock_exec.return_value = executor
+
+            r = await api_client.get("/v1/swap/swap-789/status")
+
+        assert r.json()["reason"] == "refunded"
+        assert r.json()["error"] == "This swap did not go through, and your funds were returned."
+        assert "floor" not in r.json()["error"]
+
     async def test_returns_404_for_missing_swap(self, api_client):
         with patch("src.api.swap.get_swap_executor") as mock_exec:
             executor = MagicMock()

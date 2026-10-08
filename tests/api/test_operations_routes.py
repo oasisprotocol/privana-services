@@ -143,6 +143,31 @@ class TestUnsettledOperationsRoute:
         assert swap["to_amount_estimate"] == "990"
         assert swap["pool_id"] is None
 
+    async def test_a_failed_swap_shows_how_to_get_funds_back_not_the_internal_error(
+        self, api_client, test_db
+    ):
+        _insert_swap(test_db, "swap-failed", status="failed", updated_at=300)
+        test_db.execute(
+            "UPDATE swaps SET venue = 'lifi', step = 'lifi_execute', error = ? "
+            "WHERE id = 'swap-failed'",
+            ("transaction 0x04244d2a may have been sent, outcome unknown; manual recovery required",),
+        )
+        _insert_earn(test_db, "earn-failed", status="failed", updated_at=200)
+
+        with patch("src.api._auth.get_accounting_client", return_value=_auth_client()):
+            r = await api_client.get(
+                "/v1/operations/unsettled",
+                headers={"Authorization": "Bearer user-jwt"},
+            )
+
+        ops = {op["operation_id"]: op for op in r.json()["operations"]}
+        assert ops["swap-failed"]["reason"] == "needs_support"
+        assert "swap ID swap-failed" in ops["swap-failed"]["error"]
+        assert "0x04244d2a" not in ops["swap-failed"]["error"]
+        # Earn errors are written for users already and pass through unchanged.
+        assert ops["earn-failed"]["reason"] is None
+        assert ops["earn-failed"]["error"] == "earn failed"
+
     async def test_lists_a_withdraw_waiting_for_liquidity(self, api_client, test_db):
         _insert_earn(test_db, "earn-waiting", operation="withdraw", status="awaiting_liquidity")
 

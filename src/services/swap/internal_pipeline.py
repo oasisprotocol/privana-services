@@ -7,22 +7,43 @@ from typing import Optional
 from web3 import Web3
 
 from src.clients.accounting import get_accounting_client
+from src.clients.lifi import LIFI_DEFAULT_SLIPPAGE_BPS
 from src.clients.sapphire import get_sapphire_client
 from src.core.abi import load_abi
 from src.core.config import load_settings
 from src.core.db import db_write, get_db
 from src.core.eip712 import sign_transfer
+from src.core.fee_policy import resolve_internal_fee
+from src.core.fees import calculate_fee
 from src.core.validation import sanitize_error
 from src.services.swap.executor import get_swap_executor
+from src.services.swap.quote_service import get_quote_service
 from src.services.swap.worker import lp_transfer_lock
 from src.services.user_queue import users_with_inflight_work
 
 logger = logging.getLogger(__name__)
 # The Sapphire client node will relay transactions with up to 10 future nonces.
 BATCH_SIZE = 10
-# Number of seconds after quote expiry to consider an in-flight swap stale.
-STALE_SWAP_TIMEOUT = 13
+# Seconds after submission, beyond the receipt wait, before a swap whose
+# transaction cannot be found is considered never mined.
+STALE_SWAP_TIMEOUT = 60
 SWAP_MANAGER_ABI = load_abi("SwapManager")
+# Each swap is re-priced when it runs, so a quote can be used long after it was
+# made. The batch holds the LP transfer lock meanwhile, so a slow price must
+# not hold it for long.
+REPRICE_TIMEOUT_SEC = 5
+# A swap that cannot be priced goes back to the queue, and fails once it has
+# waited this long since it was scheduled.
+PRICING_GIVE_UP_SEC = 600
+
+
+class PricingUnavailable(RuntimeError):
+    """No current price for the swap; nothing about the swap itself is wrong."""
+
+
+def _payout(swap: dict) -> int:
+    """What the LP pays: the amount priced at execution, once there is one."""
+    return int(swap.get("to_amount_executed") or swap["to_amount_estimate"])
 
 
 class InternalSwapPipeline:
@@ -63,28 +84,66 @@ class InternalSwapPipeline:
             chain_id=self.settings.accounting_chain_id,
             verifying_contract=self.settings.accounting_contract_address,
             to_address=swap["user_address"], token_id=swap["to_token_id"],
-            amount=int(swap["to_amount_estimate"]), nonce=lp_nonce,
+            amount=_payout(swap), nonce=lp_nonce,
         )
         return [
             Web3.to_checksum_address(swap["user_address"]),
             bytes.fromhex(swap["from_token_id"][2:]), int(swap["from_amount"]),
             int(swap["input_nonce"]), bytes.fromhex(swap["input_signature"].removeprefix("0x")),
-            bytes.fromhex(swap["to_token_id"][2:]), int(swap["to_amount_estimate"]),
+            bytes.fromhex(swap["to_token_id"][2:]), _payout(swap),
             lp_nonce, bytes.fromhex(signature.removeprefix("0x")),
         ]
+
+    async def _fresh_payout(self, swap: dict) -> int:
+        """The output at the current price, net of the fee due now. Below the
+        quote's floor the price moved beyond its slippage and the swap fails."""
+        quote = get_db().execute(
+            "SELECT to_amount_min, slippage_bps FROM quotes WHERE id = ?", (swap["quote_id"],)
+        ).fetchone()
+        if quote is None:
+            raise ValueError("Scheduled swap quote not found")
+        quotes = get_quote_service()
+        try:
+            from_info = await quotes.accounting.get_token_info(swap["from_token_id"])
+            to_info = await quotes.accounting.get_token_info(swap["to_token_id"])
+            routes = await asyncio.wait_for(
+                quotes._price_route(
+                    from_info, to_info, swap["from_amount"],
+                    quote["slippage_bps"] or LIFI_DEFAULT_SLIPPAGE_BPS,
+                ),
+                REPRICE_TIMEOUT_SEC,
+            )
+        except Exception as exc:
+            raise PricingUnavailable(type(exc).__name__) from exc
+        if not routes.get("routes"):
+            raise PricingUnavailable("no route")
+        route = routes["routes"][0]
+        # Checked again at the current price: a quote can be used long after it was made.
+        quotes._enforce_max_swap_size(route)
+        # Fees are those due now, so an exemption that has ended no longer applies.
+        decision = resolve_internal_fee(swap["user_address"], int(time.time()))
+        net, _ = calculate_fee(int(route["toAmount"]), decision.fee_bps)
+        floor = int(quote["to_amount_min"])
+        if net < floor:
+            raise ValueError(f"execution quote below floor: net={net} floor={floor}")
+        return net
 
     def _call(self, args: list) -> dict:
         return dict(contract_address=self.settings.swap_manager_contract_address,
                     abi=SWAP_MANAGER_ABI, function_name="swap", args=args)
 
+    def _defer_unpriced(self, swap: dict, exc: Exception) -> None:
+        if int(time.time()) - swap["created_at"] >= PRICING_GIVE_UP_SEC:
+            logger.warning("internal swap %s failed: no price for %ds", swap["id"], PRICING_GIVE_UP_SEC)
+            self._update(swap["id"], status="failed", error="pricing unavailable")
+            return
+        logger.info("internal swap %s waiting for a price: %s", swap["id"], exc)
+        self._update(swap["id"], status="scheduled")
+
     async def _is_stale(self, sapphire, swap: dict) -> bool:
-        """True when the quote has expired and there is no sensible way it was completed."""
-        quote = get_db().execute(
-            "SELECT expires_at FROM quotes WHERE id = ?", (swap["quote_id"],)
-        ).fetchone()
-        if quote and int(time.time()) < quote["expires_at"] + STALE_SWAP_TIMEOUT:
-            return False
-        return True
+        """True when the transaction has been out long enough that it would have been mined."""
+        submitted_at = swap.get("submitted_at") or swap["updated_at"]
+        return int(time.time()) >= submitted_at + STALE_SWAP_TIMEOUT
 
     async def _settle(self, sapphire, swap: dict) -> None:
         try:
@@ -102,7 +161,7 @@ class InternalSwapPipeline:
         if receipt["status"] == 1:
             logger.info("internal swap %s settled", swap["id"])
             self._update(swap["id"], status="completed", error=None,
-                         to_amount_actual=swap["to_amount_estimate"])
+                         to_amount_actual=str(_payout(swap)))
         else:
             logger.warning("internal swap %s tx hash %s failed", swap["id"], swap['swap_tx_hash'])
             self._update(swap["id"], status="failed",
@@ -160,23 +219,46 @@ class InternalSwapPipeline:
             )
             lp_nonce = await accounting.get_transfer_nonce(self.settings.liquidity_provider_address)
             swaps = self._claim("internal", BATCH_SIZE)
-            prepared = []
-            balances = {}
+            # The simulation runs at the quoted amount first: it is cheap, and
+            # only a swap that passes is worth an external price lookup.
+            candidates = []
             for swap in swaps:
                 try:
-                    token = swap["to_token_id"]
-                    if token not in balances:
-                        balance = await accounting.get_lp_balance(token)
-                        balances[token] = int(balance.balance)
-                    amount = int(swap["to_amount_estimate"])
-                    if balances[token] < amount:
-                        raise ValueError("Insufficient liquidity for this swap")
                     # Every preflight uses the CURRENT LP nonce; the real calls
                     # below are signed with consecutive future nonces. Simulating
                     # a future nonce against current state would always revert.
                     await asyncio.to_thread(
                         sapphire.simulate_contract_call, **self._call(self._args(swap, lp_nonce))
                     )
+                    candidates.append(swap)
+                except Exception as exc:
+                    logger.warning("internal swap %s preflight failed: %s", swap["id"], exc)
+                    self._update(swap["id"], status="failed", error=sanitize_error(str(exc)))
+            # A swap signed for an amount before keeps it: that signature may
+            # already have paid out.
+            prices = await asyncio.gather(*(
+                self._fresh_payout(swap) for swap in candidates if not swap.get("to_amount_executed")
+            ), return_exceptions=True)
+            priced = iter(prices)
+            prepared = []
+            balances = {}
+            for swap in candidates:
+                try:
+                    if not swap.get("to_amount_executed"):
+                        price = next(priced)
+                        if isinstance(price, PricingUnavailable):
+                            self._defer_unpriced(swap, price)
+                            continue
+                        if isinstance(price, BaseException):
+                            raise price
+                        swap["to_amount_executed"] = str(price)
+                    token = swap["to_token_id"]
+                    if token not in balances:
+                        balance = await accounting.get_lp_balance(token)
+                        balances[token] = int(balance.balance)
+                    amount = _payout(swap)
+                    if balances[token] < amount:
+                        raise ValueError("Insufficient liquidity for this swap")
                     balances[token] -= amount
                     prepared.append(swap)
                 except Exception as exc:
@@ -187,12 +269,15 @@ class InternalSwapPipeline:
                 try:
                     args = self._args(swap, lp_nonce + index)
                     self._update(swap["id"], output_nonce=lp_nonce + index,
-                                 output_signature="0x" + args[-1].hex())
+                                 output_signature="0x" + args[-1].hex(),
+                                 to_amount_executed=swap["to_amount_executed"])
                     tx_hash = await asyncio.to_thread(
                         sapphire.submit_contract_call, **self._call(args), gas_limit=1_000_000, nonce=tx_nonce + index
                     )
-                    self._update(swap["id"], swap_tx_hash=tx_hash)
+                    submitted_at = int(time.time())
+                    self._update(swap["id"], swap_tx_hash=tx_hash, submitted_at=submitted_at)
                     swap["swap_tx_hash"] = tx_hash
+                    swap["submitted_at"] = submitted_at
                     sent.append(swap)
                 except Exception as exc:
                     logger.exception("internal swap %s submission outcome unknown", swap["id"])

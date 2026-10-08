@@ -64,6 +64,8 @@ class SwapExecutor:
 
         quote = dict(row)
 
+        # The price is enforced at execution against the quote's slippage;
+        # the expiry only bounds how old that floor can be.
         if int(time.time()) >= quote["expires_at"]:
             raise ValueError("Quote has expired")
 

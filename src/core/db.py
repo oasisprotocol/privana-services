@@ -158,6 +158,12 @@ MIGRATIONS = [
     "ALTER TABLE swaps ADD COLUMN deposit_tx_replaced TEXT;",
     # The LiFi output, for a restart at deposit.
     "ALTER TABLE swaps ADD COLUMN to_amount_received TEXT;",
+    # When an internal swap's transaction went out. Its receipt timeout is
+    # measured from here; updated_at moves with every later write.
+    "ALTER TABLE swaps ADD COLUMN submitted_at INTEGER;",
+    # The output an internal swap was signed for. It is priced at execution
+    # and can differ from to_amount_estimate.
+    "ALTER TABLE swaps ADD COLUMN to_amount_executed TEXT;",
 ]
 
 

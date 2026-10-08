@@ -51,6 +51,14 @@ class TestQuoteDeduplication:
         assert result is not None
         assert result.quote_id == "q1"
 
+    async def test_a_valid_quote_past_the_reuse_window_is_priced_afresh(self, insert_quote):
+        # Still usable for 30 minutes, but its estimate is no longer current.
+        now = int(time.time())
+        insert_quote("q_old", created_at=now - 120, expires_at=now + 1680)
+        service = self._make_service()
+        result = await service._find_existing_quote("0xuser", TOKEN_A, TOKEN_B, "1000000", 300)
+        assert result is None
+
     async def test_returns_none_for_expired_quote(self, insert_quote):
         past = int(time.time()) - 10
         insert_quote("q2", expires_at=past)
@@ -279,7 +287,8 @@ class TestGetQuote:
         assert result.tool_used == "uniswap"
         assert result.liquidity_provider == "0x152E6a7125665764a4F1F1df80E8f5D49Bf0239c"
         assert result.transfer_nonce == 5
-        assert result.expires_at > int(time.time())
+        # Valid for half an hour: the slippage, checked at execution, guards the price.
+        assert int(time.time()) + 1790 <= result.expires_at <= int(time.time()) + 1800
 
     async def test_prices_and_stores_the_requested_slippage(self, test_db):
         service = self._make_service()
@@ -685,8 +694,8 @@ class TestQuoteExpiresIn:
             user_address="0x" + "a" * 40,
             slippage_bps=300,
         )
-        assert result.expires_at == 1_800_000_030
-        assert result.expires_in == 25
+        assert result.expires_at == 1_800_001_800
+        assert result.expires_in == 1795
 
     async def test_reused_quote_reports_the_time_it_has_left(self, insert_quote, monkeypatch):
         clock = [1_800_000_000.5]

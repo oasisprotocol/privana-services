@@ -28,6 +28,9 @@ def worker(settings, monkeypatch):
     worker.accounting.get_lp_balance = AsyncMock(return_value=MagicMock(balance=str(10**25)))
     monkeypatch.setattr(module, "get_sapphire_client", lambda: worker.sapphire)
     monkeypatch.setattr(module, "get_accounting_client", lambda: worker.accounting)
+    # Re-pricing has tests of its own; here every swap still prices at its quote.
+    worker.reprice = AsyncMock(side_effect=lambda swap: int(swap["to_amount_estimate"]))
+    monkeypatch.setattr(worker._internal_pipeline, "_fresh_payout", worker.reprice)
     return worker
 
 
@@ -334,3 +337,82 @@ async def test_stop_cancels_lifi_runners(worker):
     await worker.stop()
     assert cancelled.is_set()
     assert pipeline._tasks == {}
+
+
+def _signed_payouts(worker):
+    # SwapManager.swap(..., toTokenId, toAmount, lpNonce, lpSignature)
+    return [c.kwargs["args"][6] for c in worker.sapphire.submit_contract_call.call_args_list]
+
+
+async def test_an_internal_swap_pays_the_price_at_execution(worker, enqueue, test_db):
+    await enqueue()
+    worker.reprice.side_effect = lambda swap: 995_000
+
+    await worker.run_internal_once()
+
+    row = rows(test_db)[0]
+    assert _signed_payouts(worker) == [995_000]
+    assert (row["status"], row["to_amount_executed"], row["to_amount_actual"]) == (
+        "completed", "995000", "995000",
+    )
+    # The quote the user saw stays on record.
+    assert row["to_amount_estimate"] == "990000"
+
+
+async def test_a_swap_priced_below_its_floor_fails_without_a_nonce_gap(worker, enqueue, test_db):
+    await enqueue(1)
+    await enqueue(2)
+
+    def price(swap):
+        if swap["quote_id"] == "q1":
+            raise ValueError("execution quote below floor: net=1 floor=980000")
+        return 990_000
+
+    worker.reprice.side_effect = price
+    await worker.run_internal_once()
+
+    first, second = rows(test_db)
+    assert first["status"] == "failed" and "below floor" in first["error"]
+    assert second["status"] == "completed"
+    assert worker.sapphire.submit_contract_call.call_args.kwargs["args"][7] == 7
+
+
+async def test_a_swap_without_a_price_waits_then_fails(worker, enqueue, test_db):
+    from src.services.swap.internal_pipeline import PricingUnavailable
+
+    await enqueue()
+    worker.reprice.side_effect = PricingUnavailable("OSError")
+
+    await worker.run_internal_once()
+    assert rows(test_db)[0]["status"] == "scheduled"
+
+    test_db.execute("UPDATE swaps SET created_at = created_at - 601")
+    await worker.run_internal_once()
+
+    row = rows(test_db)[0]
+    assert (row["status"], row["error"]) == ("failed", "pricing unavailable")
+    worker.sapphire.submit_contract_call.assert_not_called()
+
+
+async def test_a_resend_keeps_the_amount_it_was_signed_for(worker, enqueue, test_db):
+    await enqueue()
+    # The first send's outcome was unknown, so the swap went back to the queue
+    # with the amount its signature may already have paid.
+    test_db.execute("UPDATE swaps SET to_amount_executed = '993000'")
+    worker.reprice.side_effect = lambda swap: 999_000
+
+    await worker.run_internal_once()
+
+    worker.reprice.assert_not_awaited()
+    assert _signed_payouts(worker) == [993_000]
+
+
+async def test_a_swap_that_fails_simulation_is_never_priced(worker, enqueue, test_db):
+    await enqueue()
+    # A signature over funds the user does not hold must not cost a LiFi call.
+    worker.sapphire.simulate_contract_call.side_effect = RuntimeError("InsufficientBalance")
+
+    await worker.run_internal_once()
+
+    assert rows(test_db)[0]["status"] == "failed"
+    worker.reprice.assert_not_awaited()

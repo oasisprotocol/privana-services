@@ -75,30 +75,7 @@ class QuoteService:
         from_on_chain = from_info.token_address or "0x0000000000000000000000000000000000000000"
         to_on_chain = to_info.token_address or "0x0000000000000000000000000000000000000000"
 
-        lifi_from_chain = from_chain_id
-        lifi_to_chain = to_chain_id
-        lifi_from_token = from_on_chain
-        lifi_to_token = to_on_chain
-
-        chain_key = str(from_chain_id)
-        if chain_key in self._token_map:
-            mapping = self._token_map[chain_key]
-            lifi_from_chain = mapping.get("chain_id", from_chain_id)
-            lifi_from_token = mapping.get("tokens", {}).get(from_on_chain, from_on_chain)
-        chain_key = str(to_chain_id)
-        if chain_key in self._token_map:
-            mapping = self._token_map[chain_key]
-            lifi_to_chain = mapping.get("chain_id", to_chain_id)
-            lifi_to_token = mapping.get("tokens", {}).get(to_on_chain, to_on_chain)
-
-        lifi_response = await self.lifi.get_routes(
-            from_chain_id=lifi_from_chain,
-            to_chain_id=lifi_to_chain,
-            from_token_address=lifi_from_token,
-            to_token_address=lifi_to_token,
-            from_amount=from_amount,
-            slippage_bps=slippage_bps,
-        )
+        lifi_response = await self._price_route(from_info, to_info, from_amount, slippage_bps)
 
         routes = lifi_response.get("routes", [])
         if not routes:
@@ -140,7 +117,7 @@ class QuoteService:
         transfer_nonce = await self.accounting.get_transfer_nonce(user_address)
 
         quote_id = str(uuid.uuid4())
-        expires_at = now + self.settings.quote_ttl
+        expires_at = now + self.settings.swap_quote_ttl
         if decision.valid_until is not None:
             expires_at = min(expires_at, decision.valid_until)
 
@@ -179,6 +156,32 @@ class QuoteService:
             expires_at=expires_at,
             expires_in=_seconds_left(expires_at),
             venue=venue,
+        )
+
+    async def _price_route(self, from_info, to_info, from_amount: str, slippage_bps: int) -> dict:
+        """LiFi's routes for the swap, with testnet tokens mapped to the mainnet
+        tokens LiFi can price."""
+        from_on_chain = from_info.token_address or "0x0000000000000000000000000000000000000000"
+        to_on_chain = to_info.token_address or "0x0000000000000000000000000000000000000000"
+        lifi_from_chain, lifi_from_token = from_info.chain_id, from_on_chain
+        lifi_to_chain, lifi_to_token = to_info.chain_id, to_on_chain
+
+        mapping = self._token_map.get(str(from_info.chain_id))
+        if mapping:
+            lifi_from_chain = mapping.get("chain_id", from_info.chain_id)
+            lifi_from_token = mapping.get("tokens", {}).get(from_on_chain, from_on_chain)
+        mapping = self._token_map.get(str(to_info.chain_id))
+        if mapping:
+            lifi_to_chain = mapping.get("chain_id", to_info.chain_id)
+            lifi_to_token = mapping.get("tokens", {}).get(to_on_chain, to_on_chain)
+
+        return await self.lifi.get_routes(
+            from_chain_id=lifi_from_chain,
+            to_chain_id=lifi_to_chain,
+            from_token_address=lifi_from_token,
+            to_token_address=lifi_to_token,
+            from_amount=from_amount,
+            slippage_bps=slippage_bps,
         )
 
     def _enforce_max_swap_size(self, route: dict) -> None:
@@ -252,9 +255,12 @@ class QuoteService:
             """SELECT * FROM quotes
                WHERE user_address = ? AND from_token_id = ? AND to_token_id = ?
                AND from_amount = ? AND slippage_bps = ? AND expires_at > ?
+               AND created_at > ?
                ORDER BY created_at DESC LIMIT 1""",
+            # Reused only while its estimate is still current: the quote itself
+            # stays valid much longer.
             (user_address.lower(), from_token_id.lower(), to_token_id.lower(), from_amount,
-             slippage_bps, now),
+             slippage_bps, now, now - self.settings.quote_ttl),
         ).fetchone()
 
         if row is None:

@@ -72,9 +72,20 @@ async def test_same_nonce_can_be_recorded_again_after_a_failed_attempt(
     assert first.id != second.id
 
 
-async def test_expired_quote_is_rejected(executor, request_data):
+async def test_a_quote_half_an_hour_old_is_rejected(executor, request_data):
     with pytest.raises(ValueError, match="expired"):
         await executor.schedule_swap(*request_data(expires_at=int(time.time()) - 1))
+
+
+async def test_a_quote_past_its_reuse_window_still_schedules(executor, request_data):
+    # Slippage, checked when the swap runs, decides the price; the expiry only
+    # bounds how old the floor can be.
+    created = int(time.time()) - 29 * 60
+    record = await executor.schedule_swap(
+        *request_data(created_at=created, expires_at=created + 1800)
+    )
+
+    assert record.status == "scheduled"
 
 
 async def test_missing_quote_is_rejected(executor, request_data):

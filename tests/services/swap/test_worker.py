@@ -213,16 +213,16 @@ async def test_lifi_dispatch_uses_same_record_and_quote_id(worker, enqueue, test
     worker._pipeline.launch.assert_awaited_once()
 
 
-async def test_a_swap_queued_past_its_quote_retention_still_dispatches(worker, enqueue, test_db):
+async def test_a_swap_queued_past_its_quote_expiry_still_dispatches(worker, enqueue, test_db):
     from src.services.swap.quote_service import QuoteService
 
     record = await enqueue(venue="lifi")
-    # The user's earlier swap held the queue past the quote's retention, and a
-    # quote request from anyone swept old quotes in the meantime.
-    test_db.execute("UPDATE quotes SET created_at = 0 WHERE id = 'q1'")
+    # The user's earlier swap held the queue until the quote expired, and a
+    # quote request from anyone swept expired quotes in the meantime.
+    test_db.execute("UPDATE quotes SET expires_at = 0 WHERE id = 'q1'")
     cleaner = QuoteService.__new__(QuoteService)
     cleaner._last_cleanup = 0
-    cleaner.cleanup_old_quotes()
+    cleaner.cleanup_expired_quotes()
     worker._pipeline = MagicMock()
     worker._pipeline.launch = AsyncMock()
 

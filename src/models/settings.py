@@ -24,6 +24,7 @@ class Settings:
     sapphire_rpc_url: str
     sapphire_rpc_headers: Dict[str, str]
 
+    # How long an identical quote request reuses an earlier quote.
     quote_ttl: int
     fee_bps: int
     fee_policies_json: str
@@ -52,6 +53,9 @@ class Settings:
     coingecko_api_key: str = ""
 
     lifi_execution_enabled: bool = False
+    # How long a swap quote can be used. The price is checked against its
+    # slippage when the swap runs, so this can be long.
+    swap_quote_ttl: int = 1800
     # HyperEVM (chain 999), used to execute external swaps of its tokens.
     hyperevm_rpc_url: str = ""
     lifi_max_swap_amount_usd: int = 0

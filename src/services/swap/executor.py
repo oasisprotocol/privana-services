@@ -22,7 +22,7 @@ class SwapExecutor:
         if not 0 <= input_nonce < 2**256:
             raise ValueError("Invalid input nonce")
         validate_signature(input_signature, "input_signature")
-        # An HTTP retry returns the original operation.
+        # An HTTP retry returns the original operation, including after quote expiry.
         existing = get_db().execute(
             "SELECT * FROM swaps WHERE quote_id = ? AND input_nonce = ? "
             "AND input_signature = ?",
@@ -62,9 +62,14 @@ class SwapExecutor:
         if row is None:
             raise ValueError("Quote not found")
 
-        # No expiry: a quote binds the user to its slippage floor, which
-        # execution enforces against the price at the time it runs.
-        return dict(row)
+        quote = dict(row)
+
+        # The price is enforced at execution against the quote's slippage;
+        # the expiry only bounds how old that floor can be.
+        if int(time.time()) >= quote["expires_at"]:
+            raise ValueError("Quote has expired")
+
+        return quote
 
     def _recover_signer(self, quote: dict, input_nonce: int, input_signature: str) -> str:
         try:

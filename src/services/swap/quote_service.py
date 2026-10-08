@@ -20,9 +20,6 @@ logger = logging.getLogger(__name__)
 
 
 CLEANUP_INTERVAL = 60
-# Quotes no longer expire, but nothing reads one a day after it was issued
-# unless a swap still needs it.
-QUOTE_RETENTION_SEC = 86_400
 
 
 def _seconds_left(expires_at: int) -> int:
@@ -55,7 +52,7 @@ class QuoteService:
         user_address: str,
         slippage_bps: int,
     ) -> QuoteResponse:
-        self.cleanup_old_quotes()
+        self.cleanup_expired_quotes()
         validate_token_id(from_token_id, "from_token_id")
         validate_token_id(to_token_id, "to_token_id")
         validate_amount(from_amount, "from_amount")
@@ -120,7 +117,7 @@ class QuoteService:
         transfer_nonce = await self.accounting.get_transfer_nonce(user_address)
 
         quote_id = str(uuid.uuid4())
-        expires_at = now + self.settings.quote_ttl
+        expires_at = now + self.settings.swap_quote_ttl
         if decision.valid_until is not None:
             expires_at = min(expires_at, decision.valid_until)
 
@@ -258,9 +255,12 @@ class QuoteService:
             """SELECT * FROM quotes
                WHERE user_address = ? AND from_token_id = ? AND to_token_id = ?
                AND from_amount = ? AND slippage_bps = ? AND expires_at > ?
+               AND created_at > ?
                ORDER BY created_at DESC LIMIT 1""",
+            # Reused only while its estimate is still current: the quote itself
+            # stays valid much longer.
             (user_address.lower(), from_token_id.lower(), to_token_id.lower(), from_amount,
-             slippage_bps, now),
+             slippage_bps, now, now - self.settings.quote_ttl),
         ).fetchone()
 
         if row is None:
@@ -301,18 +301,18 @@ class QuoteService:
             venue=quote["venue"],
         )
 
-    def cleanup_old_quotes(self) -> int:
+    def cleanup_expired_quotes(self) -> int:
         now = int(time.time())
         if now - self._last_cleanup < CLEANUP_INTERVAL:
             return 0
         db = get_db()
-        # A queued swap reads its quote when it runs, so keep those until it settles.
+        # A swap accepted before its quote expired can still be waiting in the
+        # queue, and it reads the quote when it runs. Keep those until it settles.
         cursor = db_write(
             db,
-            "DELETE FROM quotes WHERE created_at <= ? AND id NOT IN "
+            "DELETE FROM quotes WHERE expires_at <= ? AND id NOT IN "
             "(SELECT quote_id FROM swaps WHERE status IN (?, ?, ?))",
-            (now - QUOTE_RETENTION_SEC, SwapStatus.SCHEDULED.value, SwapStatus.EXECUTING.value,
-             SwapStatus.REFUNDING.value),
+            (now, SwapStatus.SCHEDULED.value, SwapStatus.EXECUTING.value, SwapStatus.REFUNDING.value),
         )
         self._last_cleanup = now
         deleted = cursor.rowcount

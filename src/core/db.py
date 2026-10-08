@@ -161,11 +161,9 @@ MIGRATIONS = [
     # When an internal swap's transaction went out. Its receipt timeout is
     # measured from here; updated_at moves with every later write.
     "ALTER TABLE swaps ADD COLUMN submitted_at INTEGER;",
-    # The output an internal swap was signed for. Quotes no longer expire, so
-    # it is priced at execution and can differ from to_amount_estimate.
+    # The output an internal swap was signed for. It is priced at execution
+    # and can differ from to_amount_estimate.
     "ALTER TABLE swaps ADD COLUMN to_amount_executed TEXT;",
-    # Quotes are cleaned up by age now that they do not expire.
-    "CREATE INDEX IF NOT EXISTS idx_quotes_created ON quotes(created_at);",
 ]
 
 

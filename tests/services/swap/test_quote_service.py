@@ -51,6 +51,14 @@ class TestQuoteDeduplication:
         assert result is not None
         assert result.quote_id == "q1"
 
+    async def test_a_valid_quote_past_the_reuse_window_is_priced_afresh(self, insert_quote):
+        # Still usable for 30 minutes, but its estimate is no longer current.
+        now = int(time.time())
+        insert_quote("q_old", created_at=now - 120, expires_at=now + 1680)
+        service = self._make_service()
+        result = await service._find_existing_quote("0xuser", TOKEN_A, TOKEN_B, "1000000", 300)
+        assert result is None
+
     async def test_returns_none_for_expired_quote(self, insert_quote):
         past = int(time.time()) - 10
         insert_quote("q2", expires_at=past)
@@ -139,9 +147,7 @@ class TestQuoteDeduplication:
         assert result.fee_policy_id is None
 
 
-class TestOldQuoteCleanup:
-    DAY = 86_400
-
+class TestExpiredQuoteCleanup:
     def _make_service(self):
         from src.services.swap.quote_service import QuoteService
         service = QuoteService.__new__(QuoteService)
@@ -149,29 +155,35 @@ class TestOldQuoteCleanup:
         service._last_cleanup = 0
         return service
 
-    def test_deletes_quotes_older_than_a_day(self, test_db, insert_quote):
-        old = int(time.time()) - self.DAY - 10
-        insert_quote("old_1", created_at=old)
-        insert_quote("old_2", created_at=old)
-        deleted = self._make_service().cleanup_old_quotes()
+    def test_deletes_expired_quotes(self, test_db, insert_quote):
+        past = int(time.time()) - 10
+        insert_quote("expired_1", expires_at=past)
+        insert_quote("expired_2", expires_at=past)
+        service = self._make_service()
+        deleted = service.cleanup_expired_quotes()
         assert deleted == 2
-        assert test_db.execute("SELECT COUNT(*) AS cnt FROM quotes").fetchone()["cnt"] == 0
+        row = test_db.execute("SELECT COUNT(*) as cnt FROM quotes").fetchone()
+        assert row["cnt"] == 0
 
-    def test_keeps_a_quote_past_its_reuse_window(self, test_db, insert_quote):
-        # Quotes no longer expire: a quote minutes old is still good to swap.
-        insert_quote("recent", expires_at=int(time.time()) - 600, created_at=int(time.time()) - 630)
-        insert_quote("old", created_at=int(time.time()) - self.DAY - 10)
-        assert self._make_service().cleanup_old_quotes() == 1
-        assert test_db.execute("SELECT id FROM quotes").fetchone()["id"] == "recent"
+    def test_preserves_valid_quotes(self, test_db, insert_quote):
+        future = int(time.time()) + 300
+        past = int(time.time()) - 10
+        insert_quote("valid_1", expires_at=future)
+        insert_quote("expired_1", expires_at=past)
+        service = self._make_service()
+        deleted = service.cleanup_expired_quotes()
+        assert deleted == 1
+        row = test_db.execute("SELECT id FROM quotes").fetchone()
+        assert row["id"] == "valid_1"
 
     @pytest.mark.parametrize("status,kept", [
         ("scheduled", True), ("executing", True), ("refunding", True),
         ("completed", False), ("failed", False), ("refunded", False),
     ])
-    def test_keeps_old_quotes_an_unsettled_swap_still_needs(self, test_db, insert_quote, status, kept):
+    def test_keeps_expired_quotes_an_unsettled_swap_still_needs(self, test_db, insert_quote, status, kept):
         from src.core.db import db_write
 
-        insert_quote("q1", created_at=int(time.time()) - self.DAY - 10)
+        insert_quote("q1", expires_at=int(time.time()) - 10)
         db_write(
             test_db,
             """INSERT INTO swaps (id, quote_id, user_address, from_token_id, to_token_id,
@@ -180,20 +192,22 @@ class TestOldQuoteCleanup:
             (status,),
         )
 
-        deleted = self._make_service().cleanup_old_quotes()
+        deleted = self._make_service().cleanup_expired_quotes()
 
         assert deleted == (0 if kept else 1)
         remaining = test_db.execute("SELECT COUNT(*) AS cnt FROM quotes").fetchone()["cnt"]
         assert remaining == (1 if kept else 0)
 
     def test_throttles_cleanup(self, test_db, insert_quote):
-        old = int(time.time()) - self.DAY - 10
-        insert_quote("old_1", created_at=old)
+        past = int(time.time()) - 10
+        insert_quote("expired_1", expires_at=past)
         service = self._make_service()
-        service.cleanup_old_quotes()
-        insert_quote("old_2", created_at=old)
-        assert service.cleanup_old_quotes() == 0
-        assert test_db.execute("SELECT COUNT(*) AS cnt FROM quotes").fetchone()["cnt"] == 1
+        service.cleanup_expired_quotes()
+        insert_quote("expired_2", expires_at=past)
+        deleted = service.cleanup_expired_quotes()
+        assert deleted == 0
+        row = test_db.execute("SELECT COUNT(*) as cnt FROM quotes").fetchone()
+        assert row["cnt"] == 1
 
 
 class TestGetQuote:
@@ -273,7 +287,8 @@ class TestGetQuote:
         assert result.tool_used == "uniswap"
         assert result.liquidity_provider == "0x152E6a7125665764a4F1F1df80E8f5D49Bf0239c"
         assert result.transfer_nonce == 5
-        assert result.expires_at > int(time.time())
+        # Valid for half an hour: the slippage, checked at execution, guards the price.
+        assert int(time.time()) + 1790 <= result.expires_at <= int(time.time()) + 1800
 
     async def test_prices_and_stores_the_requested_slippage(self, test_db):
         service = self._make_service()
@@ -679,8 +694,8 @@ class TestQuoteExpiresIn:
             user_address="0x" + "a" * 40,
             slippage_bps=300,
         )
-        assert result.expires_at == 1_800_000_030
-        assert result.expires_in == 25
+        assert result.expires_at == 1_800_001_800
+        assert result.expires_in == 1795
 
     async def test_reused_quote_reports_the_time_it_has_left(self, insert_quote, monkeypatch):
         clock = [1_800_000_000.5]

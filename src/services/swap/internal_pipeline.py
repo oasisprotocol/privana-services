@@ -7,6 +7,7 @@ from typing import Optional
 from web3 import Web3
 
 from src.clients.accounting import get_accounting_client
+from src.clients.lifi import LIFI_DEFAULT_SLIPPAGE_BPS
 from src.clients.sapphire import get_sapphire_client
 from src.core.abi import load_abi
 from src.core.config import load_settings
@@ -27,13 +28,13 @@ BATCH_SIZE = 10
 # transaction cannot be found is considered never mined.
 STALE_SWAP_TIMEOUT = 60
 SWAP_MANAGER_ABI = load_abi("SwapManager")
-# Quotes do not expire: each swap is re-priced when it runs. The batch holds
-# the LP transfer lock meanwhile, so a slow price must not hold it for long.
+# Each swap is re-priced when it runs, so a quote can be used long after it was
+# made. The batch holds the LP transfer lock meanwhile, so a slow price must
+# not hold it for long.
 REPRICE_TIMEOUT_SEC = 5
 # A swap that cannot be priced goes back to the queue, and fails once it has
 # waited this long since it was scheduled.
 PRICING_GIVE_UP_SEC = 600
-DEFAULT_SLIPPAGE_BPS = 50
 
 
 class PricingUnavailable(RuntimeError):
@@ -108,7 +109,7 @@ class InternalSwapPipeline:
             routes = await asyncio.wait_for(
                 quotes._price_route(
                     from_info, to_info, swap["from_amount"],
-                    quote["slippage_bps"] or DEFAULT_SLIPPAGE_BPS,
+                    quote["slippage_bps"] or LIFI_DEFAULT_SLIPPAGE_BPS,
                 ),
                 REPRICE_TIMEOUT_SEC,
             )

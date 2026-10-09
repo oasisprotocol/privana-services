@@ -79,6 +79,8 @@ deployments:
         value: pGJwa1ggkruEfNd8xzOx3zrp/7okdTpdecQrI13QrX2sCuTsZwFkbmFtZVggR+zlXpS0yD+c9PgLr/pRts61Nqs3sE0GkaQp5FIbuOBlbm9uY2VP6rGEqJB/uF6+SL75+mV3ZXZhbHVlWFeSB68ddSG4mlpW92Qwt+HXYDZeMXWZtrxqBxlZj/VpWmMW4BTFLidOeMglaC0yMG1qzzVojgLUS6wgAZAWEF9DtoyJrlAxBW7PjSR0hUt+/lQb+/cfKq8=
       - name: COINGECKO_API_KEY
         value: pGJwa1ggKtqqfOwHmAJLmdCSv5epGkqCWodec6kf7x1SL806dj1kbmFtZVgh0Wo+rJZMgkhg+erJVbtdGPQ7VKdMhnv8sz54wsJzoofeZW5vbmNlTx93VGQqOWqp8cfnSa1xR2V2YWx1ZVgr1A9Mwpl1MHS4rKec1/QbsxrJyv9ELClsbt+MDimhsu/mqoGG6U/pHSxe3g==
+      - name: ETHEREUM_RPC_URL
+        value: pGJwa1ggJlsyoasBc5OjfOwKGmCqeV0tBvis95ggcje4BPzwNDNkbmFtZVggsj210V7JS7EryqL5yuN0dZfeh39sH3HoqJsXNsVOL4Nlbm9uY2VP8v5qdT1l+QgElk0mmQvaZXZhbHVlWE+SvZBuiTL7WJQtDRR2oUkmV877K2e02CVw76aCI+9v2MzL7UiGsjds/TLh5veynuPmCVlpIf3gMbenV9sV70V9mmFGOsfnvw1Z4xvT56BS
     machines:
       default:
         provider: oasis1qzc8pldvm8vm3duvdrj63wgvkw34y9ucfcxzetqr
@@ -125,6 +127,8 @@ deployments:
         value: pGJwa1ggLlx2gzAzMKhEG8YMp8ssWEpQOsRkB+Yr5bmBcV2KVhpkbmFtZVggZbl5q0suPAoXxZF5NDwsdiO6QuUWr9tgBws+VjcNKwJlbm9uY2VPNQB6a2+AF3gBQd8hRzYkZXZhbHVlWFKF2ubvYEqehIytcK341p7HBlEVwOWP2uBenEKoWzU6xngTMpGFltlHt9MGZKdf82lv/EYbJfILffQXelfg7+4BTmM6lqF0x74uBkTXhHrf9yaH
       - name: COINGECKO_API_KEY
         value: pGJwa1ggentKIXGBryAbqxYycDVyXuNkm1QtSmnETrWAPDiPk21kbmFtZVghiXhkbRZjzBX8oHN5lvOYq+VPS744+TsONC8H9PKmM+eXZW5vbmNlT9ocKbm7ppH+2wdZ7pCxf2V2YWx1ZVgruYSZMxtLo3/Nmn5bndCxLb/2DMtJyOPt0rLh2D3+36gCE1BqFQLy/SLCKA==
+      - name: ETHEREUM_RPC_URL
+        value: pGJwa1gg6/48oTke+yzregRS0BiOlbrWKfXyIBBeIvEG1Qk2nThkbmFtZVggO5RrvjFlvEujP8FlO3qRqFM47lyFNwu0UCKiWdaMQAxlbm9uY2VPldFp4P0J5CYDW4JwlQXgZXZhbHVlWEp20UB3L1cvldnVhYH6IZgZMapI/uhL2KB2YcEm8LQCfgcstDzZQEBG59h6p8ZO7W0d+hrdCKdZZsHRs+nFGicgLTqBkFFFEdki4Q==
     machines:
       default:
         provider: oasis1qp2ens0hsp7gh23wajxa4hpetkdek3swyyulyrmz

@@ -163,6 +163,19 @@ class EvmClient:
         base_fee = self.w3.eth.get_block("latest")["baseFeePerGas"]
         return {"maxFeePerGas": 2 * base_fee + tip, "maxPriorityFeePerGas": tip}
 
+    def fees(self) -> dict:
+        """The fee fields a send priced now carries."""
+        return self._fees()
+
+    def sign(self, tx: dict) -> tuple[str, str]:
+        """`tx` signed by the account, as its hash and hex-encoded bytes."""
+        signed = self._account.sign_transaction(tx)
+        return Web3.to_hex(Web3.keccak(signed.raw_transaction)), Web3.to_hex(signed.raw_transaction)
+
+    def broadcast(self, raw: str) -> None:
+        """Hand a signed tx to the node, without waiting for it to be mined."""
+        self.w3.eth.send_raw_transaction(HexStr(raw))
+
     def max_gas_cost(self, gas: int) -> int:
         """`gas` at the fee cap a send sets now."""
         return gas * self._fees()["maxFeePerGas"]

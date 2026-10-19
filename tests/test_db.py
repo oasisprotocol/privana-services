@@ -23,6 +23,21 @@ class TestMigrations:
         ).fetchall()
         assert len(rows) == 1
 
+    def test_an_account_can_sign_each_nonce_only_once(self, test_db):
+        insert = (
+            "INSERT INTO evm_transactions (chain_id, address, nonce, owner, tx_hash, raw, "
+            "created_at, updated_at) VALUES (8453, '0xlp', 5, 'swap:a', ?, '0x01', 0, 0)"
+        )
+        test_db.execute(insert, ("0xaa",))
+        try:
+            test_db.execute(insert, ("0xbb",))
+        except sqlite3.IntegrityError:
+            pass
+        else:
+            raise AssertionError("a second tx at the same nonce was saved")
+        # The same nonce on another chain is another account's.
+        test_db.execute(insert.replace("8453", "1"), ("0xcc",))
+
     def test_creates_swaps_user_index(self, test_db):
         rows = test_db.execute(
             "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_swaps_user'"

@@ -164,6 +164,26 @@ MIGRATIONS = [
     # The output an internal swap was signed for. It is priced at execution
     # and can differ from to_amount_estimate.
     "ALTER TABLE swaps ADD COLUMN to_amount_executed TEXT;",
+    # Every tx the EVM batcher signs for an account, saved before broadcast so
+    # the account's nonce survives a restart. `replaced` holds the hashes of a
+    # nonce's earlier versions, space-separated: whichever version is mined
+    # settles it, and `tx_hash` then names that one.
+    """
+    CREATE TABLE IF NOT EXISTS evm_transactions (
+        chain_id INTEGER NOT NULL,
+        address TEXT NOT NULL,
+        nonce INTEGER NOT NULL,
+        owner TEXT NOT NULL,
+        tx_hash TEXT NOT NULL,
+        raw TEXT NOT NULL,
+        replaced TEXT,
+        status TEXT NOT NULL DEFAULT 'sent',
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (chain_id, address, nonce)
+    );
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_evm_tx_status ON evm_transactions(chain_id, address, status);",
 ]
 
 

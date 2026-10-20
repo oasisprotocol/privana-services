@@ -419,3 +419,88 @@ async def test_one_failing_tx_leaves_the_rest_of_the_round(batcher, chain, test_
     await batcher.maintain()
 
     assert [nonce_of(raw) for raw in chain.sent] == [1, 2]
+
+
+async def test_a_caller_cancelled_while_its_tx_is_signed_sends_nothing(batcher, chain, test_db, monkeypatch):
+    real_sign = batcher.evm.sign
+    signing = []
+
+    def slow_sign(tx):
+        signing.append(1)
+        import time as clock
+        clock.sleep(0.1)
+        return real_sign(tx)
+
+    monkeypatch.setattr(batcher.evm, "sign", slow_sign)
+    waiting = asyncio.create_task(batcher.submit(intent(owner="swap:a:lifi")))
+    while not signing:
+        await asyncio.sleep(0.01)
+    waiting.cancel()
+
+    sent = await asyncio.wait_for(batcher.submit(intent(owner="swap:b:lifi")), timeout=5)
+
+    assert sent.nonce == 0
+    assert chain.sent == [row_at(test_db, 0)["raw"]]
+    assert row_at(test_db, 0)["owner"] == "swap:b:lifi"
+
+
+async def test_a_chain_unreachable_at_startup_is_recovered_once_it_answers(test_db, monkeypatch, settings):
+    import src.clients.evm_batcher as module
+
+    test_db.execute(
+        "INSERT INTO evm_transactions (chain_id, address, nonce, owner, tx_hash, raw, status, created_at, updated_at) "
+        "VALUES (8453, ?, 0, 'swap:a:lifi', '0xaa', '0x01', 'sent', 0, 0)",
+        (settings.liquidity_provider_address.lower(),),
+    )
+    started = asyncio.Event()
+    attempts = []
+
+    class Started:
+        def start(self):
+            started.set()
+
+    def flaky(chain_id):
+        attempts.append(chain_id)
+        if len(attempts) == 1:
+            raise ConnectionError("rpc down")
+        return Started()
+
+    monkeypatch.setattr(module, "get_evm_batcher", flaky)
+    monkeypatch.setattr(module, "MAINTAIN_INTERVAL_SEC", 0.01)
+
+    await module.recover_evm_batchers()
+    await asyncio.wait_for(started.wait(), timeout=5)
+
+    assert attempts == [8453, 8453]
+
+
+async def test_a_re_signed_version_of_a_settled_tx_never_goes_out(batcher, chain, test_db):
+    first = await batcher.submit(intent())
+    raw = row_at(test_db, 0)["raw"]
+    chain.mine()
+    await batcher.maintain()
+    chain.sent.clear()
+    chain.base_fee = 50_000
+
+    with pytest.raises(RuntimeError):
+        await asyncio.to_thread(batcher.evm.rebroadcast, raw, batcher._recorder(asyncio.get_running_loop()))
+
+    assert chain.sent == []
+    assert row_at(test_db, 0)["tx_hash"] == first.tx_hash
+
+
+async def test_startup_recovery_runs_in_the_background(monkeypatch):
+    import src.clients.evm_batcher as module
+
+    ran = asyncio.Event()
+
+    async def slow_recovery():
+        await asyncio.sleep(0.05)
+        ran.set()
+
+    monkeypatch.setattr(module, "recover_evm_batchers", slow_recovery)
+
+    module.start_evm_batcher_recovery()
+
+    assert not ran.is_set()
+    await asyncio.wait_for(ran.wait(), timeout=5)

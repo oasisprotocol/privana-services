@@ -196,7 +196,9 @@ class EvmBatcher:
                 # Its caller stopped waiting: sending it now would leave a tx nobody tracks.
                 continue
             try:
-                nonce, tx_hash, raw = await self._sign_and_save(intent, nonce, fees)
+                nonce, tx_hash, raw = await self._sign_and_save(intent, nonce, fees, future)
+            except _Abandoned:
+                continue
             except Exception as exc:
                 # Nothing saved, nothing sent: the nonce stays free for the next intent.
                 _settle(future, exc=exc)
@@ -214,9 +216,14 @@ class EvmBatcher:
             _settle(future, result=SentTx(nonce=nonce, tx_hash=tx_hash))
             nonce += 1
 
-    async def _sign_and_save(self, intent: TxIntent, nonce: int, fees: dict) -> tuple[int, str, str]:
+    async def _sign_and_save(
+        self, intent: TxIntent, nonce: int, fees: dict, future: asyncio.Future
+    ) -> tuple[int, str, str]:
         while True:
             tx_hash, raw = await asyncio.to_thread(self.evm.sign, self._tx(intent, nonce, fees))
+            if future.done():
+                # Cancelled while it was signed: unsaved, so the nonce stays free.
+                raise _Abandoned
             try:
                 self._save(intent.owner, nonce, tx_hash, raw)
                 return nonce, tx_hash, raw
@@ -263,6 +270,10 @@ class EvmBatcher:
         )
 
 
+class _Abandoned(Exception):
+    """Its caller stopped waiting before the intent was saved."""
+
+
 def _settle(future: asyncio.Future, result: object = None, exc: Optional[BaseException] = None) -> None:
     # A caller that stopped waiting has cancelled its future.
     if future.done():
@@ -290,9 +301,35 @@ async def recover_evm_batchers() -> None:
         try:
             batcher = await asyncio.to_thread(get_evm_batcher, chain_id)
         except Exception as exc:
-            logger.warning("evm batcher %s not recovered: %s", chain_id, type(exc).__name__)
+            # The chain's RPC may be down at boot: keep trying without holding up startup.
+            logger.warning("evm batcher %s not recovered yet: %s", chain_id, type(exc).__name__)
+            task = asyncio.create_task(_recover_later(chain_id))
+            _retries.add(task)
+            task.add_done_callback(_retries.discard)
             continue
         batcher.start()
+
+
+_retries: set[asyncio.Task] = set()
+
+
+def start_evm_batcher_recovery() -> None:
+    """Recover in the background: a slow RPC must not hold up startup."""
+    task = asyncio.create_task(recover_evm_batchers())
+    _retries.add(task)
+    task.add_done_callback(_retries.discard)
+
+
+async def _recover_later(chain_id: int) -> None:
+    while True:
+        await asyncio.sleep(MAINTAIN_INTERVAL_SEC)
+        try:
+            batcher = await asyncio.to_thread(get_evm_batcher, chain_id)
+        except Exception as exc:
+            logger.warning("evm batcher %s not recovered yet: %s", chain_id, type(exc).__name__)
+            continue
+        batcher.start()
+        return
 
 
 def get_evm_batcher(chain_id: int) -> EvmBatcher:

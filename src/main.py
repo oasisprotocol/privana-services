@@ -107,6 +107,13 @@ async def lifespan(_app: FastAPI):
     await swap_worker.start()
 
     try:
+        from src.clients.evm_batcher import recover_evm_batchers
+
+        await recover_evm_batchers()
+    except Exception:
+        logger.exception("EVM batcher recovery failed; unsettled LP txs wait for the next send")
+
+    try:
         await get_price_sampler().start()
     except Exception:
         logger.exception("Price sampler failed to start; no price history will be recorded")

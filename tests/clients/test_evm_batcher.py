@@ -175,14 +175,46 @@ async def test_intents_queued_together_share_one_fee_price(batcher, chain, monke
     assert len(priced) < 4
 
 
-async def test_a_cancelled_caller_does_not_stop_the_batcher(batcher, chain):
+async def test_a_cancelled_callers_intent_is_never_sent(batcher, chain, test_db):
+    # It would be a tx nobody tracks, and a caller retrying would pay twice.
     waiting = asyncio.create_task(batcher.submit(intent(owner="swap:a:lifi")))
     await asyncio.sleep(0)
     waiting.cancel()
 
     sent = await asyncio.wait_for(batcher.submit(intent(owner="swap:b:lifi")), timeout=5)
 
-    assert sent.nonce in (0, 1)
+    assert sent.nonce == 0
+    assert [r["owner"] for r in test_db.execute("SELECT owner FROM evm_transactions")] == ["swap:b:lifi"]
+
+
+async def test_an_intent_the_table_rejects_leaves_its_nonce_to_the_next(batcher, chain):
+    with pytest.raises(Exception):
+        await batcher.submit(TxIntent(owner=None, to=TARGET, gas=21_000))
+
+    assert (await batcher.submit(intent())).nonce == 0
+
+
+def test_threads_asking_at_once_share_one_batcher_per_chain(monkeypatch):
+    import threading
+    import time as clock
+
+    import src.clients.evm_batcher as module
+
+    monkeypatch.setattr(module, "_batchers", {})
+
+    def slow_client(chain_id):
+        clock.sleep(0.05)
+        return EvmClient("http://localhost:1", KEY)
+
+    monkeypatch.setattr(module, "get_evm_client", slow_client)
+    got = []
+    threads = [threading.Thread(target=lambda: got.append(module.get_evm_batcher(1))) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert len({id(b) for b in got}) == 1
 
 
 def test_each_chain_gets_its_own_batcher(monkeypatch):
@@ -265,3 +297,125 @@ async def test_a_round_with_nothing_open_asks_the_node_nothing(batcher, chain, m
     monkeypatch.setattr(chain, "get_transaction_count", lambda *a: (_ for _ in ()).throw(AssertionError))
 
     await batcher.maintain()
+
+
+def save_unsettled(test_db, batcher, nonce, status="sent"):
+    tx = batcher._tx(intent(owner=f"swap:old{nonce}:lifi"), nonce, batcher.evm.fees())
+    tx_hash, raw = batcher.evm.sign(tx)
+    test_db.execute(
+        "INSERT INTO evm_transactions (chain_id, address, nonce, owner, tx_hash, raw, status, created_at, updated_at) "
+        "VALUES (?, ?, ?, 'swap:old:lifi', ?, ?, ?, 0, 0)",
+        (CHAIN_ID, batcher.address, nonce, tx_hash, raw, status),
+    )
+    return raw
+
+
+async def test_after_a_restart_saved_txs_go_out_before_new_ones(batcher, chain, test_db):
+    # Signed and saved before the restart; the node has since dropped them.
+    old = [save_unsettled(test_db, batcher, n) for n in (0, 1)]
+
+    sent = await batcher.submit(intent(owner="swap:new:lifi"))
+
+    assert sent.nonce == 2
+    assert chain.sent == [*old, row_at(test_db, 2)["raw"]]
+
+
+async def test_a_failed_recovery_round_does_not_block_new_sends(batcher, chain, test_db, monkeypatch):
+    save_unsettled(test_db, batcher, 0)
+    real_count = chain.get_transaction_count
+    calls = []
+
+    def latest_down_once(address, block="latest"):
+        if block == "latest" and not calls:
+            calls.append(1)
+            raise ConnectionError("rpc down")
+        return real_count(address, block)
+
+    monkeypatch.setattr(chain, "get_transaction_count", latest_down_once)
+
+    sent = await asyncio.wait_for(batcher.submit(intent()), timeout=5)
+
+    assert sent.nonce == 1
+
+
+async def test_startup_recovers_only_chains_with_unsettled_lp_txs(batcher, test_db, monkeypatch, settings):
+    import src.clients.evm_batcher as module
+
+    lp = settings.liquidity_provider_address.lower()
+    rows = [(8453, lp, "sent"), (1, lp, "mined"), (999, "0xother", "sent")]
+    for nonce, (chain_id, address, status) in enumerate(rows):
+        test_db.execute(
+            "INSERT INTO evm_transactions (chain_id, address, nonce, owner, tx_hash, raw, status, created_at, updated_at) "
+            "VALUES (?, ?, ?, 'swap:a:lifi', '0xaa', '0x01', ?, 0, 0)",
+            (chain_id, address, nonce, status),
+        )
+    asked, started = [], []
+
+    class Started:
+        def start(self):
+            started.append(1)
+
+    monkeypatch.setattr(module, "get_evm_batcher", lambda chain_id: asked.append(chain_id) or Started())
+
+    await module.recover_evm_batchers()
+
+    assert asked == [8453] and started == [1]
+
+
+async def test_startup_with_nothing_unsettled_touches_no_rpc(monkeypatch):
+    import src.clients.evm_batcher as module
+
+    monkeypatch.setattr(module, "get_evm_batcher", lambda chain_id: (_ for _ in ()).throw(AssertionError))
+
+    await module.recover_evm_batchers()
+
+
+async def test_rounds_never_overlap(batcher, chain, test_db, monkeypatch):
+    # Two rounds at once would each write over the versions the other recorded.
+    await batcher.submit(intent())
+    real_count = chain.get_transaction_count
+    inside, most = [0], [0]
+
+    def slow_count(address, block="latest"):
+        inside[0] += 1
+        most[0] = max(most[0], inside[0])
+        import time as clock
+        clock.sleep(0.05)
+        inside[0] -= 1
+        return real_count(address, block)
+
+    monkeypatch.setattr(chain, "get_transaction_count", slow_count)
+
+    await asyncio.gather(batcher.maintain(), batcher.maintain(), batcher.maintain())
+
+    assert most[0] == 1
+
+
+async def test_a_settled_tx_is_never_re_signed(batcher, chain, test_db):
+    first = await batcher.submit(intent())
+    chain.mine()
+    await batcher.maintain()
+
+    with pytest.raises(RuntimeError):
+        batcher._record_version("0xnew", 0, "0x02")
+
+    row = row_at(test_db, 0)
+    assert (row["status"], row["tx_hash"], row["replaced"]) == ("mined", first.tx_hash, None)
+
+
+async def test_one_failing_tx_leaves_the_rest_of_the_round(batcher, chain, test_db, monkeypatch):
+    await asyncio.gather(*(batcher.submit(intent(owner=f"swap:{i}:lifi")) for i in range(3)))
+    chain.pool.clear()
+    chain.sent.clear()
+    real = batcher.evm.rebroadcast
+
+    def first_breaks(raw, on_signed):
+        if nonce_of(raw) == 0:
+            raise ConnectionError("rpc hiccup")
+        return real(raw, on_signed)
+
+    monkeypatch.setattr(batcher.evm, "rebroadcast", first_breaks)
+
+    await batcher.maintain()
+
+    assert [nonce_of(raw) for raw in chain.sent] == [1, 2]

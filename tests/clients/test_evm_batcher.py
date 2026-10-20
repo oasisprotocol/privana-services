@@ -24,6 +24,7 @@ class FakeChain:
         self.receipts: dict[str, dict] = {}
         self.chain_id = CHAIN_ID
         self.max_priority_fee = 100
+        self.base_fee = 1_000
         self.reject_next = 0
         self.on_send = None
 
@@ -33,7 +34,7 @@ class FakeChain:
         return self.mined_count
 
     def get_block(self, _):
-        return {"baseFeePerGas": 1_000}
+        return {"baseFeePerGas": self.base_fee}
 
     def get_balance(self, _):
         return 10**30
@@ -192,3 +193,75 @@ def test_each_chain_gets_its_own_batcher(monkeypatch):
 
     assert module.get_evm_batcher(1) is module.get_evm_batcher(1)
     assert module.get_evm_batcher(1) is not module.get_evm_batcher(8453)
+
+
+def row_at(test_db, nonce):
+    return test_db.execute("SELECT * FROM evm_transactions WHERE nonce = ?", (nonce,)).fetchone()
+
+
+async def test_mined_and_reverted_txs_settle_by_their_receipt(batcher, chain, test_db):
+    await asyncio.gather(*(batcher.submit(intent(owner=f"swap:{i}:lifi")) for i in range(3)))
+    chain.mine()
+    chain.mine(status=0)
+
+    await batcher.maintain()
+
+    assert [row_at(test_db, n)["status"] for n in range(3)] == ["mined", "reverted", "sent"]
+    assert batcher.saved(1)["status"] == "reverted"
+
+
+async def test_dropped_txs_go_out_again_lowest_nonce_first(batcher, chain):
+    await asyncio.gather(*(batcher.submit(intent(owner=f"swap:{i}:lifi")) for i in range(3)))
+    chain.pool.clear()
+    chain.sent.clear()
+
+    await batcher.maintain()
+
+    assert [nonce_of(raw) for raw in chain.sent] == [0, 1, 2]
+
+
+async def test_a_priced_out_tx_is_re_signed_and_the_new_version_settles_it(batcher, chain, test_db):
+    first = await batcher.submit(intent())
+    chain.base_fee = 50_000
+
+    await batcher.maintain()
+
+    row = row_at(test_db, 0)
+    assert row["tx_hash"] != first.tx_hash
+    assert row["replaced"] == first.tx_hash
+    assert nonce_of(row["raw"]) == 0
+    chain.mine()
+    await batcher.maintain()
+    row = row_at(test_db, 0)
+    assert (row["status"], row["replaced"]) == ("mined", first.tx_hash)
+
+
+async def test_the_original_version_can_still_be_the_one_mined(batcher, chain, test_db):
+    first = await batcher.submit(intent())
+    chain.base_fee = 50_000
+    await batcher.maintain()
+    replacement = row_at(test_db, 0)["tx_hash"]
+    # A node mined the first version before it saw the replacement.
+    chain.mined_count = 1
+    chain.receipts[first.tx_hash] = {"status": 1}
+
+    await batcher.maintain()
+
+    row = row_at(test_db, 0)
+    assert (row["status"], row["tx_hash"], row["replaced"]) == ("mined", first.tx_hash, replacement)
+
+
+async def test_a_used_nonce_without_a_receipt_yet_stays_open(batcher, chain, test_db):
+    await batcher.submit(intent())
+    # The node counts the nonce as used before its receipt is served.
+    chain.mined_count = 1
+
+    await batcher.maintain()
+
+    assert row_at(test_db, 0)["status"] == "sent"
+
+
+async def test_a_round_with_nothing_open_asks_the_node_nothing(batcher, chain, monkeypatch):
+    monkeypatch.setattr(chain, "get_transaction_count", lambda *a: (_ for _ in ()).throw(AssertionError))
+
+    await batcher.maintain()

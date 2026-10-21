@@ -164,26 +164,30 @@ MIGRATIONS = [
     # The output an internal swap was signed for. It is priced at execution
     # and can differ from to_amount_estimate.
     "ALTER TABLE swaps ADD COLUMN to_amount_executed TEXT;",
-    # Every tx the EVM batcher signs for an account, saved before broadcast so
-    # the account's nonce survives a restart. `replaced` holds the hashes of a
-    # nonce's earlier versions, space-separated: whichever version is mined
-    # settles it, and `tx_hash` then names that one.
+    # Txs queued for the EVM batcher of an account. `attempts` lists every
+    # signed version as `nonce:hash`, space-separated, each saved before its
+    # broadcast: a later round finds a mined one before signing again.
     """
     CREATE TABLE IF NOT EXISTS evm_transactions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
         chain_id INTEGER NOT NULL,
         address TEXT NOT NULL,
-        nonce INTEGER NOT NULL,
         owner TEXT NOT NULL,
-        tx_hash TEXT NOT NULL,
-        raw TEXT NOT NULL,
-        replaced TEXT,
-        status TEXT NOT NULL DEFAULT 'sent',
+        to_address TEXT NOT NULL,
+        data TEXT NOT NULL,
+        value TEXT NOT NULL,
+        gas INTEGER NOT NULL,
+        simulate INTEGER NOT NULL DEFAULT 1,
+        status TEXT NOT NULL DEFAULT 'queued',
+        attempts TEXT,
+        tx_hash TEXT,
+        logs TEXT,
+        error TEXT,
         created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL,
-        PRIMARY KEY (chain_id, address, nonce)
+        updated_at INTEGER NOT NULL
     );
     """,
-    "CREATE INDEX IF NOT EXISTS idx_evm_tx_status ON evm_transactions(chain_id, address, status);",
+    "CREATE INDEX IF NOT EXISTS idx_evm_tx_queue ON evm_transactions(chain_id, address, status, id);",
 ]
 
 

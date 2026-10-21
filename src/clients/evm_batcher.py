@@ -1,12 +1,12 @@
 import asyncio
 import logging
-import sqlite3
 import threading
 import time
 from dataclasses import dataclass
 from typing import Optional
 
 from web3 import Web3
+from web3.exceptions import ContractLogicError, Web3RPCError
 
 from src.clients.base_evm import EvmClient, get_evm_client
 from src.core.config import load_settings
@@ -14,322 +14,200 @@ from src.core.db import db_write, get_db
 
 logger = logging.getLogger(__name__)
 
-# How often the batcher settles mined txs and sends unmined ones again.
-MAINTAIN_INTERVAL_SEC = 6.0
+BATCH_SIZE = 32
+IDLE_INTERVAL_SEC = 2.0
+RECEIPT_POLL_SEC = 2.0
+RECEIPT_TIMEOUT_SEC = 120.0
 
 
 @dataclass(frozen=True)
 class TxIntent:
     """A tx to send from the batcher's account. `owner` names what it is for,
-    such as `swap:<id>:lifi`, so a saved tx traces back to its swap."""
+    such as `swap:<id>:lifi`. A tx that depends on an earlier one in the same
+    batch, like a swap after its approval, cannot be simulated before that
+    one is mined, so it sets `simulate` to False."""
 
     owner: str
     to: str
     gas: int
     data: str = "0x"
     value: int = 0
-
-
-@dataclass(frozen=True)
-class SentTx:
-    nonce: int
-    tx_hash: str
+    simulate: bool = True
 
 
 class EvmBatcher:
-    """The only sender for one account on one chain. It hands out the
-    account's nonces itself, so a send never waits for another's receipt:
-    queued intents are signed with consecutive nonces, saved, then broadcast."""
+    """The only sender for one account on one chain. Callers queue txs in
+    `evm_transactions` and poll `result`. Each round signs the oldest queued
+    txs with consecutive nonces from a fresh count, sends them back to back,
+    and waits only for the last receipt."""
 
     def __init__(self, evm: EvmClient, chain_id: int) -> None:
         self.evm = evm
         self.chain_id = chain_id
-        self.address = evm.address.lower()
-        self._queue: asyncio.Queue[tuple[TxIntent, asyncio.Future]] = asyncio.Queue()
-        self._next_nonce: Optional[int] = None
-        self._worker: Optional[asyncio.Task] = None
-        self._maintainer: Optional[asyncio.Task] = None
-        # Rounds read the open txs, then write them back: two at once would
-        # each write over what the other just recorded.
-        self._maintaining = asyncio.Lock()
+        self._loop: Optional[asyncio.Task] = None
 
-    async def submit(self, intent: TxIntent) -> SentTx:
-        """Return once `intent` is saved and handed to the node. Its receipt is
-        the caller's to watch: a send error after the save proves nothing."""
+    def submit(self, intent: TxIntent) -> int:
+        """Queue `intent` and return its id."""
+        now = int(time.time())
+        tx_id = db_write(
+            get_db(),
+            "INSERT INTO evm_transactions (chain_id, address, owner, to_address, data, value, gas, "
+            "simulate, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (self.chain_id, self.evm.address.lower(), intent.owner, intent.to, intent.data,
+             str(intent.value), intent.gas, int(intent.simulate), now, now),
+        ).lastrowid
         self.start()
-        future: asyncio.Future = asyncio.get_running_loop().create_future()
-        await self._queue.put((intent, future))
-        return await future
+        return tx_id
 
-    def saved(self, nonce: int) -> Optional[dict]:
-        """The tx saved at `nonce`, with its status once settled."""
-        row = get_db().execute(
-            "SELECT * FROM evm_transactions WHERE chain_id = ? AND address = ? AND nonce = ?",
-            (self.chain_id, self.address, nonce),
-        ).fetchone()
+    def result(self, tx_id: int) -> Optional[dict]:
+        """The queued tx: `status` is queued until it is mined, reverted or failed."""
+        row = get_db().execute("SELECT * FROM evm_transactions WHERE id = ?", (tx_id,)).fetchone()
         return dict(row) if row else None
 
-    async def maintain(self) -> None:
-        """One round over the account's unsettled txs, lowest nonce first. A tx
-        whose nonce the chain has used settles by whichever version was mined.
-        The rest go out again, re-signed at fees priced now once the base fee
-        outgrows them: a stuck low nonce holds up every later one."""
-        async with self._maintaining:
-            rows = get_db().execute(
-                "SELECT nonce, raw FROM evm_transactions WHERE chain_id = ? AND address = ? "
-                "AND status = 'sent' ORDER BY nonce",
-                (self.chain_id, self.address),
-            ).fetchall()
-            if not rows:
-                return
-            used = await asyncio.to_thread(
-                self.evm.w3.eth.get_transaction_count, Web3.to_checksum_address(self.address), "latest"
-            )
-            record = self._recorder(asyncio.get_running_loop())
-            for nonce, raw in rows:
-                try:
-                    if nonce < used:
-                        await self._settle(nonce)
-                    else:
-                        await asyncio.to_thread(self.evm.rebroadcast, raw, record)
-                except Exception as exc:
-                    # One tx's failure leaves the others to this round.
-                    logger.warning(
-                        "evm batcher %s nonce %d not maintained: %s", self.chain_id, nonce, type(exc).__name__
-                    )
-
-    async def _settle(self, nonce: int) -> None:
-        row = self.saved(nonce)
-        if row is None or row["status"] != "sent":
-            return
-        versions = [row["tx_hash"], *(row["replaced"] or "").split()]
-        for tx_hash in versions:
-            receipt = await asyncio.to_thread(self.evm.get_receipt, tx_hash)
-            if receipt is None:
-                continue
-            status = "mined" if receipt["status"] == 1 else "reverted"
-            db_write(
-                get_db(),
-                "UPDATE evm_transactions SET status = ?, tx_hash = ?, replaced = ?, updated_at = ? "
-                "WHERE chain_id = ? AND address = ? AND nonce = ? AND status = 'sent'",
-                (status, tx_hash, " ".join(h for h in versions if h != tx_hash) or None,
-                 int(time.time()), self.chain_id, self.address, nonce),
-            )
-            logger.info("evm batcher %s nonce %d %s as %s", self.chain_id, nonce, status, tx_hash)
-            return
-        # Nodes lag: a used nonce without a receipt yet proves nothing.
-        logger.info("evm batcher %s nonce %d used, receipt not seen yet", self.chain_id, nonce)
-
-    def _recorder(self, loop: asyncio.AbstractEventLoop):
-        """The callback a rebroadcast hands a re-signed version to. The version
-        is saved on the loop, which owns the database, and a calling thread
-        waits for it: nothing goes out unsaved."""
-
-        def record(tx_hash: str, nonce: int, raw: str) -> None:
-            try:
-                on_loop = asyncio.get_running_loop() is loop
-            except RuntimeError:
-                on_loop = False
-            if on_loop:
-                self._record_version(tx_hash, nonce, raw)
-                return
-
-            async def on_the_loop() -> None:
-                self._record_version(tx_hash, nonce, raw)
-
-            asyncio.run_coroutine_threadsafe(on_the_loop(), loop).result()
-
-        return record
-
-    def _record_version(self, tx_hash: str, nonce: int, raw: str) -> None:
-        # SET reads the row as it was, so the old hash moves into `replaced`.
-        changed = db_write(
-            get_db(),
-            "UPDATE evm_transactions SET replaced = TRIM(COALESCE(replaced, '') || ' ' || tx_hash), "
-            "tx_hash = ?, raw = ?, updated_at = ? "
-            "WHERE chain_id = ? AND address = ? AND nonce = ? AND status = 'sent'",
-            (tx_hash, raw, int(time.time()), self.chain_id, self.address, nonce),
-        ).rowcount
-        if not changed:
-            # Settled meanwhile: raising here keeps the new version from going out.
-            raise RuntimeError(f"nonce {nonce} settled before its new version was saved")
-
     def start(self) -> None:
-        if self._worker is None or self._worker.done():
-            self._worker = asyncio.create_task(self._run())
-        if self._maintainer is None or self._maintainer.done():
-            self._maintainer = asyncio.create_task(self._maintain_forever())
-
-    async def _maintain_forever(self) -> None:
-        while True:
-            await asyncio.sleep(MAINTAIN_INTERVAL_SEC)
-            try:
-                await self.maintain()
-            except Exception as exc:
-                # The next round looks again; nothing is lost by skipping one.
-                logger.warning("evm batcher %s round failed: %s", self.chain_id, type(exc).__name__)
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        if self._loop is None or self._loop.done():
+            self._loop = asyncio.create_task(self._run())
 
     async def _run(self) -> None:
-        # Txs saved before a restart hold the nonces below every new one, so
-        # they go out again before anything new queues behind them.
-        try:
-            await self.maintain()
-        except Exception as exc:
-            logger.warning("evm batcher %s recovery round failed: %s", self.chain_id, type(exc).__name__)
         while True:
-            batch = [await self._queue.get()]
-            while not self._queue.empty():
-                batch.append(self._queue.get_nowait())
-            await self._flush(batch)
-
-    async def _flush(self, batch: list[tuple[TxIntent, asyncio.Future]]) -> None:
-        # One price for the whole batch: the intents queued together go out together.
-        try:
-            fees = await asyncio.to_thread(self.evm.fees)
-            nonce = await self._first_free_nonce()
-        except Exception as exc:
-            for _, future in batch:
-                _settle(future, exc=exc)
-            return
-        for intent, future in batch:
-            if future.done():
-                # Its caller stopped waiting: sending it now would leave a tx nobody tracks.
-                continue
             try:
-                nonce, tx_hash, raw = await self._sign_and_save(intent, nonce, fees, future)
-            except _Abandoned:
-                continue
+                worked = await self.run_round()
             except Exception as exc:
-                # Nothing saved, nothing sent: the nonce stays free for the next intent.
-                _settle(future, exc=exc)
-                continue
-            self._next_nonce = nonce + 1
-            try:
-                await asyncio.to_thread(self.evm.broadcast, raw)
-                logger.info("evm batcher %s sent %s for %s at nonce %d", self.chain_id, tx_hash, intent.owner, nonce)
-            except Exception as exc:
-                # The node may hold it anyway, and the saved raw goes out again.
-                logger.warning(
-                    "evm batcher %s broadcast of %s at nonce %d failed: %s",
-                    self.chain_id, tx_hash, nonce, type(exc).__name__,
-                )
-            _settle(future, result=SentTx(nonce=nonce, tx_hash=tx_hash))
-            nonce += 1
+                logger.warning("evm batcher %s round failed: %s", self.chain_id, type(exc).__name__)
+                worked = False
+            if not worked:
+                await asyncio.sleep(IDLE_INTERVAL_SEC)
 
-    async def _sign_and_save(
-        self, intent: TxIntent, nonce: int, fees: dict, future: asyncio.Future
-    ) -> tuple[int, str, str]:
-        while True:
-            tx_hash, raw = await asyncio.to_thread(self.evm.sign, self._tx(intent, nonce, fees))
-            if future.done():
-                # Cancelled while it was signed: unsaved, so the nonce stays free.
-                raise _Abandoned
-            try:
-                self._save(intent.owner, nonce, tx_hash, raw)
-                return nonce, tx_hash, raw
-            except sqlite3.IntegrityError:
-                # Only a tx already saved at this nonce moves past it; any other
-                # rejection is this intent's own.
-                if self.saved(nonce) is None:
-                    raise
+    async def run_round(self) -> bool:
+        """One batch. Returns whether there was anything queued."""
+        rows = [dict(r) for r in get_db().execute(
+            "SELECT * FROM evm_transactions WHERE chain_id = ? AND address = ? AND status = 'queued' "
+            "ORDER BY id LIMIT ?",
+            (self.chain_id, self.evm.address.lower(), BATCH_SIZE),
+        ).fetchall()]
+        if not rows:
+            return False
+        nonce = await asyncio.to_thread(
+            self.evm.w3.eth.get_transaction_count, self.evm.address, "latest"
+        )
+        unsent = []
+        for row in rows:
+            settled = await self._settle(row, nonce)
+            if settled is None:
+                # An earlier attempt holds a used nonce but has no receipt yet:
+                # signing again now could send it twice.
+                return True
+            if not settled:
+                unsent.append(row)
+        fees = await asyncio.to_thread(self.evm.fees)
+        sent, last_hash = [], None
+        for row in unsent:
+            outcome = await self._send(row, nonce, fees)
+            if outcome == "stop":
+                break
+            if outcome == "sent":
+                sent.append(row)
+                last_hash = self._attempts(self.result(row["id"]))[-1][1]
                 nonce += 1
+        if last_hash is not None:
+            await self._await_receipt(last_hash)
+            for row in sent:
+                await self._settle(self.result(row["id"]), None)
+        return True
 
-    async def _first_free_nonce(self) -> int:
-        if self._next_nonce is None:
-            # Past the node's view and past every tx already saved for this
-            # account, so a restart never signs a second tx at a used nonce.
-            pending = await asyncio.to_thread(
-                self.evm.w3.eth.get_transaction_count, Web3.to_checksum_address(self.address), "pending"
-            )
-            saved = get_db().execute(
-                "SELECT MAX(nonce) FROM evm_transactions WHERE chain_id = ? AND address = ?",
-                (self.chain_id, self.address),
-            ).fetchone()[0]
-            self._next_nonce = max(pending, -1 if saved is None else saved + 1)
-        return self._next_nonce
-
-    def _tx(self, intent: TxIntent, nonce: int, fees: dict) -> dict:
-        return {
-            "from": Web3.to_checksum_address(self.address),
-            "to": Web3.to_checksum_address(intent.to),
-            "data": intent.data,
-            "value": intent.value,
-            "gas": intent.gas,
+    async def _send(self, row: dict, nonce: int, fees: dict) -> str:
+        tx = {
+            "from": self.evm.address,
+            "to": Web3.to_checksum_address(row["to_address"]),
+            "data": row["data"],
+            "value": int(row["value"]),
+            "gas": row["gas"],
             "nonce": nonce,
             "chainId": self.chain_id,
             **fees,
         }
-
-    def _save(self, owner: str, nonce: int, tx_hash: str, raw: str) -> None:
-        now = int(time.time())
+        # A retry keeps its place in the nonce order: it is never dropped on a
+        # simulation, since its earlier attempt may still be mined.
+        if row["simulate"] and not row["attempts"]:
+            try:
+                call = {k: tx[k] for k in ("from", "to", "data", "value", "gas")}
+                await asyncio.to_thread(self.evm.w3.eth.call, call)
+            except ContractLogicError as exc:
+                self._finish(row["id"], "failed", error=f"simulation reverted: {exc}")
+                return "skipped"
+        tx_hash, raw = await asyncio.to_thread(self.evm.sign, tx)
+        # Saved before broadcast: a later round checks it for a receipt before signing again.
         db_write(
             get_db(),
-            "INSERT INTO evm_transactions (chain_id, address, nonce, owner, tx_hash, "
-            "raw, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (self.chain_id, self.address, nonce, owner, tx_hash, raw, now, now),
+            "UPDATE evm_transactions SET attempts = TRIM(COALESCE(attempts, '') || ' ' || ?), "
+            "updated_at = ? WHERE id = ?",
+            (f"{nonce}:{tx_hash}", int(time.time()), row["id"]),
         )
+        try:
+            await asyncio.to_thread(self.evm.broadcast, raw)
+        except Web3RPCError as exc:
+            message = str(exc).lower()
+            if "already known" in message:
+                return "sent"
+            # A retry's earlier attempt may still be mined, so it is never failed here.
+            if "nonce" in message or "underpriced" in message or row["attempts"]:
+                logger.info("evm batcher %s nonce %d not taken, retrying next round", self.chain_id, nonce)
+                return "stop"
+            # The node refused it outright, so the nonce stays free for the next tx.
+            self._finish(row["id"], "failed", error=str(exc))
+            return "skipped"
+        except Exception as exc:
+            # It may have reached the node: the next round looks for its receipt.
+            logger.warning("evm batcher %s broadcast at nonce %d failed: %s", self.chain_id, nonce, type(exc).__name__)
+            return "stop"
+        logger.info("evm batcher %s sent %s for %s at nonce %d", self.chain_id, tx_hash, row["owner"], nonce)
+        return "sent"
 
+    async def _settle(self, row: dict, used: Optional[int]) -> Optional[bool]:
+        """Whether one of the row's attempts was mined, recording its receipt.
+        None when an attempt's nonce is below `used` but no receipt shows yet."""
+        attempts = self._attempts(row)
+        for _, tx_hash in attempts:
+            receipt = await asyncio.to_thread(self.evm.get_receipt, tx_hash)
+            if receipt is not None:
+                status = "mined" if receipt["status"] == 1 else "reverted"
+                self._finish(row["id"], status, tx_hash=tx_hash, logs=Web3.to_json(receipt.get("logs", [])))
+                return True
+        if used is not None and any(n < used for n, _ in attempts):
+            return None
+        return False
 
-class _Abandoned(Exception):
-    """Its caller stopped waiting before the intent was saved."""
+    async def _await_receipt(self, tx_hash: str) -> None:
+        deadline = time.monotonic() + RECEIPT_TIMEOUT_SEC
+        while time.monotonic() < deadline:
+            if await asyncio.to_thread(self.evm.get_receipt, tx_hash) is not None:
+                return
+            await asyncio.sleep(RECEIPT_POLL_SEC)
+        logger.warning("evm batcher %s receipt of %s not seen, retrying next round", self.chain_id, tx_hash)
 
+    @staticmethod
+    def _attempts(row: dict) -> list[tuple[int, str]]:
+        pairs = (a.split(":", 1) for a in (row["attempts"] or "").split())
+        return [(int(n), h) for n, h in pairs]
 
-def _settle(future: asyncio.Future, result: object = None, exc: Optional[BaseException] = None) -> None:
-    # A caller that stopped waiting has cancelled its future.
-    if future.done():
-        return
-    if exc is not None:
-        future.set_exception(exc)
-    else:
-        future.set_result(result)
+    def _finish(self, tx_id: int, status: str, tx_hash: Optional[str] = None,
+                logs: Optional[str] = None, error: Optional[str] = None) -> None:
+        db_write(
+            get_db(),
+            "UPDATE evm_transactions SET status = ?, tx_hash = ?, logs = ?, error = ?, updated_at = ? "
+            "WHERE id = ? AND status = 'queued'",
+            (status, tx_hash, logs, error, int(time.time()), tx_id),
+        )
 
 
 _batchers: dict[int, EvmBatcher] = {}
 # Callers reach it from threads, and two batchers for one chain would hand out the same nonces.
 _batchers_lock = threading.Lock()
-
-
-async def recover_evm_batchers() -> None:
-    """Start the LP batcher of every chain holding unsettled txs, so they settle
-    or go out again after a restart without waiting for a new send there."""
-    address = load_settings().liquidity_provider_address.lower()
-    chains = get_db().execute(
-        "SELECT DISTINCT chain_id FROM evm_transactions WHERE address = ? AND status = 'sent'",
-        (address,),
-    ).fetchall()
-    for (chain_id,) in chains:
-        try:
-            batcher = await asyncio.to_thread(get_evm_batcher, chain_id)
-        except Exception as exc:
-            # The chain's RPC may be down at boot: keep trying without holding up startup.
-            logger.warning("evm batcher %s not recovered yet: %s", chain_id, type(exc).__name__)
-            task = asyncio.create_task(_recover_later(chain_id))
-            _retries.add(task)
-            task.add_done_callback(_retries.discard)
-            continue
-        batcher.start()
-
-
-_retries: set[asyncio.Task] = set()
-
-
-def start_evm_batcher_recovery() -> None:
-    """Recover in the background: a slow RPC must not hold up startup."""
-    task = asyncio.create_task(recover_evm_batchers())
-    _retries.add(task)
-    task.add_done_callback(_retries.discard)
-
-
-async def _recover_later(chain_id: int) -> None:
-    while True:
-        await asyncio.sleep(MAINTAIN_INTERVAL_SEC)
-        try:
-            batcher = await asyncio.to_thread(get_evm_batcher, chain_id)
-        except Exception as exc:
-            logger.warning("evm batcher %s not recovered yet: %s", chain_id, type(exc).__name__)
-            continue
-        batcher.start()
-        return
+_tasks: set[asyncio.Task] = set()
 
 
 def get_evm_batcher(chain_id: int) -> EvmBatcher:
@@ -338,3 +216,30 @@ def get_evm_batcher(chain_id: int) -> EvmBatcher:
         if chain_id not in _batchers:
             _batchers[chain_id] = EvmBatcher(get_evm_client(chain_id), chain_id)
         return _batchers[chain_id]
+
+
+def start_evm_batcher_recovery() -> None:
+    """Start the batcher of every chain with queued LP txs, in the background:
+    a slow RPC must not hold up startup."""
+    task = asyncio.create_task(_recover())
+    _tasks.add(task)
+    task.add_done_callback(_tasks.discard)
+
+
+async def _recover() -> None:
+    address = load_settings().liquidity_provider_address.lower()
+    chains = [c for (c,) in get_db().execute(
+        "SELECT DISTINCT chain_id FROM evm_transactions WHERE address = ? AND status = 'queued'",
+        (address,),
+    ).fetchall()]
+    while chains:
+        for chain_id in list(chains):
+            try:
+                batcher = await asyncio.to_thread(get_evm_batcher, chain_id)
+            except Exception as exc:
+                logger.warning("evm batcher %s not recovered yet: %s", chain_id, type(exc).__name__)
+                continue
+            batcher.start()
+            chains.remove(chain_id)
+        if chains:
+            await asyncio.sleep(IDLE_INTERVAL_SEC)

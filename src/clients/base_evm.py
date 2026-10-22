@@ -64,6 +64,7 @@ class EvmClient:
         """`gas` at the fee cap a send sets now."""
         return gas * self.fees()["maxFeePerGas"]
 
+
 _clients: dict[str, EvmClient] = {}
 _chain_ids: dict[str, int] = {}
 

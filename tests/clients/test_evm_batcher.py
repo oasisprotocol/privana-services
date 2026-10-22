@@ -784,3 +784,14 @@ def test_a_held_version_outbid_by_the_market_tip_is_signed_again(batcher, chain,
 
     assert len(chain.sent) == 2
     assert TypedTransaction.from_bytes(HexBytes(chain.sent[1])).as_dict()["maxPriorityFeePerGas"] >= 10_000
+
+
+def test_a_failed_send_logs_what_the_chain_says_about_it(batcher, chain, caplog):
+    queue(batcher, 1)
+    chain.refuse = [ConnectionError("response lost")]
+
+    with caplog.at_level("WARNING", logger="src.clients.evm_batcher"):
+        batcher.run_round()
+
+    logged = " ".join(r.getMessage() for r in caplog.records)
+    assert "latest_nonce=0 pending_nonce=0 known_to_node=False" in logged

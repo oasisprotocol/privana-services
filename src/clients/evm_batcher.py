@@ -17,6 +17,9 @@ from src.core.validation import URL_PATTERN
 logger = logging.getLogger(__name__)
 
 BATCH_SIZE = 10
+TRANSFER_GAS_LIMIT = 100_000
+NATIVE_TRANSFER_GAS_LIMIT = 21_000
+APPROVE_GAS_LIMIT = 80_000
 IDLE_INTERVAL_SEC = 2.0
 RECEIPT_POLL_SEC = 1.0
 RECEIPT_TIMEOUT_SEC = 120.0
@@ -64,9 +67,6 @@ class TxIntent:
     simulate: bool = True
 
 
-TRANSFER_GAS_LIMIT = 100_000
-NATIVE_TRANSFER_GAS_LIMIT = 21_000
-APPROVE_GAS_LIMIT = 80_000
 _ERC20 = Web3().eth.contract(abi=ERC20_ABI)
 
 

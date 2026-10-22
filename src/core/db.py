@@ -166,9 +166,8 @@ MIGRATIONS = [
     "ALTER TABLE swaps ADD COLUMN to_amount_executed TEXT;",
     # Txs queued for the EVM batcher of an account. `attempts` lists every
     # signed version as `nonce:hash`, space-separated, each saved before its
-    # broadcast: a later round finds a mined one before signing again.
-    # `sent_at` is when the first one went out; `nonce` and `tx_hash` are the
-    # attempt that was mined.
+    # broadcast: a later round finds a mined one before signing again. `nonce`
+    # and `tx_hash` are the attempt that was mined.
     """
     CREATE TABLE IF NOT EXISTS evm_transactions (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -182,7 +181,6 @@ MIGRATIONS = [
         simulate INTEGER NOT NULL DEFAULT 1,
         status TEXT NOT NULL DEFAULT 'queued',
         attempts TEXT,
-        sent_at INTEGER,
         nonce INTEGER,
         tx_hash TEXT,
         logs TEXT,

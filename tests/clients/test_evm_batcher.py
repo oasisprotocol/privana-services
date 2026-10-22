@@ -418,8 +418,12 @@ def mine_during_receipt_lookup(chain):
 
 
 def age(test_db, seconds):
-    test_db.execute("UPDATE evm_transactions SET sent_at = sent_at - ?, updated_at = updated_at - ?",
-                    (seconds, seconds))
+    test_db.execute("UPDATE evm_transactions SET updated_at = updated_at - ?", (seconds,))
+
+
+def executed(chain, tx_id):
+    """The row's distinct attempts the chain mined."""
+    return [h for h in {a.split(":")[1] for a in (result(tx_id)["attempts"] or "").split()} if h in chain.receipts]
 
 
 def test_a_tx_mined_while_the_round_reconciles_does_not_stall_the_queue(batcher, chain):
@@ -515,6 +519,7 @@ def test_a_tx_waits_out_the_receipt_window_before_it_is_signed_again(batcher, ch
     assert len(result(tx_id)["attempts"].split()) == 1
     age(test_db, 61)
     monkeypatch.setattr(module, "RECEIPT_TIMEOUT_SEC", 0.05)
+    chain.pool.clear()
 
     batcher.run_round()
 
@@ -529,9 +534,12 @@ def test_a_stuck_tx_whose_nonce_is_free_never_moves_the_one_behind(batcher, chai
 
     batcher.run_round()
 
-    # Each is signed again at its own nonce only, never the other's.
+    # The first is signed again at its own nonce; the one behind is still held, so it waits.
     assert (result(stuck)["status"], result(behind)["status"]) == ("queued", "queued")
-    assert [nonce_of(raw) for raw in chain.sent] == [0, 1, 0, 1]
+    assert [nonce_of(raw) for raw in chain.sent] == [0, 1, 0]
+    chain.auto_mine = True
+    batcher.run_round()
+    assert len(executed(chain, behind)) == 1 and {n for n, _ in batcher._attempts(result(behind))} == {1}
 
 
 def test_a_receipt_a_lagging_node_hides_never_resends_a_mined_tx(batcher, chain, test_db):
@@ -575,11 +583,12 @@ def test_stopping_cuts_a_receipt_wait_short(batcher, chain, monkeypatch):
 
     assert clock.monotonic() - began < 2
 
-def test_a_retry_outbids_the_attempt_the_node_still_holds(batcher, chain, test_db):
+def test_a_retry_outbids_a_held_version_the_base_fee_priced_out(batcher, chain, test_db):
     (tx_id,) = queue(batcher, 1)
     batcher.run_round()
     first = TypedTransaction.from_bytes(HexBytes(chain.sent[0])).as_dict()
     age(test_db, module.RECEIPT_TIMEOUT_SEC + 1)
+    chain.base_fee = 50_000
 
     batcher.run_round()
 
@@ -588,6 +597,15 @@ def test_a_retry_outbids_the_attempt_the_node_still_holds(batcher, chain, test_d
     for fee in ("maxFeePerGas", "maxPriorityFeePerGas"):
         assert retry[fee] >= first[fee] * 1.125
 
+
+def test_a_held_version_that_can_still_be_mined_is_not_signed_again(batcher, chain, test_db):
+    queue(batcher, 1)
+    batcher.run_round()
+    for _ in range(30):
+        age(test_db, module.RECEIPT_TIMEOUT_SEC + 1)
+        batcher.run_round()
+
+    assert len(chain.sent) == 1
 
 def test_a_simulation_the_node_rejects_fails_the_tx_unsigned(batcher, chain):
     (doomed,) = [submit(CHAIN_ID, intent(owner="swap:a:lifi", data="0xpoor"))]
@@ -601,14 +619,36 @@ def test_a_simulation_the_node_rejects_fails_the_tx_unsigned(batcher, chain):
     assert "insufficient funds for transfer" in result(doomed)["error"]
 
 
-def test_only_exact_already_known_replies_count_as_sent(batcher, chain):
-    ids = queue(batcher, 4)
-    chain.refuse = [Web3RPCError(m) for m in ("already known", "known transaction", "AlreadyKnown", "unknown transaction")]
+def rpc_error(message, code=-32000):
+    """`message` as web3 raises a node's error reply."""
+    return Web3RPCError(str({"code": code, "message": message}),
+                        rpc_response={"jsonrpc": "2.0", "id": 1, "error": {"code": code, "message": message}})
+
+
+@pytest.mark.parametrize("reply", ["already known", "Known transaction: 0xab", "AlreadyKnown"])
+def test_a_node_reply_that_it_holds_the_tx_counts_as_sent(batcher, chain, reply):
+    first, second = queue(batcher, 2)
+    chain.refuse = [rpc_error(reply)]
 
     batcher.run_round()
 
-    assert [result(i)["status"] for i in ids] == ["queued", "queued", "queued", "failed"]
+    assert [nonce_of(raw) for raw in chain.sent] == [1]
+    assert result(second)["attempts"].startswith("1:")
 
+
+@pytest.mark.parametrize("reply", ["unknown transaction", "context deadline exceeded", "limit exceeded"])
+def test_a_reply_that_may_hide_a_taken_tx_is_tried_again_at_its_nonce(batcher, chain, test_db, reply):
+    (tx_id,) = queue(batcher, 1)
+    chain.refuse = [rpc_error(reply)]
+    batcher.run_round()
+    assert result(tx_id)["status"] == "queued"
+    age(test_db, module.RECEIPT_TIMEOUT_SEC + 1)
+    chain.auto_mine = True
+
+    batcher.run_round()
+
+    assert {n for n, _ in batcher._attempts(result(tx_id))} == {0}
+    assert result(tx_id)["status"] == "mined"
 
 def test_a_round_without_progress_sleeps_instead_of_spinning(batcher, chain, monkeypatch):
     monkeypatch.setattr(module, "IDLE_INTERVAL_SEC", 0.05)
@@ -646,3 +686,48 @@ def test_an_rpc_key_in_a_request_path_never_reaches_the_log():
 
     assert "SECRETKEY" not in logged
     assert "with url: [url]" in logged
+
+
+def test_a_block_landing_mid_round_never_moves_a_retry_to_a_new_nonce(batcher, chain, test_db):
+    first, second = queue(batcher, 2)
+    refuse_used_nonces(chain)
+    batcher.run_round()
+    age(test_db, module.RECEIPT_TIMEOUT_SEC + 1)
+    chain.pool.clear()
+    chain.sent.clear()
+    batcher.run_round()
+    real = chain.get_transaction_receipt
+    second_hashes = result(second)["attempts"]
+
+    def receipt(tx_hash):
+        # The block with both lands after the round looked up the first.
+        if tx_hash in second_hashes and chain.mined_count in chain.pool:
+            chain.mine(len(chain.pool))
+        return real(tx_hash)
+
+    chain.get_transaction_receipt = receipt
+    age(test_db, module.RECEIPT_TIMEOUT_SEC + 1)
+    batcher.run_round()
+    chain.get_transaction_receipt = real
+    batcher.run_round()
+
+    assert {n for n, _ in batcher._attempts(result(first))} == {0}
+    assert len(executed(chain, first)) == 1
+    assert result(first)["status"] == "mined"
+
+
+def test_a_tx_re_signed_for_a_while_is_not_failed_when_its_receipt_lags(batcher, chain, test_db):
+    (tx_id,) = queue(batcher, 1)
+    batcher.run_round()
+    chain.pool.clear()
+    age(test_db, module.STUCK_AFTER_SEC + 1)
+    batcher.run_round()
+    chain.mine()
+    real = chain.get_transaction_receipt
+    chain.get_transaction_receipt = lambda tx_hash: (_ for _ in ()).throw(TransactionNotFound(tx_hash))
+
+    batcher.run_round()
+    chain.get_transaction_receipt = real
+    batcher.run_round()
+
+    assert result(tx_id)["status"] == "mined"

@@ -42,9 +42,10 @@ STOPPED = "stopped"
 # Node replies meaning it already holds the tx.
 ALREADY_KNOWN = ("already known", "alreadyknown")
 KNOWN_TRANSACTION = "known transaction"
-# Node replies about the nonce rather than the tx: the round stops and a later
-# one looks again.
-NONCE_REPLIES = ("nonce too low", "nonce too high", "replacement transaction underpriced")
+# Node replies meaning it will never take the tx as signed. Any other reply
+# may come from a node that took it anyway, so the tx is tried again later at
+# the same nonce instead of being failed.
+REFUSED = ("insufficient funds", "intrinsic gas too low", "exceeds block gas limit")
 # A key can sit in a URL or, in a requests error, in the path after "url: ".
 _RPC_PATH = re.compile(r"(?<=url: )\S+")
 
@@ -106,8 +107,8 @@ class EvmBatcher:
                 progressed = True
             elif settled is None:
                 # An attempt holds a used nonce but has no receipt yet: signing
-                # again could send it twice. Once stuck, it is failed instead,
-                # never signed at a new nonce, and its swap parks for a person.
+                # again could send it twice. Once stuck, it is failed instead
+                # and its swap parks for a person.
                 if not self._stuck(row):
                     return progressed
                 self._finish(row["id"], FAILED, error="nonce taken by another tx")
@@ -118,18 +119,21 @@ class EvmBatcher:
                 return progressed
             else:
                 unsent.append(row)
-        # Past any tx this round just found mined.
+        # A new tx starts past any tx this round just found mined. A tx sent
+        # before is signed again only at the nonce it already holds: at any
+        # other, both versions could be mined.
         nonce = max(used, self._next_after_mined())
         fees = self.evm.fees()
         sent, last_hash = [], None
         for row in unsent:
-            outcome = self._send(row, nonce, fees)
+            at = self._attempts(row)[-1][0] if row["attempts"] else nonce
+            outcome = self._send(row, at, fees)
             if outcome == STOPPED:
                 break
             if outcome == SENT:
                 sent.append(row)
                 last_hash = self._attempts(self._row(row["id"]))[-1][1]
-                nonce += 1
+                nonce = max(nonce, at + 1)
         if last_hash is not None:
             self._await_receipt(last_hash)
             for row in sent:
@@ -139,10 +143,16 @@ class EvmBatcher:
     def _send(self, row: dict, nonce: int, fees: dict) -> str:
         if row["attempts"]:
             try:
-                fees = self._bumped(fees, row)
+                held = self._newest_held(row)
             except Exception as exc:
-                logger.warning("evm batcher %s fee lookup at nonce %d failed: %s", self.chain_id, nonce, _error(exc))
+                logger.warning("evm batcher %s lookup at nonce %d failed: %s", self.chain_id, nonce, _error(exc))
                 return STOPPED
+            if held is not None:
+                if _includable(held, fees):
+                    # The node holds a version that can still be mined: wait for it.
+                    return STOPPED
+                fees = {key: max(fees[key], held[key] + held[key] * FEE_BUMP_BPS // 10_000 + 1)
+                        for key in ("maxFeePerGas", "maxPriorityFeePerGas")}
         tx = {
             "from": self.evm.address,
             "to": Web3.to_checksum_address(row["to_address"]),
@@ -159,9 +169,12 @@ class EvmBatcher:
             try:
                 self.evm.w3.eth.call({k: tx[k] for k in ("from", "to", "data", "value", "gas")})
             except (ContractLogicError, Web3RPCError) as exc:
-                # The node answered: the tx would fail, and nothing was signed.
-                self._finish(row["id"], FAILED, error=f"simulation failed: {_error(exc)}")
-                return SKIPPED
+                # A revert or a refusal: the tx would fail, and nothing was signed.
+                if isinstance(exc, ContractLogicError) or any(p in _rpc_message(exc) for p in REFUSED):
+                    self._finish(row["id"], FAILED, error=f"simulation failed: {_error(exc)}")
+                    return SKIPPED
+                logger.warning("evm batcher %s simulation at nonce %d failed: %s", self.chain_id, nonce, _error(exc))
+                return STOPPED
             except Exception as exc:
                 # The RPC, not the tx: what this round already sent is still awaited.
                 logger.warning("evm batcher %s simulation at nonce %d failed: %s", self.chain_id, nonce, _error(exc))
@@ -171,22 +184,22 @@ class EvmBatcher:
         db_write(
             self.db,
             "UPDATE evm_transactions SET attempts = TRIM(COALESCE(attempts, '') || ' ' || ?), "
-            "sent_at = COALESCE(sent_at, ?), updated_at = ? WHERE id = ?",
-            (f"{nonce}:{tx_hash}", int(time.time()), int(time.time()), row["id"]),
+            "updated_at = ? WHERE id = ?",
+            (f"{nonce}:{tx_hash}", int(time.time()), row["id"]),
         )
         try:
             self.evm.broadcast(raw)
         except Web3RPCError as exc:
-            message = str(exc).lower()
+            message = _rpc_message(exc)
             if any(phrase in message for phrase in ALREADY_KNOWN) or message.startswith(KNOWN_TRANSACTION):
                 logger.info("evm batcher %s node already holds %s at nonce %d", self.chain_id, tx_hash, nonce)
                 return SENT
             # A retry's earlier attempt may still be mined, so it is never failed here.
-            if any(phrase in message for phrase in NONCE_REPLIES) or row["attempts"]:
-                logger.info("evm batcher %s send at nonce %d refused (%s), retrying in a later round",
+            if row["attempts"] or not any(phrase in message for phrase in REFUSED):
+                logger.info("evm batcher %s send at nonce %d not taken (%s), retrying in a later round",
                             self.chain_id, nonce, _error(exc))
                 return STOPPED
-            # The node refused it outright, so the nonce stays free for the next tx.
+            # The node will never take it, so the nonce stays free for the next tx.
             self._finish(row["id"], FAILED, error=_error(exc))
             return SKIPPED
         except Exception as exc:
@@ -212,7 +225,8 @@ class EvmBatcher:
         return False
 
     def _stuck(self, row: dict) -> bool:
-        return row["sent_at"] is not None and time.time() - row["sent_at"] > STUCK_AFTER_SEC
+        # From the last attempt: a tx re-signed for a while is not stuck yet.
+        return time.time() - row["updated_at"] > STUCK_AFTER_SEC
 
     def _next_after_mined(self) -> int:
         top = self.db.execute(
@@ -221,19 +235,14 @@ class EvmBatcher:
         ).fetchone()[0]
         return 0 if top is None else top + 1
 
-    def _bumped(self, fees: dict, row: dict) -> dict:
-        """`fees`, raised past the newest attempt the node still holds, which a
-        retry must outbid to replace."""
+    def _newest_held(self, row: dict) -> Optional[dict]:
+        """The newest of the row's attempts the node still holds."""
         for _, tx_hash in reversed(self._attempts(row)):
             try:
-                held = self.evm.w3.eth.get_transaction(tx_hash)
+                return self.evm.w3.eth.get_transaction(tx_hash)
             except TransactionNotFound:
                 continue
-            return {
-                key: max(fees[key], held[key] + held[key] * FEE_BUMP_BPS // 10_000 + 1)
-                for key in ("maxFeePerGas", "maxPriorityFeePerGas")
-            }
-        return fees
+        return None
 
     def _await_receipt(self, tx_hash: str) -> None:
         deadline = time.monotonic() + RECEIPT_TIMEOUT_SEC
@@ -262,6 +271,18 @@ class EvmBatcher:
         )
         logger.info("evm batcher %s tx %d %s%s", self.chain_id, tx_id, status,
                     f": {error}" if error else f" as {tx_hash}")
+
+
+def _includable(held: dict, fees: dict) -> bool:
+    """Whether `held`'s fee cap still covers the base fee and tip priced in `fees`."""
+    base_fee = (fees["maxFeePerGas"] - fees["maxPriorityFeePerGas"]) // 2
+    return held["maxFeePerGas"] >= base_fee + fees["maxPriorityFeePerGas"]
+
+
+def _rpc_message(exc: Web3RPCError) -> str:
+    """The node's own error message: web3 wraps it in the error's text."""
+    error = (exc.rpc_response or {}).get("error") or {}
+    return str(error.get("message") or exc).lower()
 
 
 def _error(exc: Exception) -> str:

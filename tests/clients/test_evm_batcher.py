@@ -481,15 +481,16 @@ def test_a_nonce_another_sender_took_fails_the_tx_and_frees_the_queue(batcher, c
     chain.mined_count = 1
     batcher.run_round()
     assert result(stuck)["status"] == "queued"
-    age(test_db, module.STUCK_AFTER_SEC + 1)
+    batcher._used_since[stuck] -= module.STUCK_AFTER_SEC + 1
     (behind,) = [submit(CHAIN_ID, intent(owner="swap:b:lifi", data="0xbeef"))]
     chain.auto_mine = True
 
     batcher.run_round()
 
     # Failed with its attempts: never signed again, so never sent twice.
-    assert (result(stuck)["status"], len(result(stuck)["attempts"].split())) == ("failed", 1)
-    assert result(behind)["status"] == "mined"
+    assert (result(stuck)["status"], len(result(stuck)["attempts"].split()), result(stuck)["nonce"]) == (
+        "failed", 1, 0)
+    assert (result(behind)["status"], result(behind)["nonce"]) == ("mined", 1)
 
 
 def test_a_retry_the_node_refuses_waits_and_goes_out_once_taken(batcher, chain, test_db):
@@ -731,3 +732,56 @@ def test_a_tx_re_signed_for_a_while_is_not_failed_when_its_receipt_lags(batcher,
     batcher.run_round()
 
     assert result(tx_id)["status"] == "mined"
+
+
+def test_a_tx_mined_long_after_it_was_sent_is_not_failed_when_its_receipt_lags(batcher, chain, test_db):
+    # The clock starts when the nonce is first seen used, not when the tx was sent.
+    (tx_id,) = queue(batcher, 1)
+    batcher.run_round()
+    age(test_db, module.STUCK_AFTER_SEC + 1)
+    chain.mine()
+    real = chain.get_transaction_receipt
+    chain.get_transaction_receipt = lambda tx_hash: (_ for _ in ()).throw(TransactionNotFound(tx_hash))
+
+    batcher.run_round()
+    chain.get_transaction_receipt = real
+    batcher.run_round()
+
+    assert result(tx_id)["status"] == "mined"
+
+
+@pytest.mark.parametrize("reply", ["out of gas", "invalid opcode: INVALID", "stack underflow (0 <=> 1)"])
+def test_a_call_that_fails_as_built_fails_the_tx_unsigned(batcher, chain, reply):
+    doomed = submit(CHAIN_ID, intent(owner="swap:a:lifi", data="0xbad0"))
+    fine = submit(CHAIN_ID, intent(owner="swap:b:lifi"))
+    real = chain.call
+    chain.call = lambda tx, *a: (_ for _ in ()).throw(rpc_error(reply)) if tx["data"] == "0xbad0" else real(tx, *a)
+
+    batcher.run_round()
+
+    assert (result(doomed)["status"], result(doomed)["attempts"]) == ("failed", None)
+    assert result(fine)["attempts"].startswith("0:")
+
+
+def test_a_retry_refused_for_its_gas_fails_since_no_attempt_could_be_taken(batcher, chain, test_db):
+    tx_id = submit(CHAIN_ID, intent(owner="swap:a:lifi", simulate=False))
+    chain.refuse = [ConnectionError("response lost")]
+    batcher.run_round()
+    age(test_db, module.RECEIPT_TIMEOUT_SEC + 1)
+    chain.refuse = [rpc_error("intrinsic gas too low")]
+
+    batcher.run_round()
+
+    assert result(tx_id)["status"] == "failed"
+
+
+def test_a_held_version_outbid_by_the_market_tip_is_signed_again(batcher, chain, test_db):
+    queue(batcher, 1)
+    batcher.run_round()
+    age(test_db, module.RECEIPT_TIMEOUT_SEC + 1)
+    chain.max_priority_fee = 10_000
+
+    batcher.run_round()
+
+    assert len(chain.sent) == 2
+    assert TypedTransaction.from_bytes(HexBytes(chain.sent[1])).as_dict()["maxPriorityFeePerGas"] >= 10_000

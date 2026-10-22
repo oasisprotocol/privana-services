@@ -67,6 +67,12 @@ class FakeChain:
             self.receipts[Web3.to_hex(Web3.keccak(hexstr=raw))] = {"status": status, "logs": []}
             self.mined_count += 1
 
+    def get_transaction(self, tx_hash):
+        for raw in self.pool.values():
+            if hash_of(raw) == tx_hash:
+                return TypedTransaction.from_bytes(HexBytes(raw)).as_dict()
+        raise TransactionNotFound(tx_hash)
+
     def get_transaction_receipt(self, tx_hash):
         if self.auto_mine:
             while self.mined_count in self.pool:
@@ -216,7 +222,7 @@ def test_a_tx_whose_simulation_reverts_fails_without_using_a_nonce(batcher, chai
     batcher.run_round()
 
     assert result(doomed)["status"] == "failed"
-    assert "simulation reverted" in result(doomed)["error"]
+    assert "simulation failed: ContractLogicError" in result(doomed)["error"]
     assert result(fine)["attempts"].startswith("0:")
 
 
@@ -384,3 +390,173 @@ def test_one_batcher_thread_starts_per_configured_chain(monkeypatch, settings):
 
     # A second RPC for chain 8453 would be a second sender for its nonces.
     assert sorted(served) == [1, 8453]
+
+
+def refuse_used_nonces(chain):
+    real = chain.send_raw_transaction
+
+    def send(raw):
+        if nonce_of(raw) < chain.mined_count:
+            raise Web3RPCError("nonce too low")
+        return real(raw)
+
+    chain.send_raw_transaction = send
+
+
+def mine_during_receipt_lookup(chain):
+    real = chain.get_transaction_receipt
+
+    def receipt(tx_hash):
+        if chain.mined_count in chain.pool:
+            chain.mine()
+        return real(tx_hash)
+
+    chain.get_transaction_receipt = receipt
+    return real
+
+
+def age(test_db, seconds):
+    test_db.execute("UPDATE evm_transactions SET sent_at = sent_at - ?", (seconds,))
+
+
+def test_a_tx_mined_while_the_round_reconciles_does_not_stall_the_queue(batcher, chain):
+    (x,) = queue(batcher, 1)
+    batcher.run_round()
+    (y,) = [submit(CHAIN_ID, intent(owner="swap:y:lifi", data="0xbeef"))]
+    real = mine_during_receipt_lookup(chain)
+    refuse_used_nonces(chain)
+
+    batcher.run_round()
+    chain.get_transaction_receipt = real
+    chain.auto_mine = True
+    batcher.run_round()
+
+    assert (result(x)["status"], result(y)["status"]) == ("mined", "mined")
+
+
+def test_a_lagging_nonce_count_does_not_reuse_a_mined_nonce(batcher, chain):
+    (x,) = queue(batcher, 1)
+    chain.auto_mine = True
+    batcher.run_round()
+    (y,) = [submit(CHAIN_ID, intent(owner="swap:y:lifi", data="0xbeef"))]
+    real = chain.get_transaction_count
+    stale = [0]
+    chain.get_transaction_count = lambda address, block="latest": stale.pop() if stale else real(address, block)
+    refuse_used_nonces(chain)
+
+    batcher.run_round()
+
+    assert result(x)["nonce"] == 0
+    assert (result(y)["status"], result(y)["nonce"]) == ("mined", 1)
+
+
+def test_an_identical_tx_is_never_settled_by_another_rows_receipt(batcher, chain):
+    (x,) = [submit(CHAIN_ID, intent(owner="swap:x:deposit"))]
+    batcher.run_round()
+    (y,) = [submit(CHAIN_ID, intent(owner="swap:y:deposit"))]
+    real = mine_during_receipt_lookup(chain)
+    refuse_used_nonces(chain)
+
+    batcher.run_round()
+    chain.get_transaction_receipt = real
+    chain.auto_mine = True
+    batcher.run_round()
+
+    assert len(chain.sent) == 2
+    assert result(x)["tx_hash"] != result(y)["tx_hash"]
+
+
+def test_a_nonce_another_sender_took_fails_the_tx_and_frees_the_queue(batcher, chain, test_db):
+    (stuck,) = queue(batcher, 1)
+    batcher.run_round()
+    # Someone else's tx used nonce 0; ours can never be mined.
+    chain.pool.clear()
+    chain.mined_count = 1
+    batcher.run_round()
+    assert result(stuck)["status"] == "queued"
+    age(test_db, module.STUCK_AFTER_SEC + 1)
+    (behind,) = [submit(CHAIN_ID, intent(owner="swap:b:lifi", data="0xbeef"))]
+    chain.auto_mine = True
+
+    batcher.run_round()
+
+    # Failed with its attempts: never signed again, so never sent twice.
+    assert (result(stuck)["status"], len(result(stuck)["attempts"].split())) == ("failed", 1)
+    assert result(behind)["status"] == "mined"
+
+
+def test_a_retry_the_node_keeps_refusing_fails_once_stuck(batcher, chain, test_db):
+    (tx_id,) = queue(batcher, 1)
+    batcher.run_round()
+    chain.pool.clear()
+    chain.refuse = [Web3RPCError("insufficient funds for gas * price + value")]
+    batcher.run_round()
+    assert result(tx_id)["status"] == "queued"
+    age(test_db, module.STUCK_AFTER_SEC + 1)
+
+    batcher.run_round()
+
+    assert result(tx_id)["status"] == "failed"
+
+
+def test_a_retry_outbids_the_attempt_the_node_still_holds(batcher, chain):
+    (tx_id,) = queue(batcher, 1)
+    batcher.run_round()
+    first = TypedTransaction.from_bytes(HexBytes(chain.sent[0])).as_dict()
+
+    batcher.run_round()
+
+    retry = TypedTransaction.from_bytes(HexBytes(chain.sent[1])).as_dict()
+    assert retry["nonce"] == first["nonce"]
+    for fee in ("maxFeePerGas", "maxPriorityFeePerGas"):
+        assert retry[fee] >= first[fee] * 1.125
+
+
+def test_a_simulation_the_node_rejects_fails_the_tx_unsigned(batcher, chain):
+    (doomed,) = [submit(CHAIN_ID, intent(owner="swap:a:lifi", data="0xpoor"))]
+    real = chain.call
+    chain.call = lambda tx, *a: (_ for _ in ()).throw(Web3RPCError("insufficient funds for transfer")) \
+        if tx["data"] == "0xpoor" else real(tx, *a)
+
+    batcher.run_round()
+
+    assert (result(doomed)["status"], result(doomed)["attempts"]) == ("failed", None)
+    assert "insufficient funds for transfer" in result(doomed)["error"]
+
+
+def test_only_exact_already_known_replies_count_as_sent(batcher, chain):
+    ids = queue(batcher, 4)
+    chain.refuse = [Web3RPCError(m) for m in ("already known", "known transaction", "AlreadyKnown", "unknown block")]
+
+    batcher.run_round()
+
+    assert [result(i)["status"] for i in ids] == ["queued", "queued", "queued", "failed"]
+
+
+def test_a_round_without_progress_sleeps_instead_of_spinning(batcher, chain, monkeypatch):
+    monkeypatch.setattr(module, "IDLE_INTERVAL_SEC", 0.05)
+    queue(batcher, 1)
+    batcher.run_round()
+    chain.pool.clear()
+    chain.mined_count = 1
+    reads = []
+    real = chain.get_transaction_count
+    chain.get_transaction_count = lambda *a: reads.append(1) or real(*a)
+    stop = threading.Event()
+    threading.Timer(0.2, stop.set).start()
+
+    batcher.run(stop)
+
+    assert len(reads) <= 10
+
+
+def test_a_failed_send_is_logged_without_its_rpc_url(batcher, chain, caplog):
+    queue(batcher, 1)
+    chain.refuse = [ConnectionError("https://rpc.example/v2/SECRETKEY timed out")]
+
+    with caplog.at_level("WARNING", logger="src.clients.evm_batcher"):
+        batcher.run_round()
+
+    logged = " ".join(r.getMessage() for r in caplog.records)
+    assert "ConnectionError: [url] timed out" in logged
+    assert "SECRETKEY" not in logged

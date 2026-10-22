@@ -14,10 +14,15 @@ from src.core.db import db_write, get_db
 
 logger = logging.getLogger(__name__)
 
-BATCH_SIZE = 32
+BATCH_SIZE = 10
 IDLE_INTERVAL_SEC = 2.0
-RECEIPT_POLL_SEC = 2.0
+RECEIPT_POLL_SEC = 1.0
 RECEIPT_TIMEOUT_SEC = 120.0
+
+# What became of a tx a round tried to send.
+SENT = "sent"
+SKIPPED = "skipped"
+STOPPED = "stopped"
 
 
 @dataclass(frozen=True)
@@ -107,9 +112,9 @@ class EvmBatcher:
         sent, last_hash = [], None
         for row in unsent:
             outcome = await self._send(row, nonce, fees)
-            if outcome == "stop":
+            if outcome == STOPPED:
                 break
-            if outcome == "sent":
+            if outcome == SENT:
                 sent.append(row)
                 last_hash = self._attempts(self.result(row["id"]))[-1][1]
                 nonce += 1
@@ -138,7 +143,11 @@ class EvmBatcher:
                 await asyncio.to_thread(self.evm.w3.eth.call, call)
             except ContractLogicError as exc:
                 self._finish(row["id"], "failed", error=f"simulation reverted: {exc}")
-                return "skipped"
+                return SKIPPED
+            except Exception as exc:
+                # The RPC, not the tx: what this round already sent is still awaited.
+                logger.warning("evm batcher %s simulation at nonce %d failed: %s", self.chain_id, nonce, type(exc).__name__)
+                return STOPPED
         tx_hash, raw = await asyncio.to_thread(self.evm.sign, tx)
         # Saved before broadcast: a later round checks it for a receipt before signing again.
         db_write(
@@ -152,20 +161,20 @@ class EvmBatcher:
         except Web3RPCError as exc:
             message = str(exc).lower()
             if "already known" in message:
-                return "sent"
+                return SENT
             # A retry's earlier attempt may still be mined, so it is never failed here.
             if "nonce" in message or "underpriced" in message or row["attempts"]:
                 logger.info("evm batcher %s nonce %d not taken, retrying next round", self.chain_id, nonce)
-                return "stop"
+                return STOPPED
             # The node refused it outright, so the nonce stays free for the next tx.
             self._finish(row["id"], "failed", error=str(exc))
-            return "skipped"
+            return SKIPPED
         except Exception as exc:
             # It may have reached the node: the next round looks for its receipt.
             logger.warning("evm batcher %s broadcast at nonce %d failed: %s", self.chain_id, nonce, type(exc).__name__)
-            return "stop"
+            return STOPPED
         logger.info("evm batcher %s sent %s for %s at nonce %d", self.chain_id, tx_hash, row["owner"], nonce)
-        return "sent"
+        return SENT
 
     async def _settle(self, row: dict, used: Optional[int]) -> Optional[bool]:
         """Whether one of the row's attempts was mined, recording its receipt.

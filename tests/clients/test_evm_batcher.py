@@ -16,6 +16,10 @@ KEY = "0x" + "11" * 32
 TARGET = "0x" + "dd" * 20
 
 
+class Unreachable(ConnectionError):
+    """The RPC did not answer."""
+
+
 class FakeChain:
     """A node that takes txs and mines them only when told to, or on its own
     once `auto_mine` is set."""
@@ -42,6 +46,8 @@ class FakeChain:
         return {"baseFeePerGas": self.base_fee}
 
     def call(self, tx, *_):
+        if tx["data"] == "0xdown":
+            raise Unreachable("rpc timed out")
         if tx["data"] in self.reverting_calls:
             raise ContractLogicError("execution reverted")
         return b""
@@ -348,3 +354,42 @@ async def test_startup_starts_only_chains_with_queued_lp_txs(test_db, monkeypatc
     await asyncio.wait_for(started.wait(), timeout=5)
 
     assert asked == [8453, 8453]
+
+
+async def test_an_rpc_failure_mid_batch_still_settles_what_was_sent(batcher, chain):
+    sent_first = batcher.submit(intent(owner="swap:a:lifi"))
+    unreachable = batcher.submit(intent(owner="swap:b:lifi", data="0xdown"))
+    chain.auto_mine = True
+
+    await batcher.run_round()
+
+    assert batcher.result(sent_first)["status"] == "mined"
+    assert batcher.result(unreachable)["status"] == "queued"
+    assert batcher.result(unreachable)["attempts"] is None
+
+
+async def test_an_rpc_failure_before_sending_leaves_the_queue_for_the_next_round(batcher, chain, monkeypatch):
+    (tx_id,) = queue(batcher, 1)
+    monkeypatch.setattr(chain, "get_transaction_count", lambda *a: (_ for _ in ()).throw(Unreachable("rpc down")))
+
+    with pytest.raises(Unreachable):
+        await batcher.run_round()
+
+    assert batcher.result(tx_id)["status"] == "queued"
+    assert chain.sent == []
+
+
+async def test_a_lost_receipt_lookup_resends_nothing_once_the_rpc_is_back(batcher, chain, monkeypatch):
+    (tx_id,) = queue(batcher, 1)
+    real = chain.get_transaction_receipt
+    monkeypatch.setattr(chain, "get_transaction_receipt", lambda h: (_ for _ in ()).throw(Unreachable("rpc down")))
+    with pytest.raises(Unreachable):
+        await batcher.run_round()
+    chain.mine()
+    monkeypatch.setattr(chain, "get_transaction_receipt", real)
+    sent = list(chain.sent)
+
+    await batcher.run_round()
+
+    assert chain.sent == sent
+    assert batcher.result(tx_id)["status"] == "mined"

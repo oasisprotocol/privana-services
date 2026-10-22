@@ -626,18 +626,7 @@ def rpc_error(message, code=-32000):
                         rpc_response={"jsonrpc": "2.0", "id": 1, "error": {"code": code, "message": message}})
 
 
-@pytest.mark.parametrize("reply", ["already known", "Known transaction: 0xab", "AlreadyKnown"])
-def test_a_node_reply_that_it_holds_the_tx_counts_as_sent(batcher, chain, reply):
-    first, second = queue(batcher, 2)
-    chain.refuse = [rpc_error(reply)]
-
-    batcher.run_round()
-
-    assert [nonce_of(raw) for raw in chain.sent] == [1]
-    assert result(second)["attempts"].startswith("1:")
-
-
-@pytest.mark.parametrize("reply", ["unknown transaction", "context deadline exceeded", "limit exceeded"])
+@pytest.mark.parametrize("reply", ["already known", "unknown transaction", "context deadline exceeded", "limit exceeded"])
 def test_a_reply_that_may_hide_a_taken_tx_is_tried_again_at_its_nonce(batcher, chain, test_db, reply):
     (tx_id,) = queue(batcher, 1)
     chain.refuse = [rpc_error(reply)]
@@ -761,18 +750,6 @@ def test_a_call_that_fails_as_built_fails_the_tx_unsigned(batcher, chain, reply)
 
     assert (result(doomed)["status"], result(doomed)["attempts"]) == ("failed", None)
     assert result(fine)["attempts"].startswith("0:")
-
-
-def test_a_retry_refused_for_its_gas_fails_since_no_attempt_could_be_taken(batcher, chain, test_db):
-    tx_id = submit(CHAIN_ID, intent(owner="swap:a:lifi", simulate=False))
-    chain.refuse = [ConnectionError("response lost")]
-    batcher.run_round()
-    age(test_db, module.RECEIPT_TIMEOUT_SEC + 1)
-    chain.refuse = [rpc_error("intrinsic gas too low")]
-
-    batcher.run_round()
-
-    assert result(tx_id)["status"] == "failed"
 
 
 def test_a_held_version_outbid_by_the_market_tip_is_signed_again(batcher, chain, test_db):

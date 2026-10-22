@@ -189,7 +189,6 @@ MIGRATIONS = [
         updated_at INTEGER NOT NULL
     );
     """,
-    "CREATE INDEX IF NOT EXISTS idx_evm_tx_queue ON evm_transactions(chain_id, address, status, id);",
 ]
 
 

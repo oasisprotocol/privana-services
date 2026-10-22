@@ -39,15 +39,10 @@ SENT = "sent"
 SKIPPED = "skipped"
 STOPPED = "stopped"
 
-# Node replies meaning it already holds the tx.
-ALREADY_KNOWN = ("already known", "alreadyknown")
-KNOWN_TRANSACTION = "known transaction"
 # Node replies meaning it will never take the tx as signed. Any other reply
 # may come from a node that took it anyway, so the tx is tried again later at
 # the same nonce instead of being failed.
 REFUSED = ("insufficient funds", "intrinsic gas too low", "exceeds block gas limit")
-# Of those, the ones every attempt gets alike, since each has the same gas.
-GAS_REFUSED = ("intrinsic gas too low", "exceeds block gas limit")
 # Simulation replies meaning the call fails as built, though not by a revert.
 CALL_FAILED = ("out of gas", "invalid opcode", "stack underflow", "stack overflow")
 # A key can sit in a URL or, in a requests error, in the path after "url: ".
@@ -196,16 +191,10 @@ class EvmBatcher:
             (f"{nonce}:{tx_hash}", int(time.time()), row["id"]),
         )
         try:
-            self.evm.broadcast(raw)
+            self.evm.w3.eth.send_raw_transaction(raw)
         except Web3RPCError as exc:
-            message = _rpc_message(exc)
-            if any(phrase in message for phrase in ALREADY_KNOWN) or message.startswith(KNOWN_TRANSACTION):
-                logger.info("evm batcher %s node already holds %s at nonce %d", self.chain_id, tx_hash, nonce)
-                return SENT
-            # A retry's earlier attempt may still be mined, so it is failed only
-            # on a refusal every attempt got alike.
-            refused = GAS_REFUSED if row["attempts"] else REFUSED
-            if not any(phrase in message for phrase in refused):
+            # A retry is never failed: its earlier attempt may still be mined.
+            if row["attempts"] or not any(phrase in _rpc_message(exc) for phrase in REFUSED):
                 logger.info("evm batcher %s send at nonce %d not taken (%s), retrying in a later round",
                             self.chain_id, nonce, _error(exc))
                 return STOPPED
@@ -273,8 +262,8 @@ class EvmBatcher:
         db_write(
             self.db,
             "UPDATE evm_transactions SET status = ?, tx_hash = ?, nonce = ?, logs = ?, error = ?, "
-            "updated_at = ? WHERE id = ? AND status = ?",
-            (status, tx_hash, nonce, logs, error, int(time.time()), tx_id, QUEUED),
+            "updated_at = ? WHERE id = ?",
+            (status, tx_hash, nonce, logs, error, int(time.time()), tx_id),
         )
         logger.info("evm batcher %s tx %d %s%s", self.chain_id, tx_id, status,
                     f": {error}" if error else f" as {tx_hash}")

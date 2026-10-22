@@ -191,38 +191,41 @@ MIGRATIONS = [
 ]
 
 
+def connect(db_path: Optional[Path] = None) -> sqlite3.Connection:
+    """A new connection. A thread other than the event loop's opens its own:
+    one connection shared across threads returns wrong rows."""
+    path = db_path or _DB_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(path), check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA foreign_keys=ON")
+    return conn
+
+
 def get_db(db_path: Optional[Path] = None) -> sqlite3.Connection:
     global _connection
     if _connection is not None:
         return _connection
 
-    path = db_path or _DB_PATH
-    path.parent.mkdir(parents=True, exist_ok=True)
-
-    _connection = sqlite3.connect(str(path), check_same_thread=False)
-    _connection.row_factory = sqlite3.Row
-    _connection.execute("PRAGMA journal_mode=WAL")
-    _connection.execute("PRAGMA foreign_keys=ON")
-
+    _connection = connect(db_path)
     _run_migrations(_connection)
-    logger.info(f"Database initialized at {path}")
+    logger.info(f"Database initialized at {db_path or _DB_PATH}")
     return _connection
 
 
+# A failed write rolls back, so it never leaves a transaction holding the
+# database lock against another thread's connection.
 def db_write(conn: sqlite3.Connection, sql: str, params: tuple = ()) -> sqlite3.Cursor:
-    with _write_lock:
-        cursor = conn.execute(sql, params)
-        conn.commit()
-        return cursor
+    with _write_lock, conn:
+        return conn.execute(sql, params)
 
 
 def db_write_many(conn: sqlite3.Connection, sql: str, params: list[tuple]) -> int:
     if not params:
         return 0
-    with _write_lock:
-        cursor = conn.executemany(sql, params)
-        conn.commit()
-        return cursor.rowcount
+    with _write_lock, conn:
+        return conn.executemany(sql, params).rowcount
 
 
 def close_db() -> None:

@@ -26,10 +26,10 @@ class TestMigrations:
     def test_queued_evm_txs_get_increasing_ids(self, test_db):
         insert = (
             "INSERT INTO evm_transactions (chain_id, address, owner, to_address, data, value, gas, "
-            "created_at, updated_at) VALUES (8453, '0xlp', 'swap:a', '0xto', '0x', '0', 21000, 0, 0)"
+            "created_at, updated_at) VALUES (8453, '0xlp', ?, '0xto', '0x', '0', 21000, 0, 0)"
         )
-        first = test_db.execute(insert).lastrowid
-        second = test_db.execute(insert).lastrowid
+        first = test_db.execute(insert, ("swap:a",)).lastrowid
+        second = test_db.execute(insert, ("swap:b",)).lastrowid
         row = test_db.execute("SELECT status, simulate FROM evm_transactions WHERE id = ?", (first,)).fetchone()
         assert second > first
         assert (row["status"], row["simulate"]) == ("queued", 1)

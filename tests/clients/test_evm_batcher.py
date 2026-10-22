@@ -9,7 +9,7 @@ from web3.exceptions import ContractLogicError, TransactionNotFound, Web3RPCErro
 
 import src.clients.evm_batcher as module
 from src.clients.base_evm import EvmClient
-from src.clients.evm_batcher import EvmBatcher, TxIntent, result, submit
+from src.clients.evm_batcher import EvmBatcher, TxIntent, find_evm_tx, result, submit
 
 CHAIN_ID = 8453
 TARGET = "0x" + "dd" * 20
@@ -114,11 +114,33 @@ def intent(owner="swap:a:lifi", **fields):
 
 
 def queue(batcher, count, **fields):
-    return [submit(CHAIN_ID, intent(owner=f"swap:{i}:lifi", **fields)) for i in range(count)]
+    return [submit(CHAIN_ID, intent(owner=f"swap:{i}:lifi", **fields))[0] for i in range(count)]
+
+
+def test_submitting_an_owner_again_keeps_its_one_tx(batcher, test_db):
+    (first,) = submit(CHAIN_ID, intent(owner="swap:a:lifi"))
+    (again,) = submit(CHAIN_ID, intent(owner="swap:a:lifi", data="0xother"))
+
+    assert again == first
+    assert result(first)["data"] == "0x"
+    assert test_db.execute("SELECT COUNT(*) FROM evm_transactions").fetchone()[0] == 1
+
+
+def test_txs_submitted_together_get_consecutive_ids(batcher):
+    approve, swap = submit(CHAIN_ID, intent(owner="swap:a:approve"), intent(owner="swap:a:lifi"))
+
+    assert swap == approve + 1
+
+
+def test_a_tx_is_found_by_its_owner(batcher):
+    (tx_id,) = submit(CHAIN_ID, intent(owner="swap:a:deposit"))
+
+    assert find_evm_tx("swap:a:deposit")["id"] == tx_id
+    assert find_evm_tx("swap:b:deposit") is None
 
 
 def test_submit_only_queues_the_tx(batcher, chain):
-    tx_id = submit(CHAIN_ID, TxIntent(owner="swap:a:deposit", to=TARGET, gas=65_000, data="0xabcd", value=5))
+    (tx_id,) = submit(CHAIN_ID, TxIntent(owner="swap:a:deposit", to=TARGET, gas=65_000, data="0xabcd", value=5))
 
     row = result(tx_id)
     assert (row["status"], row["owner"], row["data"], row["value"], row["gas"]) == (
@@ -216,8 +238,8 @@ def test_a_used_nonce_without_a_receipt_yet_holds_the_round(batcher, chain):
 
 
 def test_a_tx_whose_simulation_reverts_fails_without_using_a_nonce(batcher, chain):
-    doomed = submit(CHAIN_ID, intent(owner="swap:a:lifi", data="0xdead"))
-    fine = submit(CHAIN_ID, intent(owner="swap:b:lifi"))
+    (doomed,) = submit(CHAIN_ID, intent(owner="swap:a:lifi", data="0xdead"))
+    (fine,) = submit(CHAIN_ID, intent(owner="swap:b:lifi"))
     chain.reverting_calls.add("0xdead")
 
     batcher.run_round()
@@ -228,7 +250,7 @@ def test_a_tx_whose_simulation_reverts_fails_without_using_a_nonce(batcher, chai
 
 
 def test_a_dependent_tx_skips_simulation(batcher, chain):
-    tx_id = submit(CHAIN_ID, intent(data="0xdead", simulate=False))
+    (tx_id,) = submit(CHAIN_ID, intent(data="0xdead", simulate=False))
     chain.reverting_calls.add("0xdead")
 
     batcher.run_round()
@@ -296,8 +318,8 @@ def test_an_empty_queue_asks_the_node_nothing(batcher, chain, monkeypatch):
 
 
 def test_an_rpc_failure_mid_batch_still_settles_what_was_sent(batcher, chain):
-    sent_first = submit(CHAIN_ID, intent(owner="swap:a:lifi"))
-    unreachable = submit(CHAIN_ID, intent(owner="swap:b:lifi", data="0xdown"))
+    (sent_first,) = submit(CHAIN_ID, intent(owner="swap:a:lifi"))
+    (unreachable,) = submit(CHAIN_ID, intent(owner="swap:b:lifi", data="0xdown"))
     chain.auto_mine = True
 
     batcher.run_round()
@@ -429,7 +451,7 @@ def executed(chain, tx_id):
 def test_a_tx_mined_while_the_round_reconciles_does_not_stall_the_queue(batcher, chain):
     (x,) = queue(batcher, 1)
     batcher.run_round()
-    (y,) = [submit(CHAIN_ID, intent(owner="swap:y:lifi", data="0xbeef"))]
+    (y,) = submit(CHAIN_ID, intent(owner="swap:y:lifi", data="0xbeef"))
     real = mine_during_receipt_lookup(chain)
     refuse_used_nonces(chain)
 
@@ -445,7 +467,7 @@ def test_a_lagging_nonce_count_does_not_reuse_a_mined_nonce(batcher, chain):
     (x,) = queue(batcher, 1)
     chain.auto_mine = True
     batcher.run_round()
-    (y,) = [submit(CHAIN_ID, intent(owner="swap:y:lifi", data="0xbeef"))]
+    (y,) = submit(CHAIN_ID, intent(owner="swap:y:lifi", data="0xbeef"))
     real = chain.get_transaction_count
     stale = [0]
     chain.get_transaction_count = lambda address, block="latest": stale.pop() if stale else real(address, block)
@@ -458,9 +480,9 @@ def test_a_lagging_nonce_count_does_not_reuse_a_mined_nonce(batcher, chain):
 
 
 def test_an_identical_tx_is_never_settled_by_another_rows_receipt(batcher, chain):
-    (x,) = [submit(CHAIN_ID, intent(owner="swap:x:deposit"))]
+    (x,) = submit(CHAIN_ID, intent(owner="swap:x:deposit"))
     batcher.run_round()
-    (y,) = [submit(CHAIN_ID, intent(owner="swap:y:deposit"))]
+    (y,) = submit(CHAIN_ID, intent(owner="swap:y:deposit"))
     real = mine_during_receipt_lookup(chain)
     refuse_used_nonces(chain)
 
@@ -482,7 +504,7 @@ def test_a_nonce_another_sender_took_fails_the_tx_and_frees_the_queue(batcher, c
     batcher.run_round()
     assert result(stuck)["status"] == "queued"
     batcher._used_since[stuck] -= module.STUCK_AFTER_SEC + 1
-    (behind,) = [submit(CHAIN_ID, intent(owner="swap:b:lifi", data="0xbeef"))]
+    (behind,) = submit(CHAIN_ID, intent(owner="swap:b:lifi", data="0xbeef"))
     chain.auto_mine = True
 
     batcher.run_round()
@@ -609,7 +631,7 @@ def test_a_held_version_that_can_still_be_mined_is_not_signed_again(batcher, cha
     assert len(chain.sent) == 1
 
 def test_a_simulation_the_node_rejects_fails_the_tx_unsigned(batcher, chain):
-    (doomed,) = [submit(CHAIN_ID, intent(owner="swap:a:lifi", data="0xpoor"))]
+    (doomed,) = submit(CHAIN_ID, intent(owner="swap:a:lifi", data="0xpoor"))
     real = chain.call
     chain.call = lambda tx, *a: (_ for _ in ()).throw(Web3RPCError("insufficient funds for transfer")) \
         if tx["data"] == "0xpoor" else real(tx, *a)
@@ -741,8 +763,8 @@ def test_a_tx_mined_long_after_it_was_sent_is_not_failed_when_its_receipt_lags(b
 
 @pytest.mark.parametrize("reply", ["out of gas", "invalid opcode: INVALID", "stack underflow (0 <=> 1)"])
 def test_a_call_that_fails_as_built_fails_the_tx_unsigned(batcher, chain, reply):
-    doomed = submit(CHAIN_ID, intent(owner="swap:a:lifi", data="0xbad0"))
-    fine = submit(CHAIN_ID, intent(owner="swap:b:lifi"))
+    (doomed,) = submit(CHAIN_ID, intent(owner="swap:a:lifi", data="0xbad0"))
+    (fine,) = submit(CHAIN_ID, intent(owner="swap:b:lifi"))
     real = chain.call
     chain.call = lambda tx, *a: (_ for _ in ()).throw(rpc_error(reply)) if tx["data"] == "0xbad0" else real(tx, *a)
 

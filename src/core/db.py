@@ -189,6 +189,9 @@ MIGRATIONS = [
         updated_at INTEGER NOT NULL
     );
     """,
+    # One tx per owner, so a caller resubmitting after a restart finds its tx
+    # instead of queuing a second one.
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_evm_tx_owner ON evm_transactions(owner);",
 ]
 
 

@@ -11,7 +11,7 @@ from web3.exceptions import ContractLogicError, TransactionNotFound, Web3RPCErro
 
 from src.clients.base_evm import RPC_SETTINGS, EvmClient
 from src.core.config import load_settings
-from src.core.db import connect, db_write, get_db
+from src.core.db import connect, db_write, db_write_many, get_db
 from src.core.validation import URL_PATTERN
 
 logger = logging.getLogger(__name__)
@@ -287,16 +287,28 @@ def _error(exc: Exception) -> str:
     return f"{type(exc).__name__}: {_RPC_PATH.sub('[url]', URL_PATTERN.sub('[url]', str(exc)))}"
 
 
-def submit(chain_id: int, intent: TxIntent) -> int:
-    """Queue `intent` for the LP account's batcher on `chain_id` and return its id."""
+def submit(chain_id: int, *intents: TxIntent) -> list[int]:
+    """Queue `intents` for the LP account's batcher on `chain_id` in one write,
+    so they get consecutive ids and go out in that order, and return their ids.
+    An owner already queued keeps its tx: submitting again after a restart
+    sends nothing twice."""
     now = int(time.time())
-    return db_write(
+    address = load_settings().liquidity_provider_address.lower()
+    db_write_many(
         get_db(),
         "INSERT INTO evm_transactions (chain_id, address, owner, to_address, data, value, gas, "
-        "simulate, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (chain_id, load_settings().liquidity_provider_address.lower(), intent.owner, intent.to,
-         intent.data, str(intent.value), intent.gas, int(intent.simulate), now, now),
-    ).lastrowid
+        "simulate, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(owner) DO NOTHING",
+        [(chain_id, address, i.owner, i.to, i.data, str(i.value), i.gas, int(i.simulate), now, now)
+         for i in intents],
+    )
+    return [find_evm_tx(i.owner)["id"] for i in intents]
+
+
+def find_evm_tx(owner: str) -> Optional[dict]:
+    """The tx queued for `owner`, on whichever chain."""
+    row = get_db().execute("SELECT * FROM evm_transactions WHERE owner = ?", (owner,)).fetchone()
+    return dict(row) if row else None
 
 
 def result(tx_id: int) -> Optional[dict]:

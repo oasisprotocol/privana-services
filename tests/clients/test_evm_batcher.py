@@ -506,13 +506,15 @@ def test_a_retry_the_node_refuses_waits_and_goes_out_once_taken(batcher, chain, 
     assert result(tx_id)["status"] == "mined"
 
 
-def test_a_tx_waits_out_the_receipt_window_before_it_is_signed_again(batcher, chain, test_db):
+def test_a_tx_waits_out_the_receipt_window_before_it_is_signed_again(batcher, chain, test_db, monkeypatch):
     (tx_id,) = queue(batcher, 1)
     batcher.run_round()
+    monkeypatch.setattr(module, "RECEIPT_TIMEOUT_SEC", 60)
     for _ in range(3):
         batcher.run_round()
     assert len(result(tx_id)["attempts"].split()) == 1
-    age(test_db, module.RECEIPT_TIMEOUT_SEC + 1)
+    age(test_db, 61)
+    monkeypatch.setattr(module, "RECEIPT_TIMEOUT_SEC", 0.05)
 
     batcher.run_round()
 

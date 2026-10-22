@@ -9,7 +9,15 @@ from typing import Optional
 from web3 import Web3
 from web3.exceptions import ContractLogicError, TransactionNotFound, Web3RPCError
 
-from src.clients.base_evm import RPC_SETTINGS, EvmClient
+from src.clients.base_evm import (
+    APPROVE_GAS_LIMIT,
+    ERC20_ABI,
+    NATIVE_TRANSFER_GAS_LIMIT,
+    RPC_SETTINGS,
+    TRANSFER_GAS_LIMIT,
+    EvmClient,
+    is_native,
+)
 from src.core.config import load_settings
 from src.core.db import connect, db_write, db_write_many, get_db
 from src.core.validation import URL_PATTERN
@@ -62,6 +70,22 @@ class TxIntent:
     data: str = "0x"
     value: int = 0
     simulate: bool = True
+
+
+_ERC20 = Web3().eth.contract(abi=ERC20_ABI)
+
+
+def transfer_intent(owner: str, token: Optional[str], to: str, amount: int) -> TxIntent:
+    """Send `amount` of `token`, or of the native coin when `token` is native."""
+    if is_native(token):
+        return TxIntent(owner=owner, to=to, gas=NATIVE_TRANSFER_GAS_LIMIT, value=amount)
+    data = _ERC20.encode_abi("transfer", args=[Web3.to_checksum_address(to), amount])
+    return TxIntent(owner=owner, to=token, gas=TRANSFER_GAS_LIMIT, data=data)
+
+
+def approve_intent(owner: str, token: str, spender: str, amount: int) -> TxIntent:
+    data = _ERC20.encode_abi("approve", args=[Web3.to_checksum_address(spender), amount])
+    return TxIntent(owner=owner, to=token, gas=APPROVE_GAS_LIMIT, data=data)
 
 
 class EvmBatcher:

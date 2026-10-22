@@ -6,8 +6,11 @@ import pytest
 from eth_abi import encode
 from eth_account import Account
 from hexbytes import HexBytes
+from web3 import Web3
 
+from src.clients import evm_batcher
 from src.core.config import load_settings
+from src.core.db import db_write, get_db
 from src.core.eip712 import sign_transfer
 from src.models.common import Balance, TokenInfo
 
@@ -91,15 +94,32 @@ def _stub_quote_service(lifi_enabled=True):
     return service
 
 
-def _sends(tx_hash, nonce, error=None):
-    """A send that hands over the signed tx before broadcast, then mines or
-    raises, as EvmClient does."""
-    def send(*_, on_signed):
-        on_signed(tx_hash, nonce, "0x02" + tx_hash[2:])
-        if error is not None:
-            raise error
-        return tx_hash
-    return send
+class _Batcher:
+    """The batcher's queue on the test DB with no chain behind it: a queued tx
+    is mined when polled, the swap with `swap_logs`, or reverted when
+    `lifi_reverts`."""
+
+    def __init__(self, swap_logs, lifi_reverts):
+        self.swap_logs = swap_logs
+        self.lifi_reverts = lifi_reverts
+
+    def submit(self, chain_id, *intents):
+        return evm_batcher.submit(chain_id, *intents)
+
+    def result(self, tx_id):
+        row = evm_batcher.result(tx_id)
+        if row["status"] == "queued":
+            swap = row["owner"].endswith(":lifi")
+            db_write(get_db(), "UPDATE evm_transactions SET status = ?, tx_hash = ?, nonce = ?, logs = ? WHERE id = ?",
+                     ("reverted" if swap and self.lifi_reverts else "mined", f"0x{tx_id:064x}", tx_id,
+                      Web3.to_json(self.swap_logs if swap else []), tx_id))
+        return evm_batcher.result(tx_id)
+
+
+def _kinds():
+    """What each queued tx is for, oldest first."""
+    rows = get_db().execute("SELECT owner FROM evm_transactions ORDER BY id")
+    return [row["owner"].rsplit(":", 1)[1] for row in rows]
 
 
 def _stub_pipeline(settings, lifi_reverts=False):
@@ -119,7 +139,6 @@ def _stub_pipeline(settings, lifi_reverts=False):
     bridge.withdraw_to_chain = AsyncMock(return_value=17)
     bridge.get_deposit_address = AsyncMock(return_value="0x" + "dd" * 20)
     bridge.await_deposit_credit = AsyncMock(return_value=None)
-    lifi_tx, deposit_tx = "0x" + "cd" * 32, "0x" + "ef" * 32
     diamond = EXEC_QUOTE["transactionRequest"]["to"]
     swapped = {
         "address": diamond,
@@ -129,18 +148,9 @@ def _stub_pipeline(settings, lifi_reverts=False):
             TO_INFO.token_address, 1000000, 60000,
         ]),
     }
-    lifi_receipt = {"status": 0, "to": diamond, "logs": []} if lifi_reverts else {
-        "status": 1, "to": diamond, "logs": [swapped]}
-    reverted = RuntimeError(f"transaction reverted: {lifi_tx}") if lifi_reverts else None
     evm = MagicMock()
-    evm.address = "0x152E6a7125665764a4F1F1df80E8f5D49Bf0239c"
+    evm.address = LP_ADDRESS
     evm.balance_of = MagicMock(return_value=1000000)
-    evm.ensure_allowance = MagicMock(return_value=None)
-    evm.send_transaction_request = MagicMock(side_effect=_sends(lifi_tx, 40, reverted))
-    evm.tx_lock = asyncio.Lock()
-    evm.transfer = MagicMock(side_effect=_sends(deposit_tx, 41))
-    evm.get_receipt = MagicMock(side_effect=lambda tx_hash: (
-        lifi_receipt if tx_hash == lifi_tx else {"status": 1, "to": None, "logs": []}))
     privana = MagicMock()
     privana.transfer_funds = AsyncMock(return_value=MagicMock(status="submitted", detail=None))
 
@@ -149,6 +159,7 @@ def _stub_pipeline(settings, lifi_reverts=False):
 
     pipeline = LifiSwapPipeline(
         accounting=accounting, lifi=lifi, bridge=bridge, evm=evm,
+        batcher=_Batcher([swapped], lifi_reverts),
         privana_factory=privana_factory, poll_interval_sec=0.0,
     )
     pipeline.settings = replace(settings, fee_bps=10)
@@ -226,8 +237,7 @@ class TestLifiSwapEndToEnd:
         credit = privana.transfer_funds.await_args.args[0]
         assert credit.to_address.lower() == USER.lower()
         assert (credit.token_id, credit.amount, credit.nonce) == (TO_TOKEN, 59940, 70)
-        pipeline.evm.send_transaction_request.assert_called_once()
-        pipeline.evm.transfer.assert_called_once()
+        assert _kinds() == ["approve", "lifi", "deposit"]
 
     async def test_lifi_failure_ends_refunded(self, api_client, settings):
         _stub_quote_service(lifi_enabled=True)
@@ -255,4 +265,4 @@ class TestLifiSwapEndToEnd:
         refund = privana.transfer_funds.await_args.args[0]
         assert refund.to_address.lower() == USER.lower()
         assert (refund.token_id, refund.amount, refund.nonce) == (FROM_TOKEN, 1000000, 70)
-        pipeline.evm.send_transaction_request.assert_called_once()
+        assert _kinds() == ["approve", "lifi", "refund"]

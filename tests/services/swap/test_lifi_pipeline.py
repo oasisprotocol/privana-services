@@ -3,7 +3,7 @@ import sqlite3
 import time
 import uuid
 from dataclasses import replace
-from unittest.mock import ANY, AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
@@ -11,6 +11,8 @@ from eth_abi import encode
 from hexbytes import HexBytes
 from web3 import Web3
 
+from src.clients import evm_batcher
+from src.clients.evm_batcher import TxIntent, transfer_intent
 from src.core.db import db_write, get_db
 from src.core.fees import calculate_fee
 from src.models.common import TokenInfo
@@ -20,6 +22,8 @@ POOL = "0x152E6a7125665764a4F1F1df80E8f5D49Bf0239c"
 DIAMOND = "0x1231DEB6f5749EF6cE6943a275A1D3E7486F4EaE"
 LIFI_TX = "0x" + "cd" * 32
 DEPOSIT_TX = "0x" + "ef" * 32
+APPROVE_TX = "0x" + "ab" * 32
+DEPOSIT_ADDRESS = "0x" + "dd" * 20
 FROM_TOKEN = "0x" + "aa" * 32
 TO_TOKEN = "0x" + "bb" * 32
 FROM_INFO = TokenInfo(
@@ -47,8 +51,6 @@ EXEC_QUOTE = {
 SWAP_COMPLETED = Web3.keccak(
     text="LiFiGenericSwapCompleted(bytes32,string,string,address,address,address,uint256,uint256)"
 )
-MINED = {"status": 1, "to": None, "logs": []}
-REVERTED = {"status": 0, "to": DIAMOND, "logs": []}
 
 
 def _swap_receipt(to_amount, token=TO_INFO.token_address, receiver=POOL, emitter=DIAMOND):
@@ -75,19 +77,10 @@ def _bridged(amount, chain_id=1, substatus="COMPLETED"):
     }
 
 
-def _raw(tx_hash):
-    """Fake signed bytes for `tx_hash`."""
-    return "0x02" + tx_hash[2:]
-
-
-def _sends(tx_hash, nonce, error=None):
-    """A send that hands over the signed tx before broadcast, then mines or raises."""
-    def send(*_, on_signed):
-        on_signed(tx_hash, nonce, _raw(tx_hash))
-        if error is not None:
-            raise error
-        return tx_hash
-    return send
+def _erc20(fn, to, amount):
+    """The calldata of an ERC-20 `fn(address,uint256)` call."""
+    selector = Web3.keccak(text=f"{fn}(address,uint256)")[:4]
+    return Web3.to_hex(selector + encode(["address", "uint256"], [to, amount]))
 
 
 def _in_turn(*sends):
@@ -108,19 +101,68 @@ def _reads(*values):
     return _in_turn(*(lambda *_, value=value: value for value in values))
 
 
-def _evm(receipts=None):
-    """The swap pool wallet on one chain: funded, and every send mines at once."""
-    receipts = {LIFI_TX: _swap_receipt(60000), **(receipts or {})}
+def _evm():
+    """The swap pool wallet on one chain, funded."""
     evm = MagicMock()
     evm.address = POOL
-    evm.tx_lock = asyncio.Lock()
     evm.balance_of = MagicMock(return_value=10**18)
     evm.max_gas_cost = MagicMock(return_value=10**15)
-    evm.ensure_allowance = MagicMock(return_value=None)
-    evm.send_transaction_request = MagicMock(side_effect=_sends(LIFI_TX, 40))
-    evm.transfer = MagicMock(side_effect=_sends(DEPOSIT_TX, 41))
-    evm.get_receipt = MagicMock(side_effect=lambda tx_hash: receipts.get(tx_hash, MINED))
     return evm
+
+
+class FakeBatcher:
+    """The batcher's real queue on the test DB, with no chain behind it: a
+    queued tx settles when it is polled, by `outcomes[kind]` (the owner's last
+    part). "mined" (the default) or "reverted" take the kind's hash and, for
+    the swap, `receipt`'s logs; "failed" fails it unsigned, "refused" fails it
+    after an attempt was signed; "queued" leaves it waiting."""
+
+    HASHES = {"lifi": LIFI_TX, "deposit": DEPOSIT_TX, "refund": DEPOSIT_TX, "approve": APPROVE_TX}
+
+    def __init__(self, receipt=None):
+        self.outcomes: dict[str, str] = {}
+        self.receipt = receipt or _swap_receipt(60000)
+
+    def submit(self, chain_id, *intents):
+        return evm_batcher.submit(chain_id, *intents)
+
+    def result(self, tx_id):
+        row = evm_batcher.result(tx_id)
+        kind = row["owner"].rsplit(":", 1)[1]
+        outcome = self.outcomes.get(kind, "mined")
+        if row["status"] != "queued" or outcome == "queued":
+            return row
+        if outcome == "failed":
+            _settle(tx_id, "failed", error="simulation failed")
+        elif outcome == "refused":
+            _settle(tx_id, "failed", error="insufficient funds", attempts=f"7:{self.HASHES[kind]}")
+        else:
+            logs = self.receipt["logs"] if kind == "lifi" else []
+            _settle(tx_id, outcome, tx_hash=self.HASHES[kind], nonce=7, logs=Web3.to_json(logs))
+        return evm_batcher.result(tx_id)
+
+
+def _settle(tx_id, status, tx_hash=None, nonce=None, logs=None, error=None, attempts=None):
+    db_write(get_db(), "UPDATE evm_transactions SET status = ?, tx_hash = ?, nonce = ?, logs = ?, "
+             "error = ?, attempts = COALESCE(?, attempts) WHERE id = ?",
+             (status, tx_hash, nonce, logs, error, attempts, tx_id))
+
+
+async def _recovered(pipeline):
+    """Recover in-flight swaps and wait for every runner it started."""
+    from src.services.swap.lifi_pipeline import recover_inflight_lifi_swaps
+    await recover_inflight_lifi_swaps(pipeline=pipeline)
+    await asyncio.gather(*pipeline._tasks.values())
+
+
+def _txs():
+    """The txs the pipeline queued, oldest first."""
+    return [dict(r) for r in get_db().execute("SELECT * FROM evm_transactions ORDER BY id")]
+
+
+def _kinds():
+    """What each queued tx is for, oldest first."""
+    return [tx["owner"].rsplit(":", 1)[1] for tx in _txs()]
 
 
 def _make_pipeline(settings):
@@ -136,10 +178,11 @@ def _make_pipeline(settings):
 
     bridge = MagicMock()
     bridge.withdraw_to_chain = AsyncMock(return_value=17)
-    bridge.get_deposit_address = AsyncMock(return_value="0x" + "dd" * 20)
+    bridge.get_deposit_address = AsyncMock(return_value=DEPOSIT_ADDRESS)
     bridge.await_deposit_credit = AsyncMock(return_value=None)
 
     evm = _evm()
+    batcher = FakeBatcher()
 
     privana = MagicMock()
     privana.transfer_funds = AsyncMock(return_value=MagicMock(status="submitted", detail=None))
@@ -148,7 +191,7 @@ def _make_pipeline(settings):
         return privana
 
     pipeline = LifiSwapPipeline(
-        accounting=accounting, lifi=lifi, bridge=bridge, evm=evm,
+        accounting=accounting, lifi=lifi, bridge=bridge, evm=evm, batcher=batcher,
         privana_factory=privana_factory, poll_interval_sec=0.0,
     )
     pipeline.settings = replace(settings, fee_bps=10)
@@ -263,7 +306,7 @@ class TestRun:
         swap_id = await self._launch_and_run(pipeline, _quote("q2"))
         row = dict(test_db.execute("SELECT * FROM swaps WHERE id=?", (swap_id,)).fetchone())
         assert row["status"] == "refunded"
-        pipeline.evm.send_transaction_request.assert_not_called()
+        assert _kinds() == ["refund"]
 
     async def test_credit_retries_until_accepted(self, test_db, settings, insert_quote):
         insert_quote("q4", venue="lifi", user_address=USER,
@@ -281,147 +324,24 @@ class TestRun:
         assert row["status"] == "completed"
         assert privana.transfer_funds.await_count == 3
 
-    async def test_a_reverted_deposit_transfer_is_resent(self, test_db, settings, insert_quote):
+    @pytest.mark.parametrize("outcome", ["reverted", "failed", "refused"])
+    async def test_a_deposit_that_is_not_mined_parks(
+        self, test_db, settings, insert_quote, outcome
+    ):
         insert_quote("q5", venue="lifi", user_address=USER,
                      from_token_id=FROM_TOKEN, to_token_id=TO_TOKEN)
         pipeline = _make_pipeline(settings)
-        reverted = "0x" + "e0" * 32
-        pipeline.evm = _evm({reverted: REVERTED})
-        pipeline.evm.transfer = MagicMock(side_effect=_in_turn(
-            _sends(reverted, 41, error=RuntimeError(f"transaction reverted: {reverted}")),
-            _sends(DEPOSIT_TX, 42),
-        ))
+        pipeline.batcher.outcomes["deposit"] = outcome
         swap_id = await self._launch_and_run(pipeline, _quote("q5"))
-        row = dict(test_db.execute("SELECT * FROM swaps WHERE id=?", (swap_id,)).fetchone())
-        assert row["status"] == "completed"
-        assert (row["deposit_tx_hash"], row["deposit_tx_raw"]) == (DEPOSIT_TX, _raw(DEPOSIT_TX))
-        assert pipeline.evm.transfer.call_count == 2
-        pipeline.bridge.await_deposit_credit.assert_awaited_once_with(
-            TO_INFO.chain_id, DEPOSIT_TX, 60000)
-
-    async def test_a_re_signed_deposit_is_credited_by_the_version_mined(
-        self, test_db, settings, insert_quote
-    ):
-        from src.clients.base_evm import TransactionPendingError
-        insert_quote("q9", venue="lifi", user_address=USER,
-                     from_token_id=FROM_TOKEN, to_token_id=TO_TOKEN)
-        pipeline = _make_pipeline(settings)
-        re_signed = "0x" + "e2" * 32
-        pipeline.evm.transfer = MagicMock(
-            side_effect=_sends(DEPOSIT_TX, 41, error=TransactionPendingError(DEPOSIT_TX)))
-        receipts = {LIFI_TX: _swap_receipt(60000)}
-
-        def rebroadcast(raw, on_signed):
-            on_signed(re_signed, 41, _raw(re_signed))
-            receipts[re_signed] = MINED
-        pipeline.evm.rebroadcast = MagicMock(side_effect=rebroadcast)
-        pipeline.evm.get_receipt = MagicMock(side_effect=receipts.get)
-        swap_id = await self._launch_and_run(pipeline, _quote("q9"))
-        row = _swap_row(swap_id)
-        assert row["status"] == "completed"
-        assert (row["deposit_tx_hash"], row["deposit_tx_replaced"]) == (re_signed, DEPOSIT_TX)
-        pipeline.evm.transfer.assert_called_once()
-        pipeline.bridge.await_deposit_credit.assert_awaited_once_with(
-            TO_INFO.chain_id, re_signed, 60000)
-
-    async def test_a_re_signed_deposit_whose_first_version_reverted_is_sent_anew(
-        self, test_db, settings, insert_quote
-    ):
-        from src.clients.base_evm import TransactionPendingError
-        insert_quote("q10", venue="lifi", user_address=USER,
-                     from_token_id=FROM_TOKEN, to_token_id=TO_TOKEN)
-        pipeline = _make_pipeline(settings)
-        first, re_signed = "0x" + "e1" * 32, "0x" + "e2" * 32
-        pipeline.evm.transfer = MagicMock(side_effect=_in_turn(
-            _sends(first, 41, error=TransactionPendingError(first)), _sends(DEPOSIT_TX, 42),
-        ))
-        receipts = {LIFI_TX: _swap_receipt(60000)}
-
-        def rebroadcast(raw, on_signed):
-            if raw == _raw(first):
-                on_signed(re_signed, 41, _raw(re_signed))
-                # The first version takes nonce 41, and reverts.
-                receipts[first] = REVERTED
-            else:
-                receipts[DEPOSIT_TX] = MINED
-        pipeline.evm.rebroadcast = MagicMock(side_effect=rebroadcast)
-        pipeline.evm.get_receipt = MagicMock(side_effect=receipts.get)
-        swap_id = await self._launch_and_run(pipeline, _quote("q10"))
-        row = _swap_row(swap_id)
-        assert row["status"] == "completed"
-        # The new transfer starts its own versions: the old revert never settles it.
-        assert (row["deposit_tx_hash"], row["deposit_tx_replaced"]) == (DEPOSIT_TX, None)
-        assert pipeline.evm.transfer.call_count == 2
-        pipeline.bridge.await_deposit_credit.assert_awaited_once_with(
-            TO_INFO.chain_id, DEPOSIT_TX, 60000)
-
-    async def test_a_deposit_transfer_that_never_signed_is_retried(
-        self, test_db, settings, insert_quote
-    ):
-        insert_quote("q7", venue="lifi", user_address=USER,
-                     from_token_id=FROM_TOKEN, to_token_id=TO_TOKEN)
-        pipeline = _make_pipeline(settings)
-        pipeline.evm.transfer = MagicMock(side_effect=_in_turn(
-            MagicMock(side_effect=ConnectionError("rpc down")), _sends(DEPOSIT_TX, 41),
-        ))
-        swap_id = await self._launch_and_run(pipeline, _quote("q7"))
-        assert _swap_row(swap_id)["status"] == "completed"
-        assert pipeline.evm.transfer.call_count == 2
-
-    async def test_a_lost_deposit_send_is_awaited_not_resent(
-        self, test_db, settings, insert_quote
-    ):
-        # The send's response is lost and the probed node lags: it lacks the tx
-        # and still reports nonce 7 free. A resend would take nonce 8 and pay twice.
-        from web3 import Web3
-        from web3.exceptions import TransactionNotFound
-
-        from src.clients.base_evm import EvmClient
-        insert_quote("q6", venue="lifi", user_address=USER,
-                     from_token_id=FROM_TOKEN, to_token_id=TO_TOKEN)
-        pipeline = _make_pipeline(settings)
-        client = EvmClient("http://localhost:1", "0x" + "11" * 32)
-        client.w3 = MagicMock()
-        client.w3.eth.max_priority_fee = 0
-        client.w3.eth.get_block.return_value = {"baseFeePerGas": 1}
-        token = client.w3.eth.contract.return_value
-        token.functions.transfer.return_value.build_transaction = lambda tx: tx
-        # The tx's nonce and the probe's latest and pending are 7. A resend gets 8.
-        nonces = iter([7, 7, 7])
-        client.w3.eth.get_transaction_count.side_effect = lambda *_: next(nonces, 8)
-        client.w3.eth.send_raw_transaction.side_effect = ValueError("already known")
-        client.w3.eth.get_transaction.side_effect = TransactionNotFound("unknown")
-        pipeline.evm.transfer = client.transfer
-        signed = MagicMock(raw_transaction=b"raw")
-        with patch.object(client._account, "sign_transaction", return_value=signed):
-            swap_id = await self._launch_and_run(pipeline, _quote("q6"))
-        row = dict(test_db.execute("SELECT * FROM swaps WHERE id=?", (swap_id,)).fetchone())
-        sent = Web3.to_hex(Web3.keccak(b"raw"))
-        assert row["status"] == "completed"
-        assert row["deposit_tx_hash"] == sent
-        client.w3.eth.send_raw_transaction.assert_called_once()
-        pipeline.bridge.await_deposit_credit.assert_awaited_once_with(
-            TO_INFO.chain_id, sent, 60000
-        )
-
-    async def test_a_deposit_whose_receipt_never_shows_is_not_sent_again(
-        self, test_db, settings, insert_quote
-    ):
-        # A lagging node shows no receipt for a mined deposit, and a second deposit pays twice.
-        insert_quote("q8", venue="lifi", user_address=USER,
-                     from_token_id=FROM_TOKEN, to_token_id=TO_TOKEN)
-        pipeline = _make_pipeline(settings)
-        pipeline._deposit_max_retries = 2
-        pipeline.evm.get_receipt = MagicMock(
-            side_effect=lambda tx_hash: None if tx_hash == DEPOSIT_TX else _swap_receipt(60000))
-        swap_id = await self._launch_and_run(pipeline, _quote("q8"))
         row = _swap_row(swap_id)
         assert row["status"] == "failed"
-        assert "deposit retries exhausted" in row["error"]
         assert row["error"].endswith("manual recovery required")
-        assert row["deposit_tx_hash"] == DEPOSIT_TX
-        pipeline.evm.transfer.assert_called_once()
+        assert (row["step"], row["deposit_tx_hash"]) == ("deposit", None)
+        # The output stays in the wallet: no second deposit, no refund.
+        assert _kinds() == ["approve", "lifi", "deposit"]
         pipeline.bridge.await_deposit_credit.assert_not_awaited()
+        privana = await pipeline._privana_factory()
+        assert privana.transfer_funds.await_count == 1
 
 
 def _min_at(to_amount, slippage_bps):
@@ -493,7 +413,7 @@ class TestSlippageFloor:
         assert row["status"] == "refunded"
         assert "execution quote below floor" in row["error"]
         assert pipeline.lifi.get_execution_quote.await_count == 1
-        pipeline.evm.send_transaction_request.assert_not_called()
+        assert _kinds() == ["refund"]
 
     async def test_a_drop_within_the_slippage_narrows_it_to_keep_the_floor(
         self, test_db, settings, insert_quote
@@ -530,7 +450,7 @@ class TestSlippageFloor:
 
         assert row["status"] == "refunded"
         assert "execution quote below floor" in row["error"]
-        pipeline.evm.send_transaction_request.assert_not_called()
+        assert _kinds() == ["refund"]
 
     async def test_a_quote_without_a_slippage_executes_at_lifis_default(
         self, test_db, settings, insert_quote
@@ -597,47 +517,47 @@ class TestRefund:
         insert_quote("q_e", venue="lifi", user_address=USER,
                      from_token_id=FROM_TOKEN, to_token_id=TO_TOKEN)
         pipeline = _make_pipeline(settings)
-        pipeline.evm.send_transaction_request = MagicMock(side_effect=ConnectionError("rpc down"))
+        # Its simulation reverted, so no attempt was ever signed.
+        pipeline.batcher.outcomes["lifi"] = "failed"
         pipeline.accounting.get_transfer_nonce = AsyncMock(side_effect=[6, 70, 71])
         pipeline.accounting.get_token_info = AsyncMock(
             side_effect=[FROM_INFO, TO_INFO, FROM_INFO])
         swap_id = await self._launch_and_run(pipeline, _quote("q_e"))
         row = dict(test_db.execute("SELECT * FROM swaps WHERE id=?", (swap_id,)).fetchone())
         assert row["status"] == "refunded"
-        pipeline.evm.transfer.assert_called_once()
-        pipeline.bridge.await_deposit_credit.assert_awaited_once()
+        assert _kinds() == ["approve", "lifi", "refund"]
+        pipeline.bridge.await_deposit_credit.assert_awaited_once_with(
+            FROM_INFO.chain_id, DEPOSIT_TX, 1000000)
 
     async def test_unconfirmed_redeposit_is_awaited_not_resent(self, test_db, settings, insert_quote):
-        from src.clients.base_evm import TransactionPendingError
         insert_quote("q_p", venue="lifi", user_address=USER,
                      from_token_id=FROM_TOKEN, to_token_id=TO_TOKEN)
         pipeline = _make_pipeline(settings)
-        pipeline.evm.send_transaction_request = MagicMock(side_effect=ConnectionError("rpc down"))
-        pending = "0x" + "aa" * 32
-        pipeline.evm.transfer = MagicMock(
-            side_effect=_sends(pending, 41, error=TransactionPendingError(pending)))
-        pipeline.accounting.get_transfer_nonce = AsyncMock(side_effect=[6, 70, 71])
-        pipeline.accounting.get_token_info = AsyncMock(
-            side_effect=[FROM_INFO, TO_INFO, FROM_INFO])
-        swap_id = await self._launch_and_run(pipeline, _quote("q_p"))
-        row = dict(test_db.execute("SELECT * FROM swaps WHERE id=?", (swap_id,)).fetchone())
-        assert row["status"] == "refunded"
-        pipeline.evm.transfer.assert_called_once()
+        pipeline.accounting.get_token_info = AsyncMock(return_value=FROM_INFO)
+        # The queued redeposit already moved the input out of the wallet.
+        pipeline.evm.balance_of = MagicMock(return_value=0)
+        swap_id = _seed_swap(test_db, _quote("q_p"))
+        pipeline._update_swap(swap_id, status="refunding", step="lifi_execute")
+        pipeline.batcher.submit(FROM_INFO.chain_id, transfer_intent(
+            f"swap:{swap_id}:refund", FROM_INFO.token_address, DEPOSIT_ADDRESS, 1000000))
+        await _recovered(pipeline)
+        assert _swap_row(swap_id)["status"] == "refunded"
+        assert _kinds() == ["refund"]
+        pipeline.bridge.get_deposit_address.assert_not_awaited()
         pipeline.bridge.await_deposit_credit.assert_awaited_once_with(
-            FROM_INFO.chain_id, pending, 1000000)
+            FROM_INFO.chain_id, DEPOSIT_TX, 1000000)
 
     async def test_deposit_exhaustion_fails_without_refund(self, test_db, settings, insert_quote):
         insert_quote("q_d", venue="lifi", user_address=USER,
                      from_token_id=FROM_TOKEN, to_token_id=TO_TOKEN)
         pipeline = _make_pipeline(settings)
-        pipeline._deposit_max_retries = 2
         pipeline.bridge.await_deposit_credit = AsyncMock(side_effect=RuntimeError("relay stuck"))
         swap_id = await self._launch_and_run(pipeline, _quote("q_d"))
         row = dict(test_db.execute("SELECT * FROM swaps WHERE id=?", (swap_id,)).fetchone())
         assert row["status"] == "failed"
-        assert "deposit" in row["error"]
-        pipeline.evm.transfer.assert_called_once()
-        assert pipeline.bridge.await_deposit_credit.await_count == 2
+        assert "relay stuck" in row["error"]
+        assert _kinds() == ["approve", "lifi", "deposit"]
+        pipeline.bridge.await_deposit_credit.assert_awaited_once()
 
     async def test_credit_exhaustion_fails_without_refund(self, test_db, settings, insert_quote):
         insert_quote("q_c", venue="lifi", user_address=USER,
@@ -677,14 +597,13 @@ class TestRecovery:
     async def test_inflight_swaps_routed_to_refund_or_failed(
         self, test_db, settings, insert_quote
     ):
-        from src.services.swap.lifi_pipeline import recover_inflight_lifi_swaps
         insert_quote("q_rec", venue="lifi", user_address=USER,
                      from_token_id=FROM_TOKEN, to_token_id=TO_TOKEN)
         self._insert_swap(test_db, "s_withdraw", "withdraw")
         self._insert_swap(test_db, "s_credit", "credit")
         pipeline = _make_pipeline(settings)
         pipeline._refund = AsyncMock()
-        await recover_inflight_lifi_swaps(pipeline=pipeline)
+        await _recovered(pipeline)
         refunded_ids = [c.args[0] for c in pipeline._refund.await_args_list]
         assert "s_withdraw" in refunded_ids
         credit_row = dict(test_db.execute("SELECT * FROM swaps WHERE id='s_credit'").fetchone())
@@ -827,14 +746,19 @@ class TestNativeCoins:
         await pipeline._run(swap_id, quote, 5)
         return dict(test_db.execute("SELECT * FROM swaps WHERE id=?", (swap_id,)).fetchone())
 
+    @staticmethod
+    def _per_chain(pipeline, monkeypatch, *chains):
+        """A wallet and a batcher on each of `chains`, as outside tests."""
+        pipeline.evm = None
+        clients = {chain: _evm() for chain in chains}
+        monkeypatch.setattr("src.services.swap.lifi_pipeline.get_evm_client", clients.__getitem__)
+        return clients, pipeline.batcher
+
     async def test_a_native_coin_goes_to_lifi_as_the_zero_address(
         self, test_db, settings, insert_quote, monkeypatch
     ):
         pipeline = _make_pipeline(settings)
-        pipeline.evm = None
-        hyperevm, base = _evm(), _evm()
-        clients = {999: hyperevm, 84532: base}
-        monkeypatch.setattr("src.services.swap.lifi_pipeline.get_evm_client", clients.__getitem__)
+        clients, _ = self._per_chain(pipeline, monkeypatch, 999, 84532)
         pipeline.accounting.get_token_info = AsyncMock(side_effect=[
             self._info(FROM_INFO, 999, ""), TO_INFO,
         ])
@@ -843,23 +767,21 @@ class TestNativeCoins:
         row = await self._run(pipeline, test_db, insert_quote)
 
         assert row["status"] == "completed"
-        call = pipeline.lifi.get_execution_quote.call_args.kwargs
-        assert call["from_token_address"] == self.NATIVE
-        assert call["from_chain_id"] == 999
-        # The swap is signed on HyperEVM; the output is returned on Base.
-        hyperevm.send_transaction_request.assert_called_once()
-        hyperevm.balance_of.assert_called_with("", POOL)
-        hyperevm.get_receipt.assert_any_call(LIFI_TX)
-        base.send_transaction_request.assert_not_called()
-        base.transfer.assert_called_once()
-        hyperevm.transfer.assert_not_called()
+        quoted = pipeline.lifi.get_execution_quote.call_args.kwargs
+        assert quoted["from_token_address"] == self.NATIVE
+        assert quoted["from_chain_id"] == 999
+        # The swap is sent on HyperEVM; the output is returned on Base.
+        assert [(tx["chain_id"], kind) for tx, kind in zip(_txs(), _kinds())] == [
+            (999, "lifi"), (84532, "deposit")]
+        clients[999].balance_of.assert_called_with("", POOL)
+        pipeline.lifi.get_status.assert_awaited_once_with(LIFI_TX, 999, 84532)
 
     async def test_native_output_on_the_same_chain_is_not_short_by_the_gas(
         self, test_db, settings, insert_quote
     ):
         pipeline = _make_pipeline(settings)
         # Gas moves the wallet balance, not the event.
-        pipeline.evm = _evm({LIFI_TX: _swap_receipt(60000, token=self.NATIVE)})
+        pipeline.batcher.receipt = _swap_receipt(60000, token=self.NATIVE)
         pipeline.accounting.get_token_info = AsyncMock(side_effect=[
             FROM_INFO, self._info(TO_INFO, 84532, ""),
         ])
@@ -875,12 +797,8 @@ class TestNativeCoins:
         self, test_db, settings, insert_quote, monkeypatch
     ):
         pipeline = _make_pipeline(settings)
-        pipeline.evm = None
-        hyperevm, base = _evm({LIFI_TX: REVERTED}), _evm()
-        hyperevm.send_transaction_request = MagicMock(
-            side_effect=_sends(LIFI_TX, 40, error=RuntimeError(f"transaction reverted: {LIFI_TX}")))
-        clients = {999: hyperevm, 84532: base}
-        monkeypatch.setattr("src.services.swap.lifi_pipeline.get_evm_client", clients.__getitem__)
+        _, batcher = self._per_chain(pipeline, monkeypatch, 999, 84532)
+        batcher.outcomes["lifi"] = "reverted"
         native = self._info(FROM_INFO, 999, None)
         pipeline.accounting.get_token_info = AsyncMock(side_effect=[native, TO_INFO, native])
         pipeline.accounting.get_transfer_nonce = AsyncMock(side_effect=[6, 70, 71])
@@ -888,25 +806,31 @@ class TestNativeCoins:
         row = await self._run(pipeline, test_db, insert_quote)
 
         assert row["status"] == "refunded"
-        hyperevm.transfer.assert_called_once()
-        assert hyperevm.transfer.call_args.args[0] is None
-        base.transfer.assert_not_called()
+        _, refund = _txs()
+        assert _kinds() == ["lifi", "refund"]
+        assert (refund["chain_id"], refund["to_address"], refund["value"], refund["data"]) == (
+            999, DEPOSIT_ADDRESS, "1000000", "0x")
 
 
 class TestSettleByOutcome:
-    """A sent LiFi tx settles by its receipt and LiFi's status, never by an error."""
+    """A LiFi tx settles by the batcher's row: its logs, or LiFi's status for a bridge."""
 
     async def test_a_receipt_after_the_send_timed_out_credits_and_never_refunds(
         self, settings, insert_quote
     ):
-        from src.clients.base_evm import TransactionPendingError
+        # The batcher's receipt wait timed out: the row stays queued until a later round.
         pipeline = _make_pipeline(settings)
-        pipeline.evm.send_transaction_request = MagicMock(
-            side_effect=_sends(LIFI_TX, 40, error=TransactionPendingError(LIFI_TX)))
-        # Behind a load-balanced RPC, the node asked can lag the block for many polls.
-        late = iter([None] * 20 + [_swap_receipt(60000)])
-        pipeline.evm.get_receipt = MagicMock(
-            side_effect=lambda tx_hash: next(late) if tx_hash == LIFI_TX else MINED)
+        pipeline.batcher.outcomes["lifi"] = "queued"
+        polls = 0
+        result = pipeline.batcher.result
+
+        def mined_after_twenty_polls(tx_id):
+            nonlocal polls
+            polls += 1
+            if polls > 20:
+                pipeline.batcher.outcomes["lifi"] = "mined"
+            return result(tx_id)
+        pipeline.batcher.result = mined_after_twenty_polls
         pipeline._refund = AsyncMock()
 
         row = await _swap(pipeline, insert_quote)
@@ -914,43 +838,22 @@ class TestSettleByOutcome:
         assert row["status"] == "completed"
         assert row["to_amount_actual"] == str(calculate_fee(60000, 10)[0])
         pipeline._refund.assert_not_awaited()
-        pipeline.evm.send_transaction_request.assert_called_once()
+        assert _kinds() == ["approve", "lifi", "deposit"]
         pipeline.bridge.await_deposit_credit.assert_awaited_once_with(
             TO_INFO.chain_id, DEPOSIT_TX, 60000)
 
-    async def test_the_tx_is_recorded_before_it_is_broadcast(self, settings, insert_quote):
-        pipeline = _make_pipeline(settings)
-        recorded = []
-
-        def send(*_, on_signed):
-            on_signed(LIFI_TX, 40, _raw(LIFI_TX))
-            row = _swap_row(swap_id)
-            recorded.append((row["lifi_tx_hash"], row["lifi_tx_raw"]))
-            return LIFI_TX
-        pipeline.evm.send_transaction_request = MagicMock(side_effect=send)
-        insert_quote("qb", venue="lifi", user_address=USER,
-                     from_token_id=FROM_TOKEN, to_token_id=TO_TOKEN)
-        quote = _quote("qb")
-        pipeline.spawn_background = MagicMock()
-        swap_id = _seed_swap(get_db(), quote)
-        await pipeline.launch(quote, USER, 5, "0x" + "ab" * 65, swap_id)
-
-        await pipeline._run(swap_id, quote, 5)
-
-        assert recorded == [(LIFI_TX, _raw(LIFI_TX))]
-
     async def test_a_reverted_lifi_tx_refunds_once(self, settings, insert_quote):
         pipeline = _make_pipeline(settings)
-        pipeline.evm = _evm({LIFI_TX: REVERTED})
-        pipeline.evm.send_transaction_request = MagicMock(
-            side_effect=_sends(LIFI_TX, 40, error=RuntimeError(f"transaction reverted: {LIFI_TX}")))
+        pipeline.batcher.outcomes["lifi"] = "reverted"
         pipeline.accounting.get_token_info = AsyncMock(side_effect=[FROM_INFO, TO_INFO, FROM_INFO])
 
         row = await _swap(pipeline, insert_quote)
 
         assert row["status"] == "refunded"
-        pipeline.evm.transfer.assert_called_once()
-        assert pipeline.evm.transfer.call_args.args[0] == FROM_INFO.token_address
+        *_, refund = _txs()
+        assert _kinds() == ["approve", "lifi", "refund"]
+        assert (refund["to_address"], refund["data"]) == (
+            FROM_INFO.token_address, _erc20("transfer", DEPOSIT_ADDRESS, 1000000))
         pipeline.bridge.await_deposit_credit.assert_awaited_once_with(
             FROM_INFO.chain_id, DEPOSIT_TX, 1000000)
         privana = await pipeline._privana_factory()
@@ -958,97 +861,23 @@ class TestSettleByOutcome:
         paid = [(p.to_address, p.token_id, p.amount) for p in payouts]
         assert paid == [(USER, FROM_TOKEN, 1000000)]
 
-    async def test_a_receipt_that_never_shows_parks(self, settings, insert_quote):
-        # A missing receipt cannot tell a dropped tx from a lagging node, whatever the nonce.
-        from src.clients.base_evm import TransactionPendingError
-        from src.services.swap.lifi_pipeline import TX_RECEIPT_POLLS
+    async def test_a_lifi_tx_that_failed_after_a_signed_attempt_parks(self, settings, insert_quote):
+        # A signed attempt may have reached a node and spent the input.
         pipeline = _make_pipeline(settings)
-        pipeline.evm.send_transaction_request = MagicMock(
-            side_effect=_sends(LIFI_TX, 40, error=TransactionPendingError(LIFI_TX)))
-        pipeline.evm.get_receipt = MagicMock(
-            side_effect=lambda tx_hash: None if tx_hash == LIFI_TX else MINED)
-        pipeline._refund = AsyncMock()
+        pipeline.batcher.outcomes["lifi"] = "refused"
 
         row = await _swap(pipeline, insert_quote)
 
         assert row["status"] == "failed"
-        assert "manual recovery required" in row["error"]
-        pipeline._refund.assert_not_awaited()
-        pipeline.evm.transfer.assert_not_called()
-        assert pipeline.evm.get_receipt.call_count == TX_RECEIPT_POLLS
-
-    async def test_a_tx_no_node_holds_is_sent_again_unchanged(self, settings, insert_quote):
-        pipeline = _make_pipeline(settings)
-        lost = iter([None, _swap_receipt(60000)])
-        pipeline.evm.get_receipt = MagicMock(
-            side_effect=lambda tx_hash: next(lost) if tx_hash == LIFI_TX else MINED)
-
-        row = await _swap(pipeline, insert_quote)
-
-        assert row["status"] == "completed"
-        pipeline.evm.rebroadcast.assert_called_once_with(_raw(LIFI_TX), ANY)
-        pipeline.evm.send_transaction_request.assert_called_once()
-
-    @pytest.mark.parametrize("mined", [LIFI_TX, "0x" + "c1" * 32], ids=["original", "re-signed"])
-    async def test_a_re_signed_tx_settles_by_the_version_mined(
-        self, settings, insert_quote, mined, caplog
-    ):
-        caplog.set_level("INFO")
-        # Cross-chain: LiFi reports the bridge by the source tx hash.
-        re_signed = "0x" + "c1" * 32
-        pipeline = _make_pipeline(settings)
-        pipeline.accounting.get_token_info = AsyncMock(
-            side_effect=[FROM_INFO, TO_INFO.model_copy(update={"chain_id": 1})])
-        pipeline.lifi.get_status = AsyncMock(return_value=_bridged(60000, chain_id=1))
-        receipts = {}
-
-        def rebroadcast(raw, on_signed):
-            on_signed(re_signed, 40, _raw(re_signed))
-            # Both versions hold nonce 40: whichever is mined settles the swap.
-            receipts[mined] = MINED
-        pipeline.evm.rebroadcast = MagicMock(side_effect=rebroadcast)
-        pipeline.evm.get_receipt = MagicMock(side_effect=lambda tx_hash: (
-            receipts.get(tx_hash) if tx_hash in (LIFI_TX, re_signed) else MINED))
-
-        row = await _swap(pipeline, insert_quote)
-
-        assert row["status"] == "completed"
-        # The version not mined stays a candidate, since a receipt is not final.
-        not_mined = re_signed if mined == LIFI_TX else LIFI_TX
-        assert (row["lifi_tx_hash"], row["lifi_tx_replaced"]) == (mined, not_mined)
-        assert row["lifi_tx_raw"] == _raw(re_signed)
-        pipeline.evm.rebroadcast.assert_called_once_with(_raw(LIFI_TX), ANY)
-        pipeline.lifi.get_status.assert_awaited_once_with(mined, FROM_INFO.chain_id, 1)
-        pipeline.evm.send_transaction_request.assert_called_once()
-        assert f"submitting lifi tx {re_signed} at nonce 40" in caplog.text
-
-    async def test_lookup_errors_are_not_outcomes(self, settings, insert_quote):
-        pipeline = _make_pipeline(settings)
-        flaky = iter([ConnectionError("rpc down"), _swap_receipt(60000)])
-
-        def get_receipt(tx_hash):
-            if tx_hash != LIFI_TX:
-                return MINED
-            outcome = next(flaky)
-            if isinstance(outcome, Exception):
-                raise outcome
-            return outcome
-        pipeline.evm.get_receipt = MagicMock(side_effect=get_receipt)
-
-        row = await _swap(pipeline, insert_quote)
-
-        assert row["status"] == "completed"
+        assert row["error"].endswith("manual recovery required")
+        assert _kinds() == ["approve", "lifi"]
+        privana = await pipeline._privana_factory()
+        assert privana.transfer_funds.await_count == 1
 
     async def test_parallel_swaps_into_one_token_each_credit_their_own_output(
         self, settings, insert_quote
     ):
         pipeline = _make_pipeline(settings)
-        second = "0x" + "ce" * 32
-        pipeline.evm = _evm({second: _swap_receipt(70000)})
-        pipeline.evm.send_transaction_request = MagicMock(
-            side_effect=_in_turn(_sends(LIFI_TX, 40), _sends(second, 41)))
-        pipeline.evm.transfer = MagicMock(
-            side_effect=_in_turn(_sends("0x" + "e1" * 32, 42), _sends("0x" + "e2" * 32, 43)))
         infos = {FROM_TOKEN: FROM_INFO, TO_TOKEN: TO_INFO}
         pipeline.accounting.get_token_info = AsyncMock(side_effect=infos.__getitem__)
         pool_nonce = 70
@@ -1073,14 +902,23 @@ class TestSettleByOutcome:
             swap_id = _seed_swap(get_db(), quote)
             await pipeline.launch(quote, USER, 5, "0x" + "ab" * 65, swap_id)
             swaps.append((swap_id, quote))
+        paid = {swaps[0][0]: 60000, swaps[1][0]: 70000}
+        batcher = pipeline.batcher
+
+        def result_with_its_swaps_output(tx_id):
+            swap_id = evm_batcher.result(tx_id)["owner"].split(":")[1]
+            batcher.receipt = _swap_receipt(paid[swap_id])
+            return FakeBatcher.result(batcher, tx_id)
+        batcher.result = result_with_its_swaps_output
 
         await asyncio.gather(*(pipeline._run(swap_id, quote, 5) for swap_id, quote in swaps))
 
-        paid = {LIFI_TX: 60000, second: 70000}
+        ids = {tx["owner"]: tx["id"] for tx in _txs()}
         for swap_id, _ in swaps:
             row = _swap_row(swap_id)
             assert row["status"] == "completed"
-            assert row["to_amount_actual"] == str(calculate_fee(paid[row["lifi_tx_hash"]], 10)[0])
+            assert row["to_amount_actual"] == str(calculate_fee(paid[swap_id], 10)[0])
+            assert ids[f"swap:{swap_id}:lifi"] == ids[f"swap:{swap_id}:approve"] + 1
 
     @pytest.mark.parametrize("receipt", [
         {"status": 1, "to": DIAMOND, "logs": []},
@@ -1092,7 +930,7 @@ class TestSettleByOutcome:
         self, settings, insert_quote, receipt
     ):
         pipeline = _make_pipeline(settings)
-        pipeline.evm = _evm({LIFI_TX: receipt})
+        pipeline.batcher.receipt = receipt
         pipeline._refund = AsyncMock()
 
         row = await _swap(pipeline, insert_quote)
@@ -1100,7 +938,7 @@ class TestSettleByOutcome:
         assert row["status"] == "failed"
         assert "manual recovery required" in row["error"]
         pipeline._refund.assert_not_awaited()
-        pipeline.evm.transfer.assert_not_called()
+        assert _kinds() == ["approve", "lifi"]
 
     def test_reads_the_output_of_a_real_swap(self):
         # Base, 10-02: USDC to LINK for the swap pool, tx 0x0183af8e...
@@ -1126,11 +964,9 @@ class TestSettleByOutcome:
                 "3030303030303030303000000000000000000000000000000000000000000000"
             ),
         }
-        receipt = {"status": 1, "to": "0x1231DEB6f5749EF6cE6943a275A1D3E7486F4EaE", "logs": [log]}
-
         received = _swap_output(
-            receipt, "0xD1cbC91Ab86C43f975A18126cc6AD77cf1F22b8a",
-            "0x88Fb150BDc53A65fe94Dea0c9BA0a6dAf8C6e196",
+            "0x1231DEB6f5749EF6cE6943a275A1D3E7486F4EaE", [log],
+            "0xD1cbC91Ab86C43f975A18126cc6AD77cf1F22b8a", "0x88Fb150BDc53A65fe94Dea0c9BA0a6dAf8C6e196",
         )
 
         assert received == 347500664734542004
@@ -1164,6 +1000,8 @@ class TestBridgeOutcome:
 
         assert row["status"] == "completed"
         assert row["to_amount_actual"] == str(calculate_fee(60000, 10)[0])
+        assert row["lifi_tx_hash"] == LIFI_TX
+        assert pipeline.lifi.get_status.await_args.args == (LIFI_TX, FROM_INFO.chain_id, 1)
         pipeline.bridge.await_deposit_credit.assert_awaited_once_with(1, DEPOSIT_TX, 60000)
         # The 404 is LiFi not having indexed the tx yet. Only the outage warns.
         assert caplog.text.count("lifi status of") == 1
@@ -1190,7 +1028,7 @@ class TestBridgeOutcome:
         assert row["status"] == "failed"
         assert "manual recovery required" in row["error"]
         pipeline._refund.assert_not_awaited()
-        pipeline.evm.transfer.assert_not_called()
+        assert _kinds() == ["approve", "lifi"]
 
 
 class TestFundingGate:
@@ -1204,7 +1042,7 @@ class TestFundingGate:
 
         assert row["status"] == "completed"
         pipeline.lifi.get_execution_quote.assert_awaited_once()
-        pipeline.evm.send_transaction_request.assert_called_once()
+        assert _kinds() == ["approve", "lifi", "deposit"]
         # An ERC-20 input leaves the gas to the native balance.
         pipeline.evm.max_gas_cost.assert_not_called()
 
@@ -1218,7 +1056,7 @@ class TestFundingGate:
 
         assert row["status"] == "completed"
         assert pipeline.lifi.get_execution_quote.await_count == 2
-        pipeline.evm.send_transaction_request.assert_called_once()
+        assert _kinds() == ["approve", "lifi", "deposit"]
 
     async def test_a_native_input_also_waits_for_the_gas_its_tx_pays(self, settings, insert_quote):
         pipeline = _make_pipeline(settings)
@@ -1233,7 +1071,7 @@ class TestFundingGate:
         assert row["status"] == "completed"
         pipeline.evm.max_gas_cost.assert_called_with(int(EXEC_QUOTE["transactionRequest"]["gasLimit"], 16))
         assert pipeline.lifi.get_execution_quote.await_count == 2
-        pipeline.evm.send_transaction_request.assert_called_once()
+        assert _kinds() == ["lifi", "deposit"]
 
     async def test_an_input_that_never_arrives_parks_without_sending(self, settings, insert_quote):
         pipeline = _make_pipeline(settings)
@@ -1246,69 +1084,66 @@ class TestFundingGate:
         assert row["status"] == "failed"
         assert "manual recovery required" in row["error"]
         pipeline.lifi.get_execution_quote.assert_not_awaited()
-        pipeline.evm.send_transaction_request.assert_not_called()
-        pipeline.evm.transfer.assert_not_called()
+        assert _txs() == []
         # Only the user's input transfer: no refund while the input is off chain.
         assert privana.transfer_funds.await_count == 1
 
 
-class TestApproval:
-    """A receipt timeout does not cancel an approval, so the swap waits for its allowance."""
+class TestQueuedTxs:
+    """What a swap hands the batcher to send."""
 
-    APPROVAL_TX = "0x" + "a1" * 32
-
-    def _late(self, pipeline):
-        """An approval signed and handed over, whose receipt timed out."""
-        from src.clients.base_evm import TransactionPendingError
-        pipeline.evm.ensure_allowance = MagicMock(side_effect=_sends(
-            self.APPROVAL_TX, 39, error=TransactionPendingError(self.APPROVAL_TX)))
-
-    async def test_a_late_approval_is_waited_for_then_the_swap_is_sent(
-        self, settings, insert_quote
-    ):
+    async def test_the_approval_and_the_swap_are_queued_together(self, settings, insert_quote):
         pipeline = _make_pipeline(settings)
-        self._late(pipeline)
-        pipeline.evm.allowance = MagicMock(side_effect=_reads(0, 1_000_000))
+        spender = "0x" + "5a" * 20
+        estimate = {**EXEC_QUOTE["estimate"], "approvalAddress": spender}
+        pipeline.lifi.get_execution_quote = AsyncMock(return_value={**EXEC_QUOTE, "estimate": estimate})
 
         row = await _swap(pipeline, insert_quote)
 
+        approve, swap, deposit = _txs()
         assert row["status"] == "completed"
-        pipeline.evm.ensure_allowance.assert_called_once()
-        assert pipeline.evm.allowance.call_args.args == (FROM_INFO.token_address, DIAMOND)
-        # Kept alive like the swap's txs: priced out, it holds up every later tx of the wallet.
-        pipeline.evm.rebroadcast.assert_called_once_with(_raw(self.APPROVAL_TX), ANY)
-        pipeline.evm.send_transaction_request.assert_called_once()
+        # One submit: no other swap's approval lands between them.
+        assert swap["id"] == approve["id"] + 1
+        assert (approve["owner"], approve["to_address"], approve["data"], approve["value"]) == (
+            f"swap:{row['id']}:approve", FROM_INFO.token_address,
+            _erc20("approve", spender, 1_000_000), "0")
+        # It cannot be simulated before its approval is mined.
+        assert (swap["owner"], swap["to_address"], swap["data"], swap["value"], swap["gas"],
+                swap["simulate"]) == (f"swap:{row['id']}:lifi", DIAMOND, "0xdead", "0", 0x15fcbf, 0)
+        assert (deposit["owner"], deposit["to_address"], deposit["data"]) == (
+            f"swap:{row['id']}:deposit", TO_INFO.token_address,
+            _erc20("transfer", DEPOSIT_ADDRESS, 60000))
 
-    async def test_a_re_signed_approval_is_the_version_rebroadcast(self, settings, insert_quote):
+    async def test_a_native_input_queues_only_the_swap_simulated_with_its_value(
+        self, settings, insert_quote
+    ):
         pipeline = _make_pipeline(settings)
-        self._late(pipeline)
-        re_signed = "0x" + "a2" * 32
-        pipeline.evm.allowance = MagicMock(side_effect=_reads(0, 0, 1_000_000))
-        pipeline.evm.rebroadcast = MagicMock(side_effect=_in_turn(
-            lambda raw, on_signed: on_signed(re_signed, 39, _raw(re_signed)),
-            lambda raw, on_signed: None,
-        ))
+        native = TokenInfo(**{**FROM_INFO.__dict__, "token_address": None})
+        pipeline.accounting.get_token_info = AsyncMock(side_effect=[native, TO_INFO])
+        request = {**EXEC_QUOTE["transactionRequest"], "value": hex(1_000_000)}
+        pipeline.lifi.get_execution_quote = AsyncMock(
+            return_value={**EXEC_QUOTE, "transactionRequest": request})
 
         row = await _swap(pipeline, insert_quote)
 
+        swap, _ = _txs()
         assert row["status"] == "completed"
-        assert [c.args[0] for c in pipeline.evm.rebroadcast.call_args_list] == [
-            _raw(self.APPROVAL_TX), _raw(re_signed)]
+        assert _kinds() == ["lifi", "deposit"]
+        assert (swap["to_address"], swap["data"], swap["value"], swap["simulate"]) == (
+            DIAMOND, "0xdead", "1000000", 1)
 
-    async def test_an_approval_that_never_takes_effect_refunds_without_sending(
-        self, settings, insert_quote
-    ):
-        from src.services.swap.lifi_pipeline import APPROVAL_POLLS
+    async def test_a_tx_built_for_another_chain_is_never_queued(self, settings, insert_quote):
         pipeline = _make_pipeline(settings)
-        self._late(pipeline)
-        pipeline.evm.allowance = MagicMock(return_value=0)
         pipeline.accounting.get_token_info = AsyncMock(side_effect=[FROM_INFO, TO_INFO, FROM_INFO])
+        request = {**EXEC_QUOTE["transactionRequest"], "chainId": 1}
+        pipeline.lifi.get_execution_quote = AsyncMock(
+            return_value={**EXEC_QUOTE, "transactionRequest": request})
 
         row = await _swap(pipeline, insert_quote)
 
         assert row["status"] == "refunded"
-        assert pipeline.evm.allowance.call_count == APPROVAL_POLLS
-        pipeline.evm.send_transaction_request.assert_not_called()
+        assert f"built for chain 1 cannot be sent on chain {FROM_INFO.chain_id}" in row["error"]
+        assert _kinds() == ["refund"]
 
 
 class TestResume:
@@ -1325,47 +1160,18 @@ class TestResume:
 
     async def test_a_sent_lifi_tx_is_settled_not_sent_again(self, settings, insert_quote):
         pipeline = _make_pipeline(settings)
-        swap_id, quote = self._seed(
-            pipeline, insert_quote, "qr1", step="lifi_execute",
-            lifi_tx_hash=LIFI_TX, lifi_tx_raw=_raw(LIFI_TX))
+        swap_id, quote = self._seed(pipeline, insert_quote, "qr1", step="lifi_execute")
+        pipeline.batcher.submit(FROM_INFO.chain_id, TxIntent(
+            owner=f"swap:{swap_id}:lifi", to=DIAMOND, gas=0x15fcbf, data="0xdead", simulate=False))
 
         await pipeline._run(swap_id, quote, 5)
 
         row = _swap_row(swap_id)
         assert row["status"] == "completed"
         assert row["to_amount_actual"] == str(calculate_fee(60000, 10)[0])
-        pipeline.evm.send_transaction_request.assert_not_called()
+        assert _kinds() == ["lifi", "deposit"]
+        pipeline.lifi.get_execution_quote.assert_not_awaited()
         pipeline.bridge.withdraw_to_chain.assert_not_awaited()
-
-    async def test_a_lifi_tx_recorded_but_never_broadcast_is_broadcast(
-        self, settings, insert_quote
-    ):
-        # Saved, then stopped before broadcast. A fresh client has only the row.
-        from eth_account import Account
-
-        from src.clients.base_evm import EvmClient
-        key = "0x" + "11" * 32
-        raw = Web3.to_hex(Account.from_key(key).sign_transaction({
-            "chainId": FROM_INFO.chain_id, "nonce": 40, "to": DIAMOND, "value": 0,
-            "data": "0xdead", "gas": 100_000, "maxFeePerGas": 2_100, "maxPriorityFeePerGas": 100,
-        }).raw_transaction)
-        pipeline = _make_pipeline(settings)
-        swap_id, quote = self._seed(
-            pipeline, insert_quote, "qr8", step="lifi_execute",
-            lifi_tx_hash=LIFI_TX, lifi_tx_raw=raw)
-        restarted = EvmClient("http://localhost:1", key)
-        restarted.w3 = MagicMock()
-        restarted.w3.eth.get_block.return_value = {"baseFeePerGas": 1_000}
-        pipeline.evm.rebroadcast = restarted.rebroadcast
-        mined = iter([None, _swap_receipt(60000)])
-        pipeline.evm.get_receipt = MagicMock(
-            side_effect=lambda tx_hash: next(mined) if tx_hash == LIFI_TX else MINED)
-
-        await pipeline._run(swap_id, quote, 5)
-
-        assert _swap_row(swap_id)["status"] == "completed"
-        restarted.w3.eth.send_raw_transaction.assert_called_once_with(raw)
-        pipeline.evm.send_transaction_request.assert_not_called()
 
     async def test_an_unsent_lifi_tx_is_sent(self, settings, insert_quote):
         pipeline = _make_pipeline(settings)
@@ -1374,7 +1180,7 @@ class TestResume:
         await pipeline._run(swap_id, quote, 5)
 
         assert _swap_row(swap_id)["status"] == "completed"
-        pipeline.evm.send_transaction_request.assert_called_once()
+        assert _kinds() == ["approve", "lifi", "deposit"]
         pipeline.bridge.withdraw_to_chain.assert_not_awaited()
 
     async def test_a_sent_deposit_is_awaited_not_sent_again(self, settings, insert_quote):
@@ -1382,14 +1188,15 @@ class TestResume:
         pipeline.accounting.get_token_info = AsyncMock(return_value=TO_INFO)
         swap_id, quote = self._seed(
             pipeline, insert_quote, "qr3", step="deposit", lifi_tx_hash=LIFI_TX,
-            to_amount_received="60000", deposit_tx_hash=DEPOSIT_TX,
-            deposit_tx_raw=_raw(DEPOSIT_TX))
+            to_amount_received="60000")
+        pipeline.batcher.submit(TO_INFO.chain_id, transfer_intent(
+            f"swap:{swap_id}:deposit", TO_INFO.token_address, DEPOSIT_ADDRESS, 60000))
 
         await pipeline._run(swap_id, quote, 5)
 
         assert _swap_row(swap_id)["status"] == "completed"
-        pipeline.evm.transfer.assert_not_called()
-        pipeline.evm.send_transaction_request.assert_not_called()
+        assert _kinds() == ["deposit"]
+        pipeline.bridge.get_deposit_address.assert_not_awaited()
         pipeline.bridge.await_deposit_credit.assert_awaited_once_with(
             TO_INFO.chain_id, DEPOSIT_TX, 60000)
 
@@ -1403,8 +1210,10 @@ class TestResume:
         await pipeline._run(swap_id, quote, 5)
 
         assert _swap_row(swap_id)["status"] == "completed"
-        pipeline.evm.transfer.assert_called_once()
-        assert pipeline.evm.transfer.call_args.args[2] == 60000
+        [deposit] = _txs()
+        assert (deposit["owner"], deposit["to_address"], deposit["data"]) == (
+            f"swap:{swap_id}:deposit", TO_INFO.token_address,
+            _erc20("transfer", DEPOSIT_ADDRESS, 60000))
 
     async def test_recovery_resumes_swaps_mid_execution(self, settings, insert_quote):
         from src.services.swap.lifi_pipeline import recover_inflight_lifi_swaps
@@ -1434,8 +1243,7 @@ class TestResume:
         pipeline.accounting.get_token_info = AsyncMock(return_value=TO_INFO)
         resumed, _ = self._seed(
             pipeline, insert_quote, "qr9", step="deposit", lifi_tx_hash=LIFI_TX,
-            to_amount_received="60000", deposit_tx_hash=DEPOSIT_TX,
-            deposit_tx_raw=_raw(DEPOSIT_TX))
+            to_amount_received="60000")
         later, _ = self._seed(pipeline, insert_quote, "qr10", step="credit")
         # The first pass fails at the later row, so the worker runs it again.
         park = pipeline._park
@@ -1509,19 +1317,23 @@ class TestResume:
         assert [_swap_row(swap_id)["status"] for swap_id, _ in owned] == [
             "executing", "executing", "refunding"]
 
-    async def test_recovery_acts_on_each_row_as_it_is_at_its_turn(self, settings, insert_quote):
+    async def test_recovery_refunds_in_the_background_and_goes_on(self, settings, insert_quote):
+        # A refund waiting on its tx must not hold up the swaps after it.
         from src.services.swap.lifi_pipeline import recover_inflight_lifi_swaps
         pipeline = _make_pipeline(settings)
-        refunded, _ = self._seed(pipeline, insert_quote, "qr14", step="withdraw")
-        settled, _ = self._seed(pipeline, insert_quote, "qr15", step="lifi_execute")
+        refunding, _ = self._seed(pipeline, insert_quote, "qr14", step="withdraw")
+        resumed, _ = self._seed(pipeline, insert_quote, "qr15", step="lifi_execute")
+        released = asyncio.Event()
 
-        # A runner from the failed pass settles its swap while this pass refunds.
         async def refund(*_):
-            pipeline._update_swap(settled, status="completed")
+            await released.wait()
         pipeline._refund = AsyncMock(side_effect=refund)
-        pipeline.spawn_background = MagicMock()
+        pipeline._run = AsyncMock()
 
         await recover_inflight_lifi_swaps(pipeline=pipeline)
 
-        assert [c.args[0] for c in pipeline._refund.await_args_list] == [refunded]
-        pipeline.spawn_background.assert_not_called()
+        assert set(pipeline._tasks) == {refunding, resumed}
+        released.set()
+        await asyncio.gather(*pipeline._tasks.values())
+        assert [c.args[0] for c in pipeline._refund.await_args_list] == [refunding]
+        pipeline._run.assert_awaited_once()

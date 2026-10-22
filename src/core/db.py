@@ -196,8 +196,8 @@ MIGRATIONS = [
 
 
 def connect(db_path: Optional[Path] = None) -> sqlite3.Connection:
-    """A new connection. A thread other than the event loop's opens its own:
-    one connection shared across threads returns wrong rows."""
+    """A new connection. A thread with work of its own opens its own: a
+    connection's transactions are shared by every thread that uses it."""
     path = db_path or _DB_PATH
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(path), check_same_thread=False)

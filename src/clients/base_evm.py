@@ -20,6 +20,9 @@ TRANSFER_GAS_LIMIT = 100_000
 NATIVE_TRANSFER_GAS_LIMIT = 21_000
 APPROVE_GAS_LIMIT = 80_000
 
+# Settings naming the RPC of each chain the LP account sends on.
+RPC_SETTINGS = ("base_rpc_url", "ethereum_rpc_url", "hyperevm_rpc_url")
+
 # LiFi's address for a chain's native coin.
 NATIVE_TOKEN = "0x0000000000000000000000000000000000000000"
 
@@ -240,7 +243,7 @@ def get_evm_client(chain_id: int) -> EvmClient:
     which chain it serves, so a testnet RPC answers for its testnet chain and
     a misconfigured URL can never sign for the wrong one."""
     settings = load_settings()
-    for rpc_url in (settings.base_rpc_url, settings.ethereum_rpc_url, settings.hyperevm_rpc_url):
+    for rpc_url in (getattr(settings, setting) for setting in RPC_SETTINGS):
         if not rpc_url:
             continue
         if rpc_url not in _clients:

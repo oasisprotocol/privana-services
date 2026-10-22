@@ -1,4 +1,5 @@
 import logging
+import re
 import sqlite3
 import threading
 import time
@@ -8,7 +9,7 @@ from typing import Optional
 from web3 import Web3
 from web3.exceptions import ContractLogicError, TransactionNotFound, Web3RPCError
 
-from src.clients.base_evm import EvmClient
+from src.clients.base_evm import RPC_SETTINGS, EvmClient
 from src.core.config import load_settings
 from src.core.db import connect, db_write, get_db
 from src.core.validation import URL_PATTERN
@@ -19,9 +20,9 @@ BATCH_SIZE = 10
 IDLE_INTERVAL_SEC = 2.0
 RECEIPT_POLL_SEC = 1.0
 RECEIPT_TIMEOUT_SEC = 120.0
-# A tx still unsettled this long after its first attempt is failed, so it
-# cannot hold up the txs behind it. It is never signed at a new nonce, which
-# could send it twice: its swap parks for a person to check.
+# Nodes serve a receipt a little after counting its nonce. A tx whose nonce is
+# still used with no receipt this long after it was first sent lost the nonce
+# to another tx, so it can never be mined.
 STUCK_AFTER_SEC = 900
 # A retry raises both fees by at least this much, or nodes refuse to replace
 # the earlier attempt.
@@ -39,10 +40,13 @@ SKIPPED = "skipped"
 STOPPED = "stopped"
 
 # Node replies meaning it already holds the tx.
-ALREADY_KNOWN = ("already known", "known transaction", "alreadyknown")
-# Node replies meaning the nonce is not this tx's to take yet: retry next round.
-NONCE_TAKEN = ("nonce too low", "nonce too high", "replacement transaction underpriced",
-               "transaction underpriced")
+ALREADY_KNOWN = ("already known", "alreadyknown")
+KNOWN_TRANSACTION = "known transaction"
+# Node replies about the nonce rather than the tx: the round stops and a later
+# one looks again.
+NONCE_REPLIES = ("nonce too low", "nonce too high", "replacement transaction underpriced")
+# A key can sit in a URL or, in a requests error, in the path after "url: ".
+_RPC_PATH = re.compile(r"(?<=url: )\S+")
 
 
 @dataclass(frozen=True)
@@ -67,20 +71,21 @@ class EvmBatcher:
     consecutive nonces from a fresh count, sends them back to back, and waits
     only for the last receipt."""
 
-    def __init__(self, evm: EvmClient, chain_id: int, db: sqlite3.Connection) -> None:
+    def __init__(self, evm: EvmClient, chain_id: int, db: sqlite3.Connection, stop: threading.Event) -> None:
         self.evm = evm
         self.chain_id = chain_id
         self.db = db
+        self.stop = stop
 
-    def run(self, stop: threading.Event) -> None:
-        while not stop.is_set():
+    def run(self) -> None:
+        while not self.stop.is_set():
             try:
                 progressed = self.run_round()
             except Exception as exc:
                 logger.warning("evm batcher %s round failed: %s", self.chain_id, _error(exc))
                 progressed = False
             if not progressed:
-                stop.wait(IDLE_INTERVAL_SEC)
+                self.stop.wait(IDLE_INTERVAL_SEC)
 
     def run_round(self) -> bool:
         """One batch. Returns whether it settled or sent anything."""
@@ -91,23 +96,29 @@ class EvmBatcher:
         ).fetchall()]
         if not rows:
             return False
-        used = self.evm.w3.eth.get_transaction_count(self.evm.address, "latest")
+        # A node behind the others can report a count below a nonce already
+        # mined here: take the higher.
+        used = max(self.evm.w3.eth.get_transaction_count(self.evm.address, "latest"), self._next_after_mined())
         unsent, progressed = [], False
         for row in rows:
             settled = self._settle(row, used)
             if settled:
                 progressed = True
-            elif self._stuck(row):
-                self._finish(row["id"], FAILED, error=f"not mined {STUCK_AFTER_SEC}s after it was first sent")
-                progressed = True
             elif settled is None:
-                # An earlier attempt holds a used nonce but has no receipt yet:
-                # signing again now could send it twice.
+                # An attempt holds a used nonce but has no receipt yet: signing
+                # again could send it twice. Once stuck, it is failed instead,
+                # never signed at a new nonce, and its swap parks for a person.
+                if not self._stuck(row):
+                    return progressed
+                self._finish(row["id"], FAILED, error="nonce taken by another tx")
+                progressed = True
+            elif row["attempts"] and int(time.time()) - row["updated_at"] < RECEIPT_TIMEOUT_SEC:
+                # Its last attempt may still be mined: it gets a full receipt
+                # wait before it is signed again, and the txs behind wait too.
                 return progressed
             else:
                 unsent.append(row)
-        # A node behind the others can report a count below a nonce already
-        # mined here: start past both.
+        # Past any tx this round just found mined.
         nonce = max(used, self._next_after_mined())
         fees = self.evm.fees()
         sent, last_hash = [], None
@@ -127,7 +138,11 @@ class EvmBatcher:
 
     def _send(self, row: dict, nonce: int, fees: dict) -> str:
         if row["attempts"]:
-            fees = self._bumped(fees, self._attempts(row)[-1][1])
+            try:
+                fees = self._bumped(fees, row)
+            except Exception as exc:
+                logger.warning("evm batcher %s fee lookup at nonce %d failed: %s", self.chain_id, nonce, _error(exc))
+                return STOPPED
         tx = {
             "from": self.evm.address,
             "to": Web3.to_checksum_address(row["to_address"]),
@@ -163,12 +178,12 @@ class EvmBatcher:
             self.evm.broadcast(raw)
         except Web3RPCError as exc:
             message = str(exc).lower()
-            if any(phrase in message for phrase in ALREADY_KNOWN):
+            if any(phrase in message for phrase in ALREADY_KNOWN) or message.startswith(KNOWN_TRANSACTION):
                 logger.info("evm batcher %s node already holds %s at nonce %d", self.chain_id, tx_hash, nonce)
                 return SENT
             # A retry's earlier attempt may still be mined, so it is never failed here.
-            if any(phrase in message for phrase in NONCE_TAKEN) or row["attempts"]:
-                logger.info("evm batcher %s nonce %d not taken (%s), retrying next round",
+            if any(phrase in message for phrase in NONCE_REPLIES) or row["attempts"]:
+                logger.info("evm batcher %s send at nonce %d refused (%s), retrying in a later round",
                             self.chain_id, nonce, _error(exc))
                 return STOPPED
             # The node refused it outright, so the nonce stays free for the next tx.
@@ -206,24 +221,27 @@ class EvmBatcher:
         ).fetchone()[0]
         return 0 if top is None else top + 1
 
-    def _bumped(self, fees: dict, last_hash: str) -> dict:
-        """`fees`, raised past the last attempt's if the node still holds it."""
-        try:
-            last = self.evm.w3.eth.get_transaction(last_hash)
-        except TransactionNotFound:
-            return fees
-        bump = lambda fee: fee + fee * FEE_BUMP_BPS // 10_000 + 1  # noqa: E731
-        return {
-            "maxFeePerGas": max(fees["maxFeePerGas"], bump(last["maxFeePerGas"])),
-            "maxPriorityFeePerGas": max(fees["maxPriorityFeePerGas"], bump(last["maxPriorityFeePerGas"])),
-        }
+    def _bumped(self, fees: dict, row: dict) -> dict:
+        """`fees`, raised past the newest attempt the node still holds, which a
+        retry must outbid to replace."""
+        for _, tx_hash in reversed(self._attempts(row)):
+            try:
+                held = self.evm.w3.eth.get_transaction(tx_hash)
+            except TransactionNotFound:
+                continue
+            return {
+                key: max(fees[key], held[key] + held[key] * FEE_BUMP_BPS // 10_000 + 1)
+                for key in ("maxFeePerGas", "maxPriorityFeePerGas")
+            }
+        return fees
 
     def _await_receipt(self, tx_hash: str) -> None:
         deadline = time.monotonic() + RECEIPT_TIMEOUT_SEC
         while time.monotonic() < deadline:
             if self.evm.get_receipt(tx_hash) is not None:
                 return
-            time.sleep(RECEIPT_POLL_SEC)
+            if self.stop.wait(RECEIPT_POLL_SEC):
+                return
         logger.warning("evm batcher %s receipt of %s not seen, retrying next round", self.chain_id, tx_hash)
 
     def _row(self, tx_id: int) -> dict:
@@ -247,8 +265,8 @@ class EvmBatcher:
 
 
 def _error(exc: Exception) -> str:
-    # An RPC URL in the text can carry its API key.
-    return f"{type(exc).__name__}: {URL_PATTERN.sub('[url]', str(exc))}"
+    """`exc` for a log line, without the RPC URL or path that can carry its key."""
+    return f"{type(exc).__name__}: {_RPC_PATH.sub('[url]', URL_PATTERN.sub('[url]', str(exc)))}"
 
 
 def submit(chain_id: int, intent: TxIntent) -> int:
@@ -269,8 +287,8 @@ def result(tx_id: int) -> Optional[dict]:
     return dict(row) if row else None
 
 
-# Settings naming the RPC of each chain the LP account sends on.
-RPC_SETTINGS = ("base_rpc_url", "ethereum_rpc_url", "hyperevm_rpc_url")
+# Long enough for a thread in the middle of an RPC call (30s timeout) to end its round.
+STOP_TIMEOUT_SEC = 60.0
 
 _stop = threading.Event()
 _threads: list[threading.Thread] = []
@@ -291,25 +309,29 @@ def start_evm_batchers() -> None:
             _threads.append(thread)
 
 
-def stop_evm_batchers(timeout: float = 60.0) -> None:
+def stop_evm_batchers() -> None:
     _stop.set()
     for thread in _threads:
-        thread.join(timeout)
+        thread.join(STOP_TIMEOUT_SEC)
     _threads.clear()
     _serving.clear()
 
 
 def _serve(setting: str, rpc_url: str) -> None:
-    db = connect()
+    db = None
     try:
+        db = connect()
         evm = EvmClient(rpc_url, load_settings().liquidity_provider_secret_key)
+        failures = 0
         while not _stop.is_set():
             try:
                 chain_id = evm.w3.eth.chain_id
                 break
             except Exception as exc:
-                # Type only: the error text can carry the RPC URL and its key.
-                logger.warning("evm batcher for %s: RPC unreachable (%s)", setting, type(exc).__name__)
+                # Once a minute while it stays down.
+                if failures % 30 == 0:
+                    logger.warning("evm batcher for %s: RPC unreachable (%s)", setting, _error(exc))
+                failures += 1
                 _stop.wait(IDLE_INTERVAL_SEC)
         else:
             return
@@ -318,6 +340,9 @@ def _serve(setting: str, rpc_url: str) -> None:
                          setting, chain_id, _serving[chain_id])
             return
         logger.info("evm batcher %s started for %s", chain_id, setting)
-        EvmBatcher(evm, chain_id, db).run(_stop)
+        EvmBatcher(evm, chain_id, db, _stop).run()
+    except Exception as exc:
+        logger.error("evm batcher for %s stopped: %s", setting, _error(exc))
     finally:
-        db.close()
+        if db is not None:
+            db.close()

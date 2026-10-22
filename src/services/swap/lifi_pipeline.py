@@ -48,6 +48,9 @@ MAX_STATUS_POLLS = 720
 MAX_INPUT_CONFIRM_POLLS = 60
 CREDIT_MAX_RETRIES = 20
 REFUND_BALANCE_POLLS = 30
+# Each credit check polls for about 10 min; Ethereum finality plus the sweep
+# can take longer than one.
+DEPOSIT_CREDIT_CHECKS = 6
 # About 30 min for a withdrawal to reach the swap pool wallet.
 FUNDING_POLLS = 300
 # How often a swap waiting on its tx logs that it still waits.
@@ -195,7 +198,7 @@ class LifiSwapPipeline:
                 if find_evm_tx(_owner(swap_id, REFUND)) is None:
                     evm = self._evm_for(from_info.chain_id)
                     for _ in range(REFUND_BALANCE_POLLS):
-                        if await self._holds(evm, from_info.token_address, amount):
+                        if await self._holds(evm, from_info.token_address, quote["from_token_id"], amount):
                             break
                         await asyncio.sleep(self._poll_interval_sec)
                     else:
@@ -272,12 +275,14 @@ class LifiSwapPipeline:
         amount = int(quote["from_amount"])
         token = from_info.token_address
         for _ in range(FUNDING_POLLS):
-            if await self._holds(evm, token, amount):
+            if await self._holds(evm, token, quote["from_token_id"], amount):
                 exec_quote = await self._execution_quote(
                     swap_id, quote, from_info, to_info, evm.address
                 )
                 request = exec_quote["transactionRequest"]
-                if await self._holds(evm, token, amount, int(request["gasLimit"], 16)):
+                # Nothing awaits between this check and the submit, so another
+                # swap's spend is either counted here or not queued yet.
+                if await self._holds(evm, token, quote["from_token_id"], amount, int(request["gasLimit"], 16)):
                     # The approval and the swap are queued together, so no other
                     # swap's approval for the same spender lands between them. The
                     # swap can't be simulated before its approval is mined.
@@ -287,8 +292,8 @@ class LifiSwapPipeline:
                                        exec_quote["estimate"]["approvalAddress"], amount),
                         swap,
                     ]
-                    self.batcher.submit(from_info.chain_id, *intents)
-                    logger.info("lifi swap %s queued its %s tx", swap_id, LIFI)
+                    tx_ids = self.batcher.submit(from_info.chain_id, *intents)
+                    logger.info("lifi swap %s queued txs %s", swap_id, tx_ids)
                     return
             await asyncio.sleep(self._poll_interval_sec)
         raise RuntimeError(f"swap funding unconfirmed after {FUNDING_POLLS} polls")
@@ -331,16 +336,18 @@ class LifiSwapPipeline:
             )
         return exec_quote
 
-    async def _holds(self, evm: Any, token: Optional[str], amount: int, gas: int = 0) -> bool:
+    async def _holds(self, evm: Any, token: Optional[str], token_id: str, amount: int, gas: int = 0) -> bool:
         """Whether the wallet holds `amount`, plus `gas` at the fee cap when
-        `token` is the native coin that pays for it."""
+        `token` is the native coin that pays for it, beyond what txs already
+        queued will take out of it."""
         try:
             if gas and is_native(token):
                 amount += await asyncio.to_thread(evm.max_gas_cost, gas)
-            return await asyncio.to_thread(evm.balance_of, token, evm.address) >= amount
+            balance = await asyncio.to_thread(evm.balance_of, token, evm.address)
         except Exception as exc:
             logger.warning("balance or fees for %s unavailable: %s", token, exc)
             return False
+        return balance >= amount + _queued_spend(token_id)
 
     async def _mined(self, swap_id: str, kind: str) -> dict:
         """The swap's `kind` tx once its batcher has settled it. Anything but
@@ -394,11 +401,18 @@ class LifiSwapPipeline:
         owner = _owner(swap_id, kind)
         if find_evm_tx(owner) is None:
             deposit_address = await self.bridge.get_deposit_address()
-            self.batcher.submit(info.chain_id, transfer_intent(owner, info.token_address, deposit_address, amount))
-            logger.info("lifi swap %s queued its %s tx", swap_id, kind)
+            tx_ids = self.batcher.submit(info.chain_id, transfer_intent(owner, info.token_address, deposit_address, amount))
+            logger.info("lifi swap %s queued txs %s", swap_id, tx_ids)
         tx = await self._mined(swap_id, kind)
         self._update_swap(swap_id, deposit_tx_hash=tx["tx_hash"])
-        await self.bridge.await_deposit_credit(info.chain_id, tx["tx_hash"], amount)
+        for check in range(1, DEPOSIT_CREDIT_CHECKS + 1):
+            try:
+                await self.bridge.await_deposit_credit(info.chain_id, tx["tx_hash"], amount)
+                break
+            except Exception as exc:
+                if check == DEPOSIT_CREDIT_CHECKS:
+                    raise
+                logger.warning("lifi swap %s deposit %s not credited yet: %s", swap_id, tx["tx_hash"], exc)
         logger.info("lifi swap %s deposit %s credited", swap_id, tx["tx_hash"])
 
     async def _credit(self, quote: dict, received: int) -> int:
@@ -491,6 +505,26 @@ def _input_unspent(swap_id: str, step: Optional[str]) -> bool:
         return True
     tx = find_evm_tx(_owner(swap_id, LIFI))
     return tx is None or tx["status"] == REVERTED or (tx["status"] == FAILED and not tx["attempts"])
+
+
+def _queued_spend(token_id: str) -> int:
+    """What the swaps' queued txs will take out of the wallet in `token_id`:
+    the inputs of swap txs and redeposits, and the outputs of deposits."""
+    rows = get_db().execute(
+        "SELECT e.owner, s.from_token_id, s.to_token_id, s.from_amount, s.to_amount_received "
+        "FROM evm_transactions e "
+        "JOIN swaps s ON e.owner IN ('swap:' || s.id || ':' || ?, 'swap:' || s.id || ':' || ?, "
+        "'swap:' || s.id || ':' || ?) WHERE e.status = ? AND (s.from_token_id = ? OR s.to_token_id = ?)",
+        (LIFI, REFUND, DEPOSIT, QUEUED, token_id, token_id),
+    ).fetchall()
+    spend = 0
+    for row in rows:
+        if row["owner"].endswith(f":{DEPOSIT}"):
+            if row["to_token_id"] == token_id:
+                spend += int(row["to_amount_received"])
+        elif row["from_token_id"] == token_id:
+            spend += int(row["from_amount"])
+    return spend
 
 
 def _swap_intent(owner: str, chain_id: int, request: dict, simulate: bool) -> TxIntent:

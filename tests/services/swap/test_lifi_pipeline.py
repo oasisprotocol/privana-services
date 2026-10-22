@@ -3,7 +3,7 @@ import sqlite3
 import time
 import uuid
 from dataclasses import replace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
@@ -547,6 +547,20 @@ class TestRefund:
         pipeline.bridge.await_deposit_credit.assert_awaited_once_with(
             FROM_INFO.chain_id, DEPOSIT_TX, 1000000)
 
+    async def test_a_deposit_credited_on_a_later_check_completes_without_a_second_deposit(
+        self, test_db, settings, insert_quote
+    ):
+        insert_quote("q_dc", venue="lifi", user_address=USER,
+                     from_token_id=FROM_TOKEN, to_token_id=TO_TOKEN)
+        pipeline = _make_pipeline(settings)
+        pipeline.bridge.await_deposit_credit = AsyncMock(side_effect=[RuntimeError("not final yet"), None])
+
+        swap_id = await self._launch_and_run(pipeline, _quote("q_dc"))
+
+        assert _swap_row(swap_id)["status"] == "completed"
+        assert _kinds() == ["approve", "lifi", "deposit"]
+        assert pipeline.bridge.await_deposit_credit.await_count == 2
+
     async def test_deposit_exhaustion_fails_without_refund(self, test_db, settings, insert_quote):
         insert_quote("q_d", venue="lifi", user_address=USER,
                      from_token_id=FROM_TOKEN, to_token_id=TO_TOKEN)
@@ -557,7 +571,8 @@ class TestRefund:
         assert row["status"] == "failed"
         assert "relay stuck" in row["error"]
         assert _kinds() == ["approve", "lifi", "deposit"]
-        pipeline.bridge.await_deposit_credit.assert_awaited_once()
+        from src.services.swap.lifi_pipeline import DEPOSIT_CREDIT_CHECKS
+        assert pipeline.bridge.await_deposit_credit.await_count == DEPOSIT_CREDIT_CHECKS
 
     async def test_credit_exhaustion_fails_without_refund(self, test_db, settings, insert_quote):
         insert_quote("q_c", venue="lifi", user_address=USER,
@@ -748,17 +763,17 @@ class TestNativeCoins:
 
     @staticmethod
     def _per_chain(pipeline, monkeypatch, *chains):
-        """A wallet and a batcher on each of `chains`, as outside tests."""
+        """A wallet on each of `chains`, as outside tests."""
         pipeline.evm = None
         clients = {chain: _evm() for chain in chains}
         monkeypatch.setattr("src.services.swap.lifi_pipeline.get_evm_client", clients.__getitem__)
-        return clients, pipeline.batcher
+        return clients
 
     async def test_a_native_coin_goes_to_lifi_as_the_zero_address(
         self, test_db, settings, insert_quote, monkeypatch
     ):
         pipeline = _make_pipeline(settings)
-        clients, _ = self._per_chain(pipeline, monkeypatch, 999, 84532)
+        clients = self._per_chain(pipeline, monkeypatch, 999, 84532)
         pipeline.accounting.get_token_info = AsyncMock(side_effect=[
             self._info(FROM_INFO, 999, ""), TO_INFO,
         ])
@@ -797,8 +812,8 @@ class TestNativeCoins:
         self, test_db, settings, insert_quote, monkeypatch
     ):
         pipeline = _make_pipeline(settings)
-        _, batcher = self._per_chain(pipeline, monkeypatch, 999, 84532)
-        batcher.outcomes["lifi"] = "reverted"
+        self._per_chain(pipeline, monkeypatch, 999, 84532)
+        pipeline.batcher.outcomes["lifi"] = "reverted"
         native = self._info(FROM_INFO, 999, None)
         pipeline.accounting.get_token_info = AsyncMock(side_effect=[native, TO_INFO, native])
         pipeline.accounting.get_transfer_nonce = AsyncMock(side_effect=[6, 70, 71])
@@ -1057,6 +1072,31 @@ class TestFundingGate:
         assert row["status"] == "completed"
         assert pipeline.lifi.get_execution_quote.await_count == 2
         assert _kinds() == ["approve", "lifi", "deposit"]
+
+    async def test_an_input_another_swaps_queued_tx_will_spend_is_not_counted(self, settings, insert_quote):
+        # Both swaps' withdrawals deliver the same token, but only the first has
+        # arrived: the second must not queue against the first's input.
+        pipeline = _make_pipeline(settings)
+        pipeline.spawn_background = MagicMock()
+        pipeline.batcher.outcomes["lifi"] = "queued"
+        swaps = []
+        for quote_id in ("qf1", "qf2"):
+            insert_quote(quote_id, venue="lifi", user_address=USER,
+                         from_token_id=FROM_TOKEN, to_token_id=TO_TOKEN)
+            quote = _quote(quote_id)
+            swap_id = _seed_swap(get_db(), quote)
+            pipeline._update_swap(swap_id, status="executing", step="lifi_execute")
+            swaps.append((swap_id, quote))
+        pipeline.evm.balance_of = MagicMock(return_value=1_000_000)
+        infos = {FROM_TOKEN: FROM_INFO, TO_TOKEN: TO_INFO}
+        pipeline.accounting.get_token_info = AsyncMock(side_effect=infos.__getitem__)
+
+        await pipeline._send_lifi_tx(swaps[0][0], swaps[0][1], FROM_INFO, TO_INFO, pipeline.evm)
+        with patch("src.services.swap.lifi_pipeline.FUNDING_POLLS", 3):
+            with pytest.raises(RuntimeError, match="funding unconfirmed"):
+                await pipeline._send_lifi_tx(swaps[1][0], swaps[1][1], FROM_INFO, TO_INFO, pipeline.evm)
+
+        assert _kinds() == ["approve", "lifi"]
 
     async def test_a_native_input_also_waits_for_the_gas_its_tx_pays(self, settings, insert_quote):
         pipeline = _make_pipeline(settings)

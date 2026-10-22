@@ -9,15 +9,7 @@ from typing import Optional
 from web3 import Web3
 from web3.exceptions import ContractLogicError, TransactionNotFound, Web3RPCError
 
-from src.clients.base_evm import (
-    APPROVE_GAS_LIMIT,
-    ERC20_ABI,
-    NATIVE_TRANSFER_GAS_LIMIT,
-    RPC_SETTINGS,
-    TRANSFER_GAS_LIMIT,
-    EvmClient,
-    is_native,
-)
+from src.clients.base_evm import ERC20_ABI, RPC_SETTINGS, EvmClient, is_native
 from src.core.config import load_settings
 from src.core.db import connect, db_write, db_write_many, get_db
 from src.core.validation import URL_PATTERN
@@ -72,6 +64,9 @@ class TxIntent:
     simulate: bool = True
 
 
+TRANSFER_GAS_LIMIT = 100_000
+NATIVE_TRANSFER_GAS_LIMIT = 21_000
+APPROVE_GAS_LIMIT = 80_000
 _ERC20 = Web3().eth.contract(abi=ERC20_ABI)
 
 
@@ -217,6 +212,7 @@ class EvmBatcher:
         try:
             self.evm.w3.eth.send_raw_transaction(raw)
         except Web3RPCError as exc:
+            self._log_send_failure(tx_hash, nonce, exc)
             # A retry is never failed: its earlier attempt may still be mined.
             if row["attempts"] or not any(phrase in _rpc_message(exc) for phrase in REFUSED):
                 logger.info("evm batcher %s send at nonce %d not taken (%s), retrying in a later round",
@@ -227,7 +223,7 @@ class EvmBatcher:
             return SKIPPED
         except Exception as exc:
             # It may have reached the node: the next round looks for its receipt.
-            logger.warning("evm batcher %s broadcast at nonce %d failed: %s", self.chain_id, nonce, _error(exc))
+            self._log_send_failure(tx_hash, nonce, exc)
             return STOPPED
         logger.info("evm batcher %s sent %s for %s at nonce %d", self.chain_id, tx_hash, row["owner"], nonce)
         return SENT
@@ -246,6 +242,25 @@ class EvmBatcher:
         if used is not None and any(n < used for n, _ in attempts):
             return None
         return False
+
+    def _log_send_failure(self, tx_hash: str, nonce: int, exc: Exception) -> None:
+        """What the chain says about a send that failed: logs are the only way
+        to trace it."""
+        try:
+            latest = self.evm.w3.eth.get_transaction_count(self.evm.address, "latest")
+            pending = self.evm.w3.eth.get_transaction_count(self.evm.address, "pending")
+            try:
+                self.evm.w3.eth.get_transaction(tx_hash)
+                known = True
+            except TransactionNotFound:
+                known = False
+            logger.warning(
+                "evm batcher %s send of %s at nonce %d failed (%s): latest_nonce=%s pending_nonce=%s known_to_node=%s",
+                self.chain_id, tx_hash, nonce, _error(exc), latest, pending, known,
+            )
+        except Exception as probe_exc:
+            logger.warning("evm batcher %s send of %s at nonce %d failed (%s); state probe failed (%s)",
+                           self.chain_id, tx_hash, nonce, _error(exc), _error(probe_exc))
 
     def _next_after_mined(self) -> int:
         top = self.db.execute(

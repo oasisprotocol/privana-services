@@ -147,13 +147,10 @@ MIGRATIONS = [
     # LiFi for the same one. NULL on quotes stored before it, which were
     # priced at LiFi's default.
     "ALTER TABLE quotes ADD COLUMN slippage_bps INTEGER;",
-    # A LiFi swap's signed txs, saved before broadcast so a restart awaits or
-    # rebroadcasts them instead of signing new ones.
+    # A LiFi swap's signed txs and, below, the hashes of their other versions,
+    # saved by the send path the EVM batcher replaced. No longer written.
     "ALTER TABLE swaps ADD COLUMN lifi_tx_raw TEXT;",
     "ALTER TABLE swaps ADD COLUMN deposit_tx_raw TEXT;",
-    # The hashes of a tx's versions other than `*_tx_hash`, space-separated. A
-    # re-sign at a higher fee keeps the nonce, so whichever version is mined
-    # settles the tx.
     "ALTER TABLE swaps ADD COLUMN lifi_tx_replaced TEXT;",
     "ALTER TABLE swaps ADD COLUMN deposit_tx_replaced TEXT;",
     # The LiFi output, for a restart at deposit.

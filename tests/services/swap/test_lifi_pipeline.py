@@ -488,6 +488,33 @@ class TestSlippageBpsToFloor:
         assert _slippage_bps_to_floor(57_000, 58_140, 10) is None
 
 
+class TestRefundPayout:
+    async def test_a_restart_during_the_refund_payout_parks_instead_of_paying_again(
+        self, test_db, settings, insert_quote
+    ):
+        insert_quote("q_rp", venue="lifi", user_address=USER,
+                     from_token_id=FROM_TOKEN, to_token_id=TO_TOKEN)
+        pipeline = _make_pipeline(settings)
+        pipeline.accounting.get_token_info = AsyncMock(return_value=FROM_INFO)
+        swap_id = _seed_swap(test_db, _quote("q_rp"))
+        pipeline._update_swap(swap_id, status="refunding", step="withdraw")
+
+        async def cut_short(*_):
+            # Restarted after the payout went out, before it was confirmed.
+            raise asyncio.CancelledError
+        pipeline._lp_transfer = AsyncMock(side_effect=cut_short)
+        with pytest.raises(asyncio.CancelledError):
+            await pipeline._refund(swap_id, _quote("q_rp"), "withdraw", "lifi down")
+        pipeline._lp_transfer = AsyncMock()
+
+        await _recovered(pipeline)
+
+        pipeline._lp_transfer.assert_not_awaited()
+        row = _swap_row(swap_id)
+        assert (row["status"], row["step"]) == ("failed", "credit")
+        assert row["error"].endswith("manual recovery required")
+
+
 class TestRefund:
     async def _launch_and_run(self, pipeline, quote):
         pipeline.spawn_background = MagicMock()

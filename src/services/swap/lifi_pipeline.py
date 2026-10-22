@@ -204,6 +204,8 @@ class LifiSwapPipeline:
                     else:
                         raise RuntimeError("input tokens not returned on-chain")
                 await self._deposit(swap_id, REFUND, from_info, amount)
+            # A restart from here parks instead of paying the user a second time.
+            self._update_swap(swap_id, step=LifiSwapStep.CREDIT.value)
             await self._lp_transfer(quote["user_address"], quote["from_token_id"], int(quote["from_amount"]))
             self._update_swap(swap_id, status=SwapStatus.REFUNDED.value)
             logger.info("lifi swap %s refunded", swap_id)

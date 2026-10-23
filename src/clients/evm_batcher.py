@@ -126,11 +126,14 @@ class EvmBatcher:
                 # An attempt holds a used nonce but has no receipt yet: signing
                 # again could send it twice. Once stuck, it is failed instead
                 # and its swap parks for a person.
+                if row["id"] not in self._used_since:
+                    logger.warning("evm batcher %s holds the queue: nonce of %s used, no receipt yet",
+                                   self.chain_id, row["owner"])
                 since = self._used_since.setdefault(row["id"], time.monotonic())
                 if time.monotonic() - since < STUCK_AFTER_SEC:
                     return progressed
                 taken = min(n for n, _ in self._attempts(row))
-                self._finish(row["id"], FAILED, nonce=taken, error="nonce taken by another tx")
+                self._finish(row, FAILED, nonce=taken, error="nonce taken by another tx")
                 progressed = True
             elif row["attempts"] and int(time.time()) - row["updated_at"] < RECEIPT_TIMEOUT_SEC:
                 # Its last attempt may still be mined: it gets a full receipt
@@ -190,7 +193,7 @@ class EvmBatcher:
             except (ContractLogicError, Web3RPCError) as exc:
                 # A revert or a refusal: the tx would fail, and nothing was signed.
                 if isinstance(exc, ContractLogicError) or any(p in _rpc_message(exc) for p in REFUSED + CALL_FAILED):
-                    self._finish(row["id"], FAILED, error=f"simulation failed: {redact_error(exc)}")
+                    self._finish(row, FAILED, error=f"simulation failed: {redact_error(exc)}")
                     return SKIPPED
                 logger.warning("evm batcher %s simulation at nonce %d failed: %s", self.chain_id, nonce, redact_error(exc))
                 return STOPPED
@@ -212,17 +215,17 @@ class EvmBatcher:
             self._log_send_failure(tx_hash, nonce, exc)
             # A retry is never failed: its earlier attempt may still be mined.
             if row["attempts"] or not any(phrase in _rpc_message(exc) for phrase in REFUSED):
-                logger.info("evm batcher %s send at nonce %d not taken (%s), retrying in a later round",
-                            self.chain_id, nonce, redact_error(exc))
                 return STOPPED
             # The node will never take it, so the nonce stays free for the next tx.
-            self._finish(row["id"], FAILED, error=redact_error(exc))
+            self._finish(row, FAILED, error=redact_error(exc))
             return SKIPPED
         except Exception as exc:
             # It may have reached the node: the next round looks for its receipt.
             self._log_send_failure(tx_hash, nonce, exc)
             return STOPPED
-        logger.info("evm batcher %s sent %s for %s at nonce %d", self.chain_id, tx_hash, row["owner"], nonce)
+        logger.info("evm batcher %s sent %s for %s at nonce %d, attempt %d, max fee %d, tip %d",
+                    self.chain_id, tx_hash, row["owner"], nonce, len(self._attempts(row)) + 1,
+                    fees["maxFeePerGas"], fees["maxPriorityFeePerGas"])
         return SENT
 
     def _settle(self, row: dict, used: Optional[int]) -> Optional[bool]:
@@ -233,7 +236,7 @@ class EvmBatcher:
             receipt = self.evm.get_receipt(tx_hash)
             if receipt is not None:
                 status = MINED if receipt["status"] == 1 else REVERTED
-                self._finish(row["id"], status, tx_hash=tx_hash, nonce=nonce,
+                self._finish(row, status, tx_hash=tx_hash, nonce=nonce,
                              logs=Web3.to_json(receipt.get("logs", [])))
                 return True
         if used is not None and any(n < used for n, _ in attempts):
@@ -292,16 +295,16 @@ class EvmBatcher:
         pairs = (a.split(":", 1) for a in (row["attempts"] or "").split())
         return [(int(n), h) for n, h in pairs]
 
-    def _finish(self, tx_id: int, status: str, tx_hash: Optional[str] = None, nonce: Optional[int] = None,
+    def _finish(self, row: dict, status: str, tx_hash: Optional[str] = None, nonce: Optional[int] = None,
                 logs: Optional[str] = None, error: Optional[str] = None) -> None:
-        self._used_since.pop(tx_id, None)
+        self._used_since.pop(row["id"], None)
         db_write(
             self.db,
             "UPDATE evm_transactions SET status = ?, tx_hash = ?, nonce = ?, logs = ?, error = ?, "
             "updated_at = ? WHERE id = ?",
-            (status, tx_hash, nonce, logs, error, int(time.time()), tx_id),
+            (status, tx_hash, nonce, logs, error, int(time.time()), row["id"]),
         )
-        logger.info("evm batcher %s tx %d %s%s", self.chain_id, tx_id, status,
+        logger.info("evm batcher %s tx %d for %s %s%s", self.chain_id, row["id"], row["owner"], status,
                     f": {error}" if error else f" as {tx_hash}")
 
 
@@ -333,7 +336,10 @@ def submit(chain_id: int, *intents: TxIntent) -> list[int]:
         [(chain_id, address, i.owner, i.to, i.data, str(i.value), i.gas, int(i.simulate), now, now)
          for i in intents],
     )
-    return [find_evm_tx(i.owner)["id"] for i in intents]
+    tx_ids = [find_evm_tx(i.owner)["id"] for i in intents]
+    for tx_id, intent in zip(tx_ids, intents):
+        logger.info("evm batcher %s queued tx %d for %s", chain_id, tx_id, intent.owner)
+    return tx_ids
 
 
 def find_evm_tx(owner: str) -> Optional[dict]:

@@ -294,8 +294,7 @@ class LifiSwapPipeline:
                                        exec_quote["estimate"]["approvalAddress"], amount),
                         swap,
                     ]
-                    tx_ids = self.batcher.submit(from_info.chain_id, *intents)
-                    logger.info("lifi swap %s queued txs %s", swap_id, tx_ids)
+                    self.batcher.submit(from_info.chain_id, *intents)
                     return
             await asyncio.sleep(self._poll_interval_sec)
         raise RuntimeError(f"swap funding unconfirmed after {FUNDING_POLLS} polls")
@@ -403,8 +402,7 @@ class LifiSwapPipeline:
         owner = _owner(swap_id, kind)
         if find_evm_tx(owner) is None:
             deposit_address = await self.bridge.get_deposit_address()
-            tx_ids = self.batcher.submit(info.chain_id, transfer_intent(owner, info.token_address, deposit_address, amount))
-            logger.info("lifi swap %s queued txs %s", swap_id, tx_ids)
+            self.batcher.submit(info.chain_id, transfer_intent(owner, info.token_address, deposit_address, amount))
         tx = await self._mined(swap_id, kind)
         self._update_swap(swap_id, deposit_tx_hash=tx["tx_hash"])
         for check in range(1, DEPOSIT_CREDIT_CHECKS + 1):

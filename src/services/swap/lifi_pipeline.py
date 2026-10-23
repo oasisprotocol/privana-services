@@ -53,8 +53,6 @@ REFUND_BALANCE_POLLS = 30
 DEPOSIT_CREDIT_CHECKS = 6
 # About 30 min for a withdrawal to reach the swap pool wallet.
 FUNDING_POLLS = 300
-# How often a swap waiting on its tx logs that it still waits.
-TX_WAIT_LOG_POLLS = 50
 
 # What each of a swap's txs is for, in its batcher owner.
 APPROVE = "approve"
@@ -280,8 +278,8 @@ class LifiSwapPipeline:
                     swap_id, quote, from_info, to_info, evm.address
                 )
                 request = exec_quote["transactionRequest"]
-                # Nothing awaits between this check and the submit, so another
-                # swap's spend is either counted here or not queued yet.
+                # Nothing awaits between this check's read of the queued spends and
+                # the submit, so another swap's spend is either counted or not queued yet.
                 if await self._holds(evm, token, quote["from_token_id"], amount, int(request["gasLimit"], 16)):
                     # The approval and the swap are queued together, so no other
                     # swap's approval for the same spender lands between them. The
@@ -352,13 +350,8 @@ class LifiSwapPipeline:
         """The swap's `kind` tx once its batcher has settled it. Anything but
         mined raises: the caller decides from the tx whether to refund."""
         tx_id = find_evm_tx(_owner(swap_id, kind))["id"]
-        polls = 0
         while (tx := evm_batcher.result(tx_id))["status"] == QUEUED:
-            polls += 1
-            if polls % TX_WAIT_LOG_POLLS == 0:
-                logger.info("lifi swap %s still waiting for its %s tx %d", swap_id, kind, tx_id)
             await asyncio.sleep(self._poll_interval_sec)
-        logger.info("lifi swap %s %s tx %d %s %s", swap_id, kind, tx_id, tx["status"], tx["tx_hash"] or tx["error"])
         if tx["status"] != MINED:
             raise RuntimeError(f"{kind} tx {tx_id} {tx['status']}: {tx['error'] or tx['tx_hash']}")
         return tx

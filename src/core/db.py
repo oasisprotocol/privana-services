@@ -267,16 +267,14 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
                 "updated_at = CAST(strftime('%s', 'now') AS INTEGER) "
                 "WHERE venue = 'lifi' AND status IN ('executing', 'refunding')"
             )
-        # LiFi swaps whose swap or deposit tx was sent before the EVM batcher
-        # took over have no batcher record: resuming would queue it again.
+        # The EVM batcher has no record of txs the old send path sent, and the
+        # old refund paid out with no marker: resuming either could repeat it.
         if conn.execute(
             "INSERT OR IGNORE INTO data_migrations (name) VALUES ('lifi_park_unbatched_v1')"
         ).rowcount:
             conn.execute(
                 "UPDATE swaps SET status = 'failed', error = COALESCE(error || '; ', '') "
-                "|| 'sent before the batcher upgrade; manual recovery required', "
+                "|| 'in flight at the batcher upgrade; manual recovery required', "
                 "updated_at = CAST(strftime('%s', 'now') AS INTEGER) "
-                "WHERE venue = 'lifi' AND ("
-                "(status = 'executing' AND step = 'lifi_execute' AND lifi_tx_hash IS NOT NULL) "
-                "OR (status IN ('executing', 'refunding') AND deposit_tx_hash IS NOT NULL))"
+                "WHERE venue = 'lifi' AND status IN ('executing', 'refunding')"
             )

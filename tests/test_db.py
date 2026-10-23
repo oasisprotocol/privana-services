@@ -58,40 +58,40 @@ class TestMigrations:
 
 
 class TestBatcherUpgrade:
-    def test_only_lifi_swaps_with_a_tx_from_the_old_send_path_are_parked(self, test_db):
+    def test_the_batcher_upgrade_parks_every_lifi_swap_in_flight_once(self, test_db):
         rows = {
-            "sent_swap": ("executing", "lifi_execute", "0xaa", None),
-            "unsent_swap": ("executing", "lifi_execute", None, None),
-            "sent_deposit": ("executing", "deposit", "0xaa", "0xbb"),
-            "unsent_deposit": ("executing", "deposit", "0xaa", None),
-            "sent_redeposit": ("refunding", "lifi_execute", "0xaa", "0xbb"),
-            "reverted_swap_refunding": ("refunding", "lifi_execute", "0xaa", None),
-            "done": ("completed", "credit", "0xaa", "0xbb"),
+            "executing": ("executing", "lifi"),
+            "refunding": ("refunding", "lifi"),
+            "done": ("completed", "lifi"),
+            "internal": ("executing", "internal"),
         }
-        for swap_id, (status, step, lifi_tx, deposit_tx) in rows.items():
+
+        def insert(swap_id, status, venue):
             test_db.execute(
                 "INSERT INTO swaps (id, quote_id, user_address, from_token_id, to_token_id, from_amount, "
-                "to_amount_estimate, status, venue, step, lifi_tx_hash, deposit_tx_hash, created_at, updated_at) "
-                "VALUES (?, 'q', '0xuser', '0xaa', '0xbb', '1', '1', ?, 'lifi', ?, ?, ?, 0, 0)",
-                (swap_id, status, step, lifi_tx, deposit_tx),
+                "to_amount_estimate, status, venue, created_at, updated_at) "
+                "VALUES (?, 'q', '0xuser', '0xaa', '0xbb', '1', '1', ?, ?, 0, 0)",
+                (swap_id, status, venue),
             )
+
+        for swap_id, (status, venue) in rows.items():
+            insert(swap_id, status, venue)
         test_db.execute("DELETE FROM data_migrations WHERE name = 'lifi_park_unbatched_v1'")
 
         db_module._run_migrations(test_db)
+        insert("after_upgrade", "executing", "lifi")
         db_module._run_migrations(test_db)
 
         statuses = dict(test_db.execute("SELECT id, status FROM swaps").fetchall())
         assert statuses == {
-            "sent_swap": "failed",
-            "unsent_swap": "executing",
-            "sent_deposit": "failed",
-            "unsent_deposit": "executing",
-            "sent_redeposit": "failed",
-            "reverted_swap_refunding": "refunding",
+            "executing": "failed",
+            "refunding": "failed",
             "done": "completed",
+            "internal": "executing",
+            "after_upgrade": "executing",
         }
-        error = test_db.execute("SELECT error FROM swaps WHERE id = 'sent_swap'").fetchone()[0]
-        assert error == "sent before the batcher upgrade; manual recovery required"
+        error = test_db.execute("SELECT error FROM swaps WHERE id = 'refunding'").fetchone()[0]
+        assert error == "in flight at the batcher upgrade; manual recovery required"
 
 
 class TestDbWrite:

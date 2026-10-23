@@ -77,7 +77,6 @@ class LifiSwapPipeline:
         lifi: Optional[Any] = None,
         bridge: Optional[Any] = None,
         evm: Optional[Any] = None,
-        batcher: Optional[Any] = None,
         privana_factory: Optional[Callable[[], Awaitable[Any]]] = None,
         poll_interval_sec: float = STATUS_POLL_INTERVAL_SEC,
     ) -> None:
@@ -87,7 +86,6 @@ class LifiSwapPipeline:
         self.bridge = bridge or AccountingBridge()
         # One client for every chain in tests; per chain otherwise.
         self.evm = evm
-        self.batcher = batcher or evm_batcher
         self._privana_factory = privana_factory or get_swap_lp_privana_client
         self._poll_interval_sec = poll_interval_sec
         self._credit_max_retries = CREDIT_MAX_RETRIES
@@ -294,7 +292,7 @@ class LifiSwapPipeline:
                                        exec_quote["estimate"]["approvalAddress"], amount),
                         swap,
                     ]
-                    self.batcher.submit(from_info.chain_id, *intents)
+                    evm_batcher.submit(from_info.chain_id, *intents)
                     return
             await asyncio.sleep(self._poll_interval_sec)
         raise RuntimeError(f"swap funding unconfirmed after {FUNDING_POLLS} polls")
@@ -355,7 +353,7 @@ class LifiSwapPipeline:
         mined raises: the caller decides from the tx whether to refund."""
         tx_id = find_evm_tx(_owner(swap_id, kind))["id"]
         polls = 0
-        while (tx := self.batcher.result(tx_id))["status"] == QUEUED:
+        while (tx := evm_batcher.result(tx_id))["status"] == QUEUED:
             polls += 1
             if polls % TX_WAIT_LOG_POLLS == 0:
                 logger.info("lifi swap %s still waiting for its %s tx %d", swap_id, kind, tx_id)
@@ -402,7 +400,7 @@ class LifiSwapPipeline:
         owner = _owner(swap_id, kind)
         if find_evm_tx(owner) is None:
             deposit_address = await self.bridge.get_deposit_address()
-            self.batcher.submit(info.chain_id, transfer_intent(owner, info.token_address, deposit_address, amount))
+            evm_batcher.submit(info.chain_id, transfer_intent(owner, info.token_address, deposit_address, amount))
         tx = await self._mined(swap_id, kind)
         self._update_swap(swap_id, deposit_tx_hash=tx["tx_hash"])
         for check in range(1, DEPOSIT_CREDIT_CHECKS + 1):

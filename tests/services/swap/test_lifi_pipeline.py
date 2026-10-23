@@ -122,12 +122,10 @@ class FakeBatcher:
     def __init__(self, receipt=None):
         self.outcomes: dict[str, str] = {}
         self.receipt = receipt or _swap_receipt(60000)
-
-    def submit(self, chain_id, *intents):
-        return evm_batcher.submit(chain_id, *intents)
+        self.read = evm_batcher.result
 
     def result(self, tx_id):
-        row = evm_batcher.result(tx_id)
+        row = self.read(tx_id)
         kind = row["owner"].rsplit(":", 1)[1]
         outcome = self.outcomes.get(kind, "mined")
         if row["status"] != "queued" or outcome == "queued":
@@ -139,7 +137,15 @@ class FakeBatcher:
         else:
             logs = self.receipt["logs"] if kind == "lifi" else []
             _settle(tx_id, outcome, tx_hash=self.HASHES[kind], nonce=7, logs=Web3.to_json(logs))
-        return evm_batcher.result(tx_id)
+        return self.read(tx_id)
+
+
+@pytest.fixture(autouse=True, name="batcher")
+def fake_batcher(monkeypatch):
+    """The fake every pipeline here polls its txs from."""
+    fake = FakeBatcher()
+    monkeypatch.setattr(evm_batcher, "result", lambda tx_id: fake.result(tx_id))
+    return fake
 
 
 def _settle(tx_id, status, tx_hash=None, nonce=None, logs=None, error=None, attempts=None):
@@ -182,7 +188,6 @@ def _make_pipeline(settings):
     bridge.await_deposit_credit = AsyncMock(return_value=None)
 
     evm = _evm()
-    batcher = FakeBatcher()
 
     privana = MagicMock()
     privana.transfer_funds = AsyncMock(return_value=MagicMock(status="submitted", detail=None))
@@ -191,7 +196,7 @@ def _make_pipeline(settings):
         return privana
 
     pipeline = LifiSwapPipeline(
-        accounting=accounting, lifi=lifi, bridge=bridge, evm=evm, batcher=batcher,
+        accounting=accounting, lifi=lifi, bridge=bridge, evm=evm,
         privana_factory=privana_factory, poll_interval_sec=0.0,
     )
     pipeline.settings = replace(settings, fee_bps=10, liquidity_provider_address=POOL)
@@ -326,12 +331,12 @@ class TestRun:
 
     @pytest.mark.parametrize("outcome", ["reverted", "failed", "refused"])
     async def test_a_deposit_that_is_not_mined_parks(
-        self, test_db, settings, insert_quote, outcome
+        self, batcher, test_db, settings, insert_quote, outcome
     ):
         insert_quote("q5", venue="lifi", user_address=USER,
                      from_token_id=FROM_TOKEN, to_token_id=TO_TOKEN)
         pipeline = _make_pipeline(settings)
-        pipeline.batcher.outcomes["deposit"] = outcome
+        batcher.outcomes["deposit"] = outcome
         swap_id = await self._launch_and_run(pipeline, _quote("q5"))
         row = _swap_row(swap_id)
         assert row["status"] == "failed"
@@ -539,13 +544,13 @@ class TestRefund:
         assert refund_call.amount == 1000000
 
     async def test_a_lifi_tx_that_never_signed_redeposits_then_refunds(
-        self, test_db, settings, insert_quote
+        self, batcher, test_db, settings, insert_quote
     ):
         insert_quote("q_e", venue="lifi", user_address=USER,
                      from_token_id=FROM_TOKEN, to_token_id=TO_TOKEN)
         pipeline = _make_pipeline(settings)
         # Its simulation reverted, so no attempt was ever signed.
-        pipeline.batcher.outcomes["lifi"] = "failed"
+        batcher.outcomes["lifi"] = "failed"
         pipeline.accounting.get_transfer_nonce = AsyncMock(side_effect=[6, 70, 71])
         pipeline.accounting.get_token_info = AsyncMock(
             side_effect=[FROM_INFO, TO_INFO, FROM_INFO])
@@ -565,7 +570,7 @@ class TestRefund:
         pipeline.evm.balance_of = MagicMock(return_value=0)
         swap_id = _seed_swap(test_db, _quote("q_p"))
         pipeline._update_swap(swap_id, status="refunding", step="lifi_execute")
-        pipeline.batcher.submit(FROM_INFO.chain_id, transfer_intent(
+        evm_batcher.submit(FROM_INFO.chain_id, transfer_intent(
             f"swap:{swap_id}:refund", FROM_INFO.token_address, DEPOSIT_ADDRESS, 1000000))
         await _recovered(pipeline)
         assert _swap_row(swap_id)["status"] == "refunded"
@@ -819,11 +824,11 @@ class TestNativeCoins:
         pipeline.lifi.get_status.assert_awaited_once_with(LIFI_TX, 999, 84532)
 
     async def test_native_output_on_the_same_chain_is_not_short_by_the_gas(
-        self, test_db, settings, insert_quote
+        self, batcher, test_db, settings, insert_quote
     ):
         pipeline = _make_pipeline(settings)
         # Gas moves the wallet balance, not the event.
-        pipeline.batcher.receipt = _swap_receipt(60000, token=self.NATIVE)
+        batcher.receipt = _swap_receipt(60000, token=self.NATIVE)
         pipeline.accounting.get_token_info = AsyncMock(side_effect=[
             FROM_INFO, self._info(TO_INFO, 84532, ""),
         ])
@@ -836,11 +841,11 @@ class TestNativeCoins:
         assert pipeline.lifi.get_execution_quote.call_args.kwargs["to_token_address"] == self.NATIVE
 
     async def test_a_refund_of_a_native_coin_goes_back_on_its_own_chain(
-        self, test_db, settings, insert_quote, monkeypatch
+        self, batcher, test_db, settings, insert_quote, monkeypatch
     ):
         pipeline = _make_pipeline(settings)
         self._per_chain(pipeline, monkeypatch, 999, 84532)
-        pipeline.batcher.outcomes["lifi"] = "reverted"
+        batcher.outcomes["lifi"] = "reverted"
         native = self._info(FROM_INFO, 999, None)
         pipeline.accounting.get_token_info = AsyncMock(side_effect=[native, TO_INFO, native])
         pipeline.accounting.get_transfer_nonce = AsyncMock(side_effect=[6, 70, 71])
@@ -858,21 +863,21 @@ class TestSettleByOutcome:
     """A LiFi tx settles by the batcher's row: its logs, or LiFi's status for a bridge."""
 
     async def test_a_receipt_after_the_send_timed_out_credits_and_never_refunds(
-        self, settings, insert_quote
+        self, batcher, settings, insert_quote
     ):
         # The batcher's receipt wait timed out: the row stays queued until a later round.
         pipeline = _make_pipeline(settings)
-        pipeline.batcher.outcomes["lifi"] = "queued"
+        batcher.outcomes["lifi"] = "queued"
         polls = 0
-        result = pipeline.batcher.result
+        result = batcher.result
 
         def mined_after_twenty_polls(tx_id):
             nonlocal polls
             polls += 1
             if polls > 20:
-                pipeline.batcher.outcomes["lifi"] = "mined"
+                batcher.outcomes["lifi"] = "mined"
             return result(tx_id)
-        pipeline.batcher.result = mined_after_twenty_polls
+        batcher.result = mined_after_twenty_polls
         pipeline._refund = AsyncMock()
 
         row = await _swap(pipeline, insert_quote)
@@ -884,9 +889,9 @@ class TestSettleByOutcome:
         pipeline.bridge.await_deposit_credit.assert_awaited_once_with(
             TO_INFO.chain_id, DEPOSIT_TX, 60000)
 
-    async def test_a_reverted_lifi_tx_refunds_once(self, settings, insert_quote):
+    async def test_a_reverted_lifi_tx_refunds_once(self, batcher, settings, insert_quote):
         pipeline = _make_pipeline(settings)
-        pipeline.batcher.outcomes["lifi"] = "reverted"
+        batcher.outcomes["lifi"] = "reverted"
         pipeline.accounting.get_token_info = AsyncMock(side_effect=[FROM_INFO, TO_INFO, FROM_INFO])
 
         row = await _swap(pipeline, insert_quote)
@@ -903,10 +908,10 @@ class TestSettleByOutcome:
         paid = [(p.to_address, p.token_id, p.amount) for p in payouts]
         assert paid == [(USER, FROM_TOKEN, 1000000)]
 
-    async def test_a_lifi_tx_that_failed_after_a_signed_attempt_parks(self, settings, insert_quote):
+    async def test_a_lifi_tx_that_failed_after_a_signed_attempt_parks(self, batcher, settings, insert_quote):
         # A signed attempt may have reached a node and spent the input.
         pipeline = _make_pipeline(settings)
-        pipeline.batcher.outcomes["lifi"] = "refused"
+        batcher.outcomes["lifi"] = "refused"
 
         row = await _swap(pipeline, insert_quote)
 
@@ -917,7 +922,7 @@ class TestSettleByOutcome:
         assert privana.transfer_funds.await_count == 1
 
     async def test_parallel_swaps_into_one_token_each_credit_their_own_output(
-        self, settings, insert_quote
+        self, batcher, settings, insert_quote
     ):
         pipeline = _make_pipeline(settings)
         infos = {FROM_TOKEN: FROM_INFO, TO_TOKEN: TO_INFO}
@@ -945,10 +950,9 @@ class TestSettleByOutcome:
             await pipeline.launch(quote, USER, 5, "0x" + "ab" * 65, swap_id)
             swaps.append((swap_id, quote))
         paid = {swaps[0][0]: 60000, swaps[1][0]: 70000}
-        batcher = pipeline.batcher
 
         def result_with_its_swaps_output(tx_id):
-            swap_id = evm_batcher.result(tx_id)["owner"].split(":")[1]
+            swap_id = batcher.read(tx_id)["owner"].split(":")[1]
             batcher.receipt = _swap_receipt(paid[swap_id])
             return FakeBatcher.result(batcher, tx_id)
         batcher.result = result_with_its_swaps_output
@@ -969,10 +973,10 @@ class TestSettleByOutcome:
         _swap_receipt(60000, token="0x" + "99" * 20),
     ], ids=["no event", "another emitter", "another receiver", "another token"])
     async def test_an_output_the_receipt_does_not_show_parks(
-        self, settings, insert_quote, receipt
+        self, batcher, settings, insert_quote, receipt
     ):
         pipeline = _make_pipeline(settings)
-        pipeline.batcher.receipt = receipt
+        batcher.receipt = receipt
         pipeline._refund = AsyncMock()
 
         row = await _swap(pipeline, insert_quote)
@@ -1100,12 +1104,12 @@ class TestFundingGate:
         assert pipeline.lifi.get_execution_quote.await_count == 2
         assert _kinds() == ["approve", "lifi", "deposit"]
 
-    async def test_an_input_another_swaps_queued_tx_will_spend_is_not_counted(self, settings, insert_quote):
+    async def test_an_input_another_swaps_queued_tx_will_spend_is_not_counted(self, batcher, settings, insert_quote):
         # Both swaps' withdrawals deliver the same token, but only the first has
         # arrived: the second must not queue against the first's input.
         pipeline = _make_pipeline(settings)
         pipeline.spawn_background = MagicMock()
-        pipeline.batcher.outcomes["lifi"] = "queued"
+        batcher.outcomes["lifi"] = "queued"
         swaps = []
         for quote_id in ("qf1", "qf2"):
             insert_quote(quote_id, venue="lifi", user_address=USER,
@@ -1228,7 +1232,7 @@ class TestResume:
     async def test_a_sent_lifi_tx_is_settled_not_sent_again(self, settings, insert_quote):
         pipeline = _make_pipeline(settings)
         swap_id, quote = self._seed(pipeline, insert_quote, "qr1", step="lifi_execute")
-        pipeline.batcher.submit(FROM_INFO.chain_id, TxIntent(
+        evm_batcher.submit(FROM_INFO.chain_id, TxIntent(
             owner=f"swap:{swap_id}:lifi", to=DIAMOND, gas=0x15fcbf, data="0xdead", simulate=False))
         # A restart can find the chain's RPC down: settling a sent tx needs none of it.
         pipeline._evm_for = MagicMock(side_effect=ValueError("No RPC is configured for chain 84532"))
@@ -1258,7 +1262,7 @@ class TestResume:
         swap_id, quote = self._seed(
             pipeline, insert_quote, "qr3", step="deposit", lifi_tx_hash=LIFI_TX,
             to_amount_received="60000")
-        pipeline.batcher.submit(TO_INFO.chain_id, transfer_intent(
+        evm_batcher.submit(TO_INFO.chain_id, transfer_intent(
             f"swap:{swap_id}:deposit", TO_INFO.token_address, DEPOSIT_ADDRESS, 60000))
 
         await pipeline._run(swap_id, quote, 5)

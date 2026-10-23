@@ -6,13 +6,11 @@ import pytest
 from eth_abi import encode
 from eth_account import Account
 from hexbytes import HexBytes
-from web3 import Web3
 
-from src.clients import evm_batcher
 from src.core.config import load_settings
-from src.core.db import db_write, get_db
 from src.core.eip712 import sign_transfer
 from src.models.common import Balance, TokenInfo
+from tests.services.swap.test_lifi_pipeline import _kinds, fake_batcher  # noqa: F401
 
 USER_SK = "0x" + "11" * 32
 USER = Account.from_key(USER_SK).address
@@ -94,35 +92,7 @@ def _stub_quote_service(lifi_enabled=True):
     return service
 
 
-class _Batcher:
-    """The batcher's queue on the test DB with no chain behind it: a queued tx
-    is mined when polled, the swap with `swap_logs`, or reverted when
-    `lifi_reverts`."""
-
-    def __init__(self, swap_logs, lifi_reverts):
-        self.swap_logs = swap_logs
-        self.lifi_reverts = lifi_reverts
-
-    def submit(self, chain_id, *intents):
-        return evm_batcher.submit(chain_id, *intents)
-
-    def result(self, tx_id):
-        row = evm_batcher.result(tx_id)
-        if row["status"] == "queued":
-            swap = row["owner"].endswith(":lifi")
-            db_write(get_db(), "UPDATE evm_transactions SET status = ?, tx_hash = ?, nonce = ?, logs = ? WHERE id = ?",
-                     ("reverted" if swap and self.lifi_reverts else "mined", f"0x{tx_id:064x}", tx_id,
-                      Web3.to_json(self.swap_logs if swap else []), tx_id))
-        return evm_batcher.result(tx_id)
-
-
-def _kinds():
-    """What each queued tx is for, oldest first."""
-    rows = get_db().execute("SELECT owner FROM evm_transactions ORDER BY id")
-    return [row["owner"].rsplit(":", 1)[1] for row in rows]
-
-
-def _stub_pipeline(settings, lifi_reverts=False):
+def _stub_pipeline(settings, batcher, lifi_reverts=False):
     import src.services.swap.lifi_pipeline as lp_mod
     from src.services.swap.lifi_pipeline import (
         SWAP_COMPLETED_DATA,
@@ -159,9 +129,11 @@ def _stub_pipeline(settings, lifi_reverts=False):
 
     pipeline = LifiSwapPipeline(
         accounting=accounting, lifi=lifi, bridge=bridge, evm=evm,
-        batcher=_Batcher([swapped], lifi_reverts),
         privana_factory=privana_factory, poll_interval_sec=0.0,
     )
+    batcher.receipt = {"logs": [swapped]}
+    if lifi_reverts:
+        batcher.outcomes["lifi"] = "reverted"
     pipeline.settings = replace(settings, fee_bps=10, liquidity_provider_address=LP_ADDRESS)
     lp_mod._pipeline_instance = pipeline
     return pipeline
@@ -207,9 +179,9 @@ class TestLifiSwapEndToEnd:
         assert resp.status_code == 400
         assert "Insufficient liquidity" in resp.json()["detail"]
 
-    async def test_full_lifi_swap_completes_via_polling(self, api_client, settings):
+    async def test_full_lifi_swap_completes_via_polling(self, api_client, settings, batcher):
         _stub_quote_service(lifi_enabled=True)
-        pipeline = _stub_pipeline(settings)
+        pipeline = _stub_pipeline(settings, batcher)
         _stub_executor(settings)
 
         quote_resp = await api_client.get("/v1/quote", params={
@@ -239,9 +211,9 @@ class TestLifiSwapEndToEnd:
         assert (credit.token_id, credit.amount, credit.nonce) == (TO_TOKEN, 59940, 70)
         assert _kinds() == ["approve", "lifi", "deposit"]
 
-    async def test_lifi_failure_ends_refunded(self, api_client, settings):
+    async def test_lifi_failure_ends_refunded(self, api_client, settings, batcher):
         _stub_quote_service(lifi_enabled=True)
-        pipeline = _stub_pipeline(settings, lifi_reverts=True)
+        pipeline = _stub_pipeline(settings, batcher, lifi_reverts=True)
         _stub_executor(settings)
 
         quote_resp = await api_client.get("/v1/quote", params={

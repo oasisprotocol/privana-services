@@ -1,5 +1,4 @@
 import logging
-import re
 import sqlite3
 import threading
 import time
@@ -12,7 +11,7 @@ from web3.exceptions import ContractLogicError, TransactionNotFound, Web3RPCErro
 from src.clients.base_evm import ERC20_ABI, RPC_SETTINGS, EvmClient, is_native
 from src.core.config import load_settings
 from src.core.db import connect, db_write, db_write_many, get_db
-from src.core.validation import URL_PATTERN
+from src.core.validation import redact_error
 
 logger = logging.getLogger(__name__)
 
@@ -48,8 +47,6 @@ STOPPED = "stopped"
 REFUSED = ("insufficient funds", "intrinsic gas too low", "exceeds block gas limit")
 # Simulation replies meaning the call fails as built, though not by a revert.
 CALL_FAILED = ("out of gas", "invalid opcode", "stack underflow", "stack overflow")
-# A key can sit in a URL or, in a requests error, in the path after "url: ".
-_RPC_PATH = re.compile(r"(?<=url: )\S+")
 
 
 @dataclass(frozen=True)
@@ -103,7 +100,7 @@ class EvmBatcher:
             try:
                 progressed = self.run_round()
             except Exception as exc:
-                logger.warning("evm batcher %s round failed: %s", self.chain_id, _error(exc))
+                logger.warning("evm batcher %s round failed: %s", self.chain_id, redact_error(exc))
                 progressed = False
             if not progressed:
                 self.stop.wait(IDLE_INTERVAL_SEC)
@@ -167,7 +164,7 @@ class EvmBatcher:
             try:
                 held = self._newest_held(row)
             except Exception as exc:
-                logger.warning("evm batcher %s lookup at nonce %d failed: %s", self.chain_id, nonce, _error(exc))
+                logger.warning("evm batcher %s lookup at nonce %d failed: %s", self.chain_id, nonce, redact_error(exc))
                 return STOPPED
             if held is not None:
                 if _includable(held, fees):
@@ -193,13 +190,13 @@ class EvmBatcher:
             except (ContractLogicError, Web3RPCError) as exc:
                 # A revert or a refusal: the tx would fail, and nothing was signed.
                 if isinstance(exc, ContractLogicError) or any(p in _rpc_message(exc) for p in REFUSED + CALL_FAILED):
-                    self._finish(row["id"], FAILED, error=f"simulation failed: {_error(exc)}")
+                    self._finish(row["id"], FAILED, error=f"simulation failed: {redact_error(exc)}")
                     return SKIPPED
-                logger.warning("evm batcher %s simulation at nonce %d failed: %s", self.chain_id, nonce, _error(exc))
+                logger.warning("evm batcher %s simulation at nonce %d failed: %s", self.chain_id, nonce, redact_error(exc))
                 return STOPPED
             except Exception as exc:
                 # The RPC, not the tx: what this round already sent is still awaited.
-                logger.warning("evm batcher %s simulation at nonce %d failed: %s", self.chain_id, nonce, _error(exc))
+                logger.warning("evm batcher %s simulation at nonce %d failed: %s", self.chain_id, nonce, redact_error(exc))
                 return STOPPED
         tx_hash, raw = self.evm.sign(tx)
         # Saved before broadcast: a later round checks it for a receipt before signing again.
@@ -216,10 +213,10 @@ class EvmBatcher:
             # A retry is never failed: its earlier attempt may still be mined.
             if row["attempts"] or not any(phrase in _rpc_message(exc) for phrase in REFUSED):
                 logger.info("evm batcher %s send at nonce %d not taken (%s), retrying in a later round",
-                            self.chain_id, nonce, _error(exc))
+                            self.chain_id, nonce, redact_error(exc))
                 return STOPPED
             # The node will never take it, so the nonce stays free for the next tx.
-            self._finish(row["id"], FAILED, error=_error(exc))
+            self._finish(row["id"], FAILED, error=redact_error(exc))
             return SKIPPED
         except Exception as exc:
             # It may have reached the node: the next round looks for its receipt.
@@ -256,11 +253,11 @@ class EvmBatcher:
                 known = False
             logger.warning(
                 "evm batcher %s send of %s at nonce %d failed (%s): latest_nonce=%s pending_nonce=%s known_to_node=%s",
-                self.chain_id, tx_hash, nonce, _error(exc), latest, pending, known,
+                self.chain_id, tx_hash, nonce, redact_error(exc), latest, pending, known,
             )
         except Exception as probe_exc:
             logger.warning("evm batcher %s send of %s at nonce %d failed (%s); state probe failed (%s)",
-                           self.chain_id, tx_hash, nonce, _error(exc), _error(probe_exc))
+                           self.chain_id, tx_hash, nonce, redact_error(exc), redact_error(probe_exc))
 
     def _next_after_mined(self) -> int:
         top = self.db.execute(
@@ -319,11 +316,6 @@ def _rpc_message(exc: Web3RPCError) -> str:
     """The node's own error message: web3 wraps it in the error's text."""
     error = (exc.rpc_response or {}).get("error") or {}
     return str(error.get("message") or exc).lower()
-
-
-def _error(exc: Exception) -> str:
-    """`exc` for a log line, without the RPC URL or path that can carry its key."""
-    return f"{type(exc).__name__}: {_RPC_PATH.sub('[url]', URL_PATTERN.sub('[url]', str(exc)))}"
 
 
 def submit(chain_id: int, *intents: TxIntent) -> list[int]:
@@ -399,7 +391,7 @@ def _serve(setting: str, rpc_url: str) -> None:
             except Exception as exc:
                 # Once a minute while it stays down.
                 if failures % 30 == 0:
-                    logger.warning("evm batcher for %s: RPC unreachable (%s)", setting, _error(exc))
+                    logger.warning("evm batcher for %s: RPC unreachable (%s)", setting, redact_error(exc))
                 failures += 1
                 _stop.wait(IDLE_INTERVAL_SEC)
         else:
@@ -411,7 +403,7 @@ def _serve(setting: str, rpc_url: str) -> None:
         logger.info("evm batcher %s started for %s", chain_id, setting)
         EvmBatcher(evm, chain_id, db, _stop).run()
     except Exception as exc:
-        logger.error("evm batcher for %s stopped: %s", setting, _error(exc))
+        logger.error("evm batcher for %s stopped: %s", setting, redact_error(exc))
     finally:
         if db is not None:
             db.close()

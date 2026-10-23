@@ -1,6 +1,7 @@
 import pytest
 
 from src.core.validation import (
+    redact_error,
     validate_address,
     validate_amount,
     validate_signature,
@@ -97,3 +98,14 @@ class TestValidateSignature:
     def test_rejects_wrong_length(self):
         with pytest.raises(ValueError, match="must be 65 bytes"):
             validate_signature("0x" + "aa" * 64)
+
+
+class TestRedactError:
+    def test_an_rpc_key_in_a_request_path_never_reaches_the_log(self):
+        error = ConnectionError("HTTPSConnectionPool(host='base-mainnet.g.alchemy.com', port=443): "
+                                "Max retries exceeded with url: /v2/SECRETKEY (Caused by timeout)")
+
+        logged = redact_error(error)
+
+        assert "SECRETKEY" not in logged
+        assert "with url: [url]" in logged

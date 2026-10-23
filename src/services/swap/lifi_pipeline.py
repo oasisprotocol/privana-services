@@ -30,7 +30,7 @@ from src.core.config import load_settings
 from src.core.db import db_write, get_db
 from src.core.eip712 import sign_transfer
 from src.core.fees import calculate_fee
-from src.core.validation import sanitize_error
+from src.core.validation import redact_error, sanitize_error
 from src.models.swap import LifiSwapStep, SwapRecord, SwapStatus, SwapVenue
 from src.services.swap.bridge import AccountingBridge
 from src.services.swap.failure import log_swap_failure
@@ -347,7 +347,7 @@ class LifiSwapPipeline:
                 amount += await asyncio.to_thread(evm.max_gas_cost, gas)
             balance = await asyncio.to_thread(evm.balance_of, token, evm.address)
         except Exception as exc:
-            logger.warning("balance or fees for %s unavailable: %s", token, exc)
+            logger.warning("balance or fees for %s unavailable: %s", token, redact_error(exc))
             return False
         return balance >= amount + _queued_spend(token_id)
 
@@ -377,7 +377,7 @@ class LifiSwapPipeline:
             except Exception as exc:
                 # LiFi answers 404 until it indexes the tx.
                 if not (isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 404):
-                    logger.warning("lifi status of %s unavailable: %s", tx_hash, exc)
+                    logger.warning("lifi status of %s unavailable: %s", tx_hash, redact_error(exc))
                 status = {}
             state, substatus = status.get("status"), status.get("substatus")
             # Only DONE with COMPLETED is a full delivery. DONE with PARTIAL or
@@ -414,7 +414,7 @@ class LifiSwapPipeline:
             except Exception as exc:
                 if check == DEPOSIT_CREDIT_CHECKS:
                     raise
-                logger.warning("lifi swap %s deposit %s not credited yet: %s", swap_id, tx["tx_hash"], exc)
+                logger.warning("lifi swap %s deposit %s not credited yet: %s", swap_id, tx["tx_hash"], redact_error(exc))
         logger.info("lifi swap %s deposit %s credited", swap_id, tx["tx_hash"])
 
     async def _credit(self, quote: dict, received: int) -> int:

@@ -690,16 +690,6 @@ def test_a_failed_send_is_logged_without_its_rpc_url(batcher, chain, caplog):
     assert "SECRETKEY" not in logged
 
 
-def test_an_rpc_key_in_a_request_path_never_reaches_the_log():
-    error = ConnectionError("HTTPSConnectionPool(host='base-mainnet.g.alchemy.com', port=443): "
-                            "Max retries exceeded with url: /v2/SECRETKEY (Caused by timeout)")
-
-    logged = module._error(error)
-
-    assert "SECRETKEY" not in logged
-    assert "with url: [url]" in logged
-
-
 def test_a_block_landing_mid_round_never_moves_a_retry_to_a_new_nonce(batcher, chain, test_db):
     first, second = queue(batcher, 2)
     refuse_used_nonces(chain)

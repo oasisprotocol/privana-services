@@ -1,5 +1,6 @@
 import json
 import threading
+import time
 
 import pytest
 from eth_account.typed_transactions import TypedTransaction
@@ -188,7 +189,7 @@ def test_every_attempt_is_saved_before_it_reaches_the_node(batcher, chain):
     seen = []
 
     def saved_first(raw):
-        seen.append(f"{nonce_of(raw)}:{hash_of(raw)}" in result(tx_id)["attempts"])
+        seen.append(f"{nonce_of(raw)}:{hash_of(raw)}" in result(tx_id)["attempts"] and not batcher.db.in_transaction)
 
     chain.on_send = saved_first
 
@@ -225,7 +226,7 @@ def test_a_partly_mined_batch_resends_only_the_stuck_tx_at_its_nonce(batcher, ch
 
 
 def test_a_used_nonce_without_a_receipt_yet_holds_the_round(batcher, chain):
-    queue(batcher, 1)
+    (tx_id,) = queue(batcher, 1)
     batcher.run_round()
     # The node counts the nonce as used before it serves the receipt.
     chain.pool.clear()
@@ -235,6 +236,7 @@ def test_a_used_nonce_without_a_receipt_yet_holds_the_round(batcher, chain):
     batcher.run_round()
 
     assert chain.sent == sent
+    assert result(tx_id)["status"] == "queued"
 
 
 def test_a_tx_whose_simulation_reverts_fails_without_using_a_nonce(batcher, chain):
@@ -281,14 +283,16 @@ def test_a_tx_the_node_refuses_fails_and_frees_its_nonce(batcher, chain):
     assert result(fine)["attempts"].startswith("0:")
 
 
-def test_a_refused_retry_stays_queued_as_its_first_attempt_may_still_land(batcher, chain):
+def test_a_refused_retry_stays_queued_as_its_first_attempt_may_still_land(batcher, chain, test_db):
     (tx_id,) = queue(batcher, 1)
     batcher.run_round()
     chain.pool.clear()
+    age(test_db, module.RECEIPT_TIMEOUT_SEC + 1)
     chain.refuse = [Web3RPCError("insufficient funds for gas * price + value")]
 
     batcher.run_round()
 
+    assert chain.refuse == []
     assert result(tx_id)["status"] == "queued"
 
 
@@ -409,6 +413,10 @@ def test_one_batcher_thread_starts_per_configured_chain(monkeypatch, settings):
     module.start_evm_batchers()
     try:
         assert started.wait(5)
+        # The third thread ends once it finds its chain already served.
+        deadline = time.monotonic() + 5
+        while sum(t.is_alive() for t in module._threads) > 2 and time.monotonic() < deadline:
+            time.sleep(0.01)
     finally:
         module.stop_evm_batchers()
 
@@ -533,16 +541,18 @@ def test_a_retry_the_node_refuses_waits_and_goes_out_once_taken(batcher, chain, 
     assert result(tx_id)["status"] == "mined"
 
 
-def test_a_tx_waits_out_the_receipt_window_before_it_is_signed_again(batcher, chain, test_db, monkeypatch):
+def test_a_tx_waits_out_the_receipt_window_before_it_or_the_txs_behind_go_out(batcher, chain, test_db, monkeypatch):
     (tx_id,) = queue(batcher, 1)
     batcher.run_round()
     monkeypatch.setattr(module, "RECEIPT_TIMEOUT_SEC", 60)
+    chain.pool.clear()
+    (behind,) = submit(CHAIN_ID, intent(owner="swap:z:lifi", data="0xbeef"))
     for _ in range(3):
         batcher.run_round()
     assert len(result(tx_id)["attempts"].split()) == 1
+    assert result(behind)["attempts"] is None
     age(test_db, 61)
     monkeypatch.setattr(module, "RECEIPT_TIMEOUT_SEC", 0.05)
-    chain.pool.clear()
 
     batcher.run_round()
 
@@ -764,16 +774,31 @@ def test_a_call_that_fails_as_built_fails_the_tx_unsigned(batcher, chain, reply)
     assert result(fine)["attempts"].startswith("0:")
 
 
+def test_an_earlier_attempt_mined_after_a_re_sign_settles_the_row_by_its_hash(batcher, chain, test_db):
+    (tx_id,) = queue(batcher, 1)
+    batcher.run_round()
+    age(test_db, module.RECEIPT_TIMEOUT_SEC + 1)
+    chain.base_fee = 50_000
+    batcher.run_round()
+    assert len(chain.sent) == 2
+    chain.pool[0] = chain.sent[0]
+    chain.mine()
+
+    batcher.run_round()
+
+    assert (result(tx_id)["status"], result(tx_id)["tx_hash"]) == ("mined", hash_of(chain.sent[0]))
+
+
 def test_a_held_version_outbid_by_the_market_tip_is_signed_again(batcher, chain, test_db):
     queue(batcher, 1)
     batcher.run_round()
     age(test_db, module.RECEIPT_TIMEOUT_SEC + 1)
-    chain.max_priority_fee = 10_000
+    chain.max_priority_fee = 500
 
     batcher.run_round()
 
     assert len(chain.sent) == 2
-    assert TypedTransaction.from_bytes(HexBytes(chain.sent[1])).as_dict()["maxPriorityFeePerGas"] >= 10_000
+    assert TypedTransaction.from_bytes(HexBytes(chain.sent[1])).as_dict()["maxPriorityFeePerGas"] >= 500
 
 
 def test_a_failed_send_logs_what_the_chain_says_about_it(batcher, chain, caplog):

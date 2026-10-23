@@ -908,6 +908,15 @@ class TestSettleByOutcome:
         paid = [(p.to_address, p.token_id, p.amount) for p in payouts]
         assert paid == [(USER, FROM_TOKEN, 1000000)]
 
+    async def test_a_failure_while_the_lifi_tx_is_queued_parks(self, settings, insert_quote):
+        pipeline = _make_pipeline(settings)
+        pipeline._mined = AsyncMock(side_effect=sqlite3.OperationalError("database is locked"))
+
+        row = await _swap(pipeline, insert_quote)
+
+        assert (row["status"], row["error"]) == ("failed", "database is locked; manual recovery required")
+        assert _kinds() == ["approve", "lifi"]
+
     async def test_a_lifi_tx_that_failed_after_a_signed_attempt_parks(self, batcher, settings, insert_quote):
         # A signed attempt may have reached a node and spent the input.
         pipeline = _make_pipeline(settings)
@@ -1163,8 +1172,12 @@ class TestFundingGate:
 class TestQueuedTxs:
     """What a swap hands the batcher to send."""
 
-    async def test_the_approval_and_the_swap_are_queued_together(self, settings, insert_quote):
+    async def test_the_approval_and_the_swap_are_queued_together(self, settings, insert_quote, monkeypatch):
         pipeline = _make_pipeline(settings)
+        submits = []
+        submit = evm_batcher.submit
+        monkeypatch.setattr(evm_batcher, "submit", lambda chain_id, *intents: (
+            submits.append([i.owner.rsplit(":", 1)[1] for i in intents]) or submit(chain_id, *intents)))
         spender = "0x" + "5a" * 20
         estimate = {**EXEC_QUOTE["estimate"], "approvalAddress": spender}
         pipeline.lifi.get_execution_quote = AsyncMock(return_value={**EXEC_QUOTE, "estimate": estimate})
@@ -1174,7 +1187,7 @@ class TestQueuedTxs:
         approve, swap, deposit = _txs()
         assert row["status"] == "completed"
         # One submit: no other swap's approval lands between them.
-        assert swap["id"] == approve["id"] + 1
+        assert submits == [["approve", "lifi"], ["deposit"]]
         assert (approve["owner"], approve["to_address"], approve["data"], approve["value"]) == (
             f"swap:{row['id']}:approve", FROM_INFO.token_address,
             _erc20("approve", spender, 1_000_000), "0")

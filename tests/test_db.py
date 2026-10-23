@@ -1,5 +1,7 @@
 import sqlite3
 
+import pytest
+
 import src.core.db as db_module
 from src.core.db import close_db, db_write
 
@@ -95,6 +97,13 @@ class TestBatcherUpgrade:
 
 
 class TestDbWrite:
+    def test_a_failed_write_leaves_no_transaction_open(self, test_db):
+        db_write(test_db, "INSERT INTO data_migrations (name) VALUES ('once')")
+        with pytest.raises(sqlite3.IntegrityError):
+            db_write(test_db, "INSERT INTO data_migrations (name) VALUES ('once')")
+
+        assert not test_db.in_transaction
+
     def test_inserts_and_commits(self, test_db):
         db_write(
             test_db,

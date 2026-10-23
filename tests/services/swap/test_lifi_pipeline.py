@@ -194,7 +194,7 @@ def _make_pipeline(settings):
         accounting=accounting, lifi=lifi, bridge=bridge, evm=evm, batcher=batcher,
         privana_factory=privana_factory, poll_interval_sec=0.0,
     )
-    pipeline.settings = replace(settings, fee_bps=10)
+    pipeline.settings = replace(settings, fee_bps=10, liquidity_provider_address=POOL)
     return pipeline
 
 
@@ -1230,6 +1230,8 @@ class TestResume:
         swap_id, quote = self._seed(pipeline, insert_quote, "qr1", step="lifi_execute")
         pipeline.batcher.submit(FROM_INFO.chain_id, TxIntent(
             owner=f"swap:{swap_id}:lifi", to=DIAMOND, gas=0x15fcbf, data="0xdead", simulate=False))
+        # A restart can find the chain's RPC down: settling a sent tx needs none of it.
+        pipeline._evm_for = MagicMock(side_effect=ValueError("No RPC is configured for chain 84532"))
 
         await pipeline._run(swap_id, quote, 5)
 

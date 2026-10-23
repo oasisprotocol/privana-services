@@ -162,7 +162,7 @@ def _stub_pipeline(settings, lifi_reverts=False):
         batcher=_Batcher([swapped], lifi_reverts),
         privana_factory=privana_factory, poll_interval_sec=0.0,
     )
-    pipeline.settings = replace(settings, fee_bps=10)
+    pipeline.settings = replace(settings, fee_bps=10, liquidity_provider_address=LP_ADDRESS)
     lp_mod._pipeline_instance = pipeline
     return pipeline
 

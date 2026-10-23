@@ -254,18 +254,18 @@ class LifiSwapPipeline:
         self._update_swap(swap_id, step=LifiSwapStep.LIFI_EXECUTE.value)
         from_info = await self.accounting.get_token_info(quote["from_token_id"])
         to_info = await self.accounting.get_token_info(quote["to_token_id"])
-        evm = self._evm_for(from_info.chain_id)
         if find_evm_tx(_owner(swap_id, LIFI)) is None:
-            await self._send_lifi_tx(swap_id, quote, from_info, to_info, evm)
+            await self._send_lifi_tx(swap_id, quote, from_info, to_info, self._evm_for(from_info.chain_id))
         tx = await self._mined(swap_id, LIFI)
         self._update_swap(swap_id, lifi_tx_hash=tx["tx_hash"])
+        pool = self.settings.liquidity_provider_address
         # The swap's reported output, not the wallet balance, which other swaps and gas move.
         if from_info.chain_id == to_info.chain_id:
             received = _swap_output(
-                tx["to_address"], json.loads(tx["logs"]), evm.address, _lifi_token(to_info.token_address)
+                tx["to_address"], json.loads(tx["logs"]), pool, _lifi_token(to_info.token_address)
             )
         else:
-            received = await self._bridge_output(tx["tx_hash"], from_info, to_info, evm.address)
+            received = await self._bridge_output(tx["tx_hash"], from_info, to_info, pool)
         return received, to_info
 
     async def _send_lifi_tx(

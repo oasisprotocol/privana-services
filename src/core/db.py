@@ -147,13 +147,10 @@ MIGRATIONS = [
     # LiFi for the same one. NULL on quotes stored before it, which were
     # priced at LiFi's default.
     "ALTER TABLE quotes ADD COLUMN slippage_bps INTEGER;",
-    # A LiFi swap's signed txs, saved before broadcast so a restart awaits or
-    # rebroadcasts them instead of signing new ones.
+    # A LiFi swap's signed txs and, below, the hashes of their other versions,
+    # saved by the send path the EVM batcher replaced. No longer written.
     "ALTER TABLE swaps ADD COLUMN lifi_tx_raw TEXT;",
     "ALTER TABLE swaps ADD COLUMN deposit_tx_raw TEXT;",
-    # The hashes of a tx's versions other than `*_tx_hash`, space-separated. A
-    # re-sign at a higher fee keeps the nonce, so whichever version is mined
-    # settles the tx.
     "ALTER TABLE swaps ADD COLUMN lifi_tx_replaced TEXT;",
     "ALTER TABLE swaps ADD COLUMN deposit_tx_replaced TEXT;",
     # The LiFi output, for a restart at deposit.
@@ -189,6 +186,9 @@ MIGRATIONS = [
         updated_at INTEGER NOT NULL
     );
     """,
+    # One tx per owner, so a caller resubmitting after a restart finds its tx
+    # instead of queuing a second one.
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_evm_tx_owner ON evm_transactions(owner);",
 ]
 
 
@@ -264,6 +264,17 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
             conn.execute(
                 "UPDATE swaps SET status = 'failed', error = COALESCE(error || '; ', '') "
                 "|| 'interrupted by upgrade; manual recovery required', "
+                "updated_at = CAST(strftime('%s', 'now') AS INTEGER) "
+                "WHERE venue = 'lifi' AND status IN ('executing', 'refunding')"
+            )
+        # The EVM batcher has no record of txs the old send path sent, and the
+        # old refund paid out with no marker: resuming either could repeat it.
+        if conn.execute(
+            "INSERT OR IGNORE INTO data_migrations (name) VALUES ('lifi_park_unbatched_v1')"
+        ).rowcount:
+            conn.execute(
+                "UPDATE swaps SET status = 'failed', error = COALESCE(error || '; ', '') "
+                "|| 'in flight at the batcher upgrade; manual recovery required', "
                 "updated_at = CAST(strftime('%s', 'now') AS INTEGER) "
                 "WHERE venue = 'lifi' AND status IN ('executing', 'refunding')"
             )

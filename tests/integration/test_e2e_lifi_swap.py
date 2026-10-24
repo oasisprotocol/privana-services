@@ -10,6 +10,7 @@ from hexbytes import HexBytes
 from src.core.config import load_settings
 from src.core.eip712 import sign_transfer
 from src.models.common import Balance, TokenInfo
+from tests.services.swap.test_lifi_pipeline import _kinds, fake_batcher  # noqa: F401
 
 USER_SK = "0x" + "11" * 32
 USER = Account.from_key(USER_SK).address
@@ -91,18 +92,7 @@ def _stub_quote_service(lifi_enabled=True):
     return service
 
 
-def _sends(tx_hash, nonce, error=None):
-    """A send that hands over the signed tx before broadcast, then mines or
-    raises, as EvmClient does."""
-    def send(*_, on_signed):
-        on_signed(tx_hash, nonce, "0x02" + tx_hash[2:])
-        if error is not None:
-            raise error
-        return tx_hash
-    return send
-
-
-def _stub_pipeline(settings, lifi_reverts=False):
+def _stub_pipeline(settings, batcher, lifi_reverts=False):
     import src.services.swap.lifi_pipeline as lp_mod
     from src.services.swap.lifi_pipeline import (
         SWAP_COMPLETED_DATA,
@@ -119,7 +109,6 @@ def _stub_pipeline(settings, lifi_reverts=False):
     bridge.withdraw_to_chain = AsyncMock(return_value=17)
     bridge.get_deposit_address = AsyncMock(return_value="0x" + "dd" * 20)
     bridge.await_deposit_credit = AsyncMock(return_value=None)
-    lifi_tx, deposit_tx = "0x" + "cd" * 32, "0x" + "ef" * 32
     diamond = EXEC_QUOTE["transactionRequest"]["to"]
     swapped = {
         "address": diamond,
@@ -129,18 +118,9 @@ def _stub_pipeline(settings, lifi_reverts=False):
             TO_INFO.token_address, 1000000, 60000,
         ]),
     }
-    lifi_receipt = {"status": 0, "to": diamond, "logs": []} if lifi_reverts else {
-        "status": 1, "to": diamond, "logs": [swapped]}
-    reverted = RuntimeError(f"transaction reverted: {lifi_tx}") if lifi_reverts else None
     evm = MagicMock()
-    evm.address = "0x152E6a7125665764a4F1F1df80E8f5D49Bf0239c"
+    evm.address = LP_ADDRESS
     evm.balance_of = MagicMock(return_value=1000000)
-    evm.ensure_allowance = MagicMock(return_value=None)
-    evm.send_transaction_request = MagicMock(side_effect=_sends(lifi_tx, 40, reverted))
-    evm.tx_lock = asyncio.Lock()
-    evm.transfer = MagicMock(side_effect=_sends(deposit_tx, 41))
-    evm.get_receipt = MagicMock(side_effect=lambda tx_hash: (
-        lifi_receipt if tx_hash == lifi_tx else {"status": 1, "to": None, "logs": []}))
     privana = MagicMock()
     privana.transfer_funds = AsyncMock(return_value=MagicMock(status="submitted", detail=None))
 
@@ -151,7 +131,10 @@ def _stub_pipeline(settings, lifi_reverts=False):
         accounting=accounting, lifi=lifi, bridge=bridge, evm=evm,
         privana_factory=privana_factory, poll_interval_sec=0.0,
     )
-    pipeline.settings = replace(settings, fee_bps=10)
+    batcher.receipt = {"logs": [swapped]}
+    if lifi_reverts:
+        batcher.outcomes["lifi"] = "reverted"
+    pipeline.settings = replace(settings, fee_bps=10, liquidity_provider_address=LP_ADDRESS)
     lp_mod._pipeline_instance = pipeline
     return pipeline
 
@@ -196,9 +179,9 @@ class TestLifiSwapEndToEnd:
         assert resp.status_code == 400
         assert "Insufficient liquidity" in resp.json()["detail"]
 
-    async def test_full_lifi_swap_completes_via_polling(self, api_client, settings):
+    async def test_full_lifi_swap_completes_via_polling(self, api_client, settings, batcher):
         _stub_quote_service(lifi_enabled=True)
-        pipeline = _stub_pipeline(settings)
+        pipeline = _stub_pipeline(settings, batcher)
         _stub_executor(settings)
 
         quote_resp = await api_client.get("/v1/quote", params={
@@ -226,12 +209,11 @@ class TestLifiSwapEndToEnd:
         credit = privana.transfer_funds.await_args.args[0]
         assert credit.to_address.lower() == USER.lower()
         assert (credit.token_id, credit.amount, credit.nonce) == (TO_TOKEN, 59940, 70)
-        pipeline.evm.send_transaction_request.assert_called_once()
-        pipeline.evm.transfer.assert_called_once()
+        assert _kinds() == ["approve", "lifi", "deposit"]
 
-    async def test_lifi_failure_ends_refunded(self, api_client, settings):
+    async def test_lifi_failure_ends_refunded(self, api_client, settings, batcher):
         _stub_quote_service(lifi_enabled=True)
-        pipeline = _stub_pipeline(settings, lifi_reverts=True)
+        pipeline = _stub_pipeline(settings, batcher, lifi_reverts=True)
         _stub_executor(settings)
 
         quote_resp = await api_client.get("/v1/quote", params={
@@ -255,4 +237,4 @@ class TestLifiSwapEndToEnd:
         refund = privana.transfer_funds.await_args.args[0]
         assert refund.to_address.lower() == USER.lower()
         assert (refund.token_id, refund.amount, refund.nonce) == (FROM_TOKEN, 1000000, 70)
-        pipeline.evm.send_transaction_request.assert_called_once()
+        assert _kinds() == ["approve", "lifi", "refund"]

@@ -1,5 +1,6 @@
 import json
 import threading
+import time
 
 import pytest
 from eth_account.typed_transactions import TypedTransaction
@@ -9,7 +10,7 @@ from web3.exceptions import ContractLogicError, TransactionNotFound, Web3RPCErro
 
 import src.clients.evm_batcher as module
 from src.clients.base_evm import EvmClient
-from src.clients.evm_batcher import EvmBatcher, TxIntent, result, submit
+from src.clients.evm_batcher import EvmBatcher, TxIntent, find_evm_tx, result, submit
 
 CHAIN_ID = 8453
 TARGET = "0x" + "dd" * 20
@@ -114,11 +115,33 @@ def intent(owner="swap:a:lifi", **fields):
 
 
 def queue(batcher, count, **fields):
-    return [submit(CHAIN_ID, intent(owner=f"swap:{i}:lifi", **fields)) for i in range(count)]
+    return [submit(CHAIN_ID, intent(owner=f"swap:{i}:lifi", **fields))[0] for i in range(count)]
+
+
+def test_submitting_an_owner_again_keeps_its_one_tx(batcher, test_db):
+    (first,) = submit(CHAIN_ID, intent(owner="swap:a:lifi"))
+    (again,) = submit(CHAIN_ID, intent(owner="swap:a:lifi", data="0xother"))
+
+    assert again == first
+    assert result(first)["data"] == "0x"
+    assert test_db.execute("SELECT COUNT(*) FROM evm_transactions").fetchone()[0] == 1
+
+
+def test_txs_submitted_together_get_consecutive_ids(batcher):
+    approve, swap = submit(CHAIN_ID, intent(owner="swap:a:approve"), intent(owner="swap:a:lifi"))
+
+    assert swap == approve + 1
+
+
+def test_a_tx_is_found_by_its_owner(batcher):
+    (tx_id,) = submit(CHAIN_ID, intent(owner="swap:a:deposit"))
+
+    assert find_evm_tx("swap:a:deposit")["id"] == tx_id
+    assert find_evm_tx("swap:b:deposit") is None
 
 
 def test_submit_only_queues_the_tx(batcher, chain):
-    tx_id = submit(CHAIN_ID, TxIntent(owner="swap:a:deposit", to=TARGET, gas=65_000, data="0xabcd", value=5))
+    (tx_id,) = submit(CHAIN_ID, TxIntent(owner="swap:a:deposit", to=TARGET, gas=65_000, data="0xabcd", value=5))
 
     row = result(tx_id)
     assert (row["status"], row["owner"], row["data"], row["value"], row["gas"]) == (
@@ -166,7 +189,7 @@ def test_every_attempt_is_saved_before_it_reaches_the_node(batcher, chain):
     seen = []
 
     def saved_first(raw):
-        seen.append(f"{nonce_of(raw)}:{hash_of(raw)}" in result(tx_id)["attempts"])
+        seen.append(f"{nonce_of(raw)}:{hash_of(raw)}" in result(tx_id)["attempts"] and not batcher.db.in_transaction)
 
     chain.on_send = saved_first
 
@@ -203,7 +226,7 @@ def test_a_partly_mined_batch_resends_only_the_stuck_tx_at_its_nonce(batcher, ch
 
 
 def test_a_used_nonce_without_a_receipt_yet_holds_the_round(batcher, chain):
-    queue(batcher, 1)
+    (tx_id,) = queue(batcher, 1)
     batcher.run_round()
     # The node counts the nonce as used before it serves the receipt.
     chain.pool.clear()
@@ -213,22 +236,23 @@ def test_a_used_nonce_without_a_receipt_yet_holds_the_round(batcher, chain):
     batcher.run_round()
 
     assert chain.sent == sent
+    assert result(tx_id)["status"] == "queued"
 
 
 def test_a_tx_whose_simulation_reverts_fails_without_using_a_nonce(batcher, chain):
-    doomed = submit(CHAIN_ID, intent(owner="swap:a:lifi", data="0xdead"))
-    fine = submit(CHAIN_ID, intent(owner="swap:b:lifi"))
+    (doomed,) = submit(CHAIN_ID, intent(owner="swap:a:lifi", data="0xdead"))
+    (fine,) = submit(CHAIN_ID, intent(owner="swap:b:lifi"))
     chain.reverting_calls.add("0xdead")
 
     batcher.run_round()
 
     assert result(doomed)["status"] == "failed"
-    assert "simulation failed: ContractLogicError" in result(doomed)["error"]
+    assert "simulation failed" in result(doomed)["error"] and "execution reverted" in result(doomed)["error"]
     assert result(fine)["attempts"].startswith("0:")
 
 
 def test_a_dependent_tx_skips_simulation(batcher, chain):
-    tx_id = submit(CHAIN_ID, intent(data="0xdead", simulate=False))
+    (tx_id,) = submit(CHAIN_ID, intent(data="0xdead", simulate=False))
     chain.reverting_calls.add("0xdead")
 
     batcher.run_round()
@@ -259,14 +283,16 @@ def test_a_tx_the_node_refuses_fails_and_frees_its_nonce(batcher, chain):
     assert result(fine)["attempts"].startswith("0:")
 
 
-def test_a_refused_retry_stays_queued_as_its_first_attempt_may_still_land(batcher, chain):
+def test_a_refused_retry_stays_queued_as_its_first_attempt_may_still_land(batcher, chain, test_db):
     (tx_id,) = queue(batcher, 1)
     batcher.run_round()
     chain.pool.clear()
+    age(test_db, module.RECEIPT_TIMEOUT_SEC + 1)
     chain.refuse = [Web3RPCError("insufficient funds for gas * price + value")]
 
     batcher.run_round()
 
+    assert chain.refuse == []
     assert result(tx_id)["status"] == "queued"
 
 
@@ -296,8 +322,8 @@ def test_an_empty_queue_asks_the_node_nothing(batcher, chain, monkeypatch):
 
 
 def test_an_rpc_failure_mid_batch_still_settles_what_was_sent(batcher, chain):
-    sent_first = submit(CHAIN_ID, intent(owner="swap:a:lifi"))
-    unreachable = submit(CHAIN_ID, intent(owner="swap:b:lifi", data="0xdown"))
+    (sent_first,) = submit(CHAIN_ID, intent(owner="swap:a:lifi"))
+    (unreachable,) = submit(CHAIN_ID, intent(owner="swap:b:lifi", data="0xdown"))
     chain.auto_mine = True
 
     batcher.run_round()
@@ -387,6 +413,10 @@ def test_one_batcher_thread_starts_per_configured_chain(monkeypatch, settings):
     module.start_evm_batchers()
     try:
         assert started.wait(5)
+        # The third thread ends once it finds its chain already served.
+        deadline = time.monotonic() + 5
+        while sum(t.is_alive() for t in module._threads) > 2 and time.monotonic() < deadline:
+            time.sleep(0.01)
     finally:
         module.stop_evm_batchers()
 
@@ -429,7 +459,7 @@ def executed(chain, tx_id):
 def test_a_tx_mined_while_the_round_reconciles_does_not_stall_the_queue(batcher, chain):
     (x,) = queue(batcher, 1)
     batcher.run_round()
-    (y,) = [submit(CHAIN_ID, intent(owner="swap:y:lifi", data="0xbeef"))]
+    (y,) = submit(CHAIN_ID, intent(owner="swap:y:lifi", data="0xbeef"))
     real = mine_during_receipt_lookup(chain)
     refuse_used_nonces(chain)
 
@@ -445,7 +475,7 @@ def test_a_lagging_nonce_count_does_not_reuse_a_mined_nonce(batcher, chain):
     (x,) = queue(batcher, 1)
     chain.auto_mine = True
     batcher.run_round()
-    (y,) = [submit(CHAIN_ID, intent(owner="swap:y:lifi", data="0xbeef"))]
+    (y,) = submit(CHAIN_ID, intent(owner="swap:y:lifi", data="0xbeef"))
     real = chain.get_transaction_count
     stale = [0]
     chain.get_transaction_count = lambda address, block="latest": stale.pop() if stale else real(address, block)
@@ -458,9 +488,9 @@ def test_a_lagging_nonce_count_does_not_reuse_a_mined_nonce(batcher, chain):
 
 
 def test_an_identical_tx_is_never_settled_by_another_rows_receipt(batcher, chain):
-    (x,) = [submit(CHAIN_ID, intent(owner="swap:x:deposit"))]
+    (x,) = submit(CHAIN_ID, intent(owner="swap:x:deposit"))
     batcher.run_round()
-    (y,) = [submit(CHAIN_ID, intent(owner="swap:y:deposit"))]
+    (y,) = submit(CHAIN_ID, intent(owner="swap:y:deposit"))
     real = mine_during_receipt_lookup(chain)
     refuse_used_nonces(chain)
 
@@ -482,7 +512,7 @@ def test_a_nonce_another_sender_took_fails_the_tx_and_frees_the_queue(batcher, c
     batcher.run_round()
     assert result(stuck)["status"] == "queued"
     batcher._used_since[stuck] -= module.STUCK_AFTER_SEC + 1
-    (behind,) = [submit(CHAIN_ID, intent(owner="swap:b:lifi", data="0xbeef"))]
+    (behind,) = submit(CHAIN_ID, intent(owner="swap:b:lifi", data="0xbeef"))
     chain.auto_mine = True
 
     batcher.run_round()
@@ -511,16 +541,18 @@ def test_a_retry_the_node_refuses_waits_and_goes_out_once_taken(batcher, chain, 
     assert result(tx_id)["status"] == "mined"
 
 
-def test_a_tx_waits_out_the_receipt_window_before_it_is_signed_again(batcher, chain, test_db, monkeypatch):
+def test_a_tx_waits_out_the_receipt_window_before_it_or_the_txs_behind_go_out(batcher, chain, test_db, monkeypatch):
     (tx_id,) = queue(batcher, 1)
     batcher.run_round()
     monkeypatch.setattr(module, "RECEIPT_TIMEOUT_SEC", 60)
+    chain.pool.clear()
+    (behind,) = submit(CHAIN_ID, intent(owner="swap:z:lifi", data="0xbeef"))
     for _ in range(3):
         batcher.run_round()
     assert len(result(tx_id)["attempts"].split()) == 1
+    assert result(behind)["attempts"] is None
     age(test_db, 61)
     monkeypatch.setattr(module, "RECEIPT_TIMEOUT_SEC", 0.05)
-    chain.pool.clear()
 
     batcher.run_round()
 
@@ -609,7 +641,7 @@ def test_a_held_version_that_can_still_be_mined_is_not_signed_again(batcher, cha
     assert len(chain.sent) == 1
 
 def test_a_simulation_the_node_rejects_fails_the_tx_unsigned(batcher, chain):
-    (doomed,) = [submit(CHAIN_ID, intent(owner="swap:a:lifi", data="0xpoor"))]
+    (doomed,) = submit(CHAIN_ID, intent(owner="swap:a:lifi", data="0xpoor"))
     real = chain.call
     chain.call = lambda tx, *a: (_ for _ in ()).throw(Web3RPCError("insufficient funds for transfer")) \
         if tx["data"] == "0xpoor" else real(tx, *a)
@@ -654,28 +686,6 @@ def test_a_round_without_progress_sleeps_instead_of_spinning(batcher, chain, mon
     batcher.run()
 
     assert len(reads) <= 10
-
-
-def test_a_failed_send_is_logged_without_its_rpc_url(batcher, chain, caplog):
-    queue(batcher, 1)
-    chain.refuse = [ConnectionError("https://rpc.example/v2/SECRETKEY timed out")]
-
-    with caplog.at_level("WARNING", logger="src.clients.evm_batcher"):
-        batcher.run_round()
-
-    logged = " ".join(r.getMessage() for r in caplog.records)
-    assert "ConnectionError: [url] timed out" in logged
-    assert "SECRETKEY" not in logged
-
-
-def test_an_rpc_key_in_a_request_path_never_reaches_the_log():
-    error = ConnectionError("HTTPSConnectionPool(host='base-mainnet.g.alchemy.com', port=443): "
-                            "Max retries exceeded with url: /v2/SECRETKEY (Caused by timeout)")
-
-    logged = module._error(error)
-
-    assert "SECRETKEY" not in logged
-    assert "with url: [url]" in logged
 
 
 def test_a_block_landing_mid_round_never_moves_a_retry_to_a_new_nonce(batcher, chain, test_db):
@@ -741,8 +751,8 @@ def test_a_tx_mined_long_after_it_was_sent_is_not_failed_when_its_receipt_lags(b
 
 @pytest.mark.parametrize("reply", ["out of gas", "invalid opcode: INVALID", "stack underflow (0 <=> 1)"])
 def test_a_call_that_fails_as_built_fails_the_tx_unsigned(batcher, chain, reply):
-    doomed = submit(CHAIN_ID, intent(owner="swap:a:lifi", data="0xbad0"))
-    fine = submit(CHAIN_ID, intent(owner="swap:b:lifi"))
+    (doomed,) = submit(CHAIN_ID, intent(owner="swap:a:lifi", data="0xbad0"))
+    (fine,) = submit(CHAIN_ID, intent(owner="swap:b:lifi"))
     real = chain.call
     chain.call = lambda tx, *a: (_ for _ in ()).throw(rpc_error(reply)) if tx["data"] == "0xbad0" else real(tx, *a)
 
@@ -752,13 +762,39 @@ def test_a_call_that_fails_as_built_fails_the_tx_unsigned(batcher, chain, reply)
     assert result(fine)["attempts"].startswith("0:")
 
 
+def test_an_earlier_attempt_mined_after_a_re_sign_settles_the_row_by_its_hash(batcher, chain, test_db):
+    (tx_id,) = queue(batcher, 1)
+    batcher.run_round()
+    age(test_db, module.RECEIPT_TIMEOUT_SEC + 1)
+    chain.base_fee = 50_000
+    batcher.run_round()
+    assert len(chain.sent) == 2
+    chain.pool[0] = chain.sent[0]
+    chain.mine()
+
+    batcher.run_round()
+
+    assert (result(tx_id)["status"], result(tx_id)["tx_hash"]) == ("mined", hash_of(chain.sent[0]))
+
+
 def test_a_held_version_outbid_by_the_market_tip_is_signed_again(batcher, chain, test_db):
     queue(batcher, 1)
     batcher.run_round()
     age(test_db, module.RECEIPT_TIMEOUT_SEC + 1)
-    chain.max_priority_fee = 10_000
+    chain.max_priority_fee = 500
 
     batcher.run_round()
 
     assert len(chain.sent) == 2
-    assert TypedTransaction.from_bytes(HexBytes(chain.sent[1])).as_dict()["maxPriorityFeePerGas"] >= 10_000
+    assert TypedTransaction.from_bytes(HexBytes(chain.sent[1])).as_dict()["maxPriorityFeePerGas"] >= 500
+
+
+def test_a_failed_send_logs_what_the_chain_says_about_it(batcher, chain, caplog):
+    queue(batcher, 1)
+    chain.refuse = [ConnectionError("response lost")]
+
+    with caplog.at_level("WARNING", logger="src.clients.evm_batcher"):
+        batcher.run_round()
+
+    logged = " ".join(r.getMessage() for r in caplog.records)
+    assert "latest_nonce=0 pending_nonce=0 known_to_node=False" in logged

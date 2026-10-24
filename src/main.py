@@ -106,6 +106,10 @@ async def lifespan(_app: FastAPI):
     swap_worker = get_swap_worker()
     await swap_worker.start()
 
+    from src.clients.evm_batcher import start_evm_batchers, stop_evm_batchers
+
+    start_evm_batchers()
+
     try:
         await get_price_sampler().start()
     except Exception:
@@ -166,6 +170,7 @@ async def lifespan(_app: FastAPI):
     except Exception:
         logger.warning("Error closing Li.Fi client")
 
+    stop_evm_batchers()
     close_db()
     logger.info("Privana services shut down")
 

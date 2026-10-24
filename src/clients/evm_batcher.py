@@ -189,7 +189,7 @@ class EvmBatcher:
         # simulation, since its earlier attempt may still be mined.
         if row["simulate"] and not row["attempts"]:
             try:
-                self.evm.w3.eth.call({k: tx[k] for k in ("from", "to", "data", "value", "gas")})
+                self.evm.w3.eth.call(tx)
             except (ContractLogicError, Web3RPCError) as exc:
                 # A revert or a refusal: the tx would fail, and nothing was signed.
                 if isinstance(exc, ContractLogicError) or any(p in _rpc_message(exc) for p in REFUSED + CALL_FAILED):

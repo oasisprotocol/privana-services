@@ -32,8 +32,6 @@ MAX_ERROR_LENGTH = 500
 MAX_REVERT_REASON_LENGTH = 200
 
 URL_PATTERN = re.compile(r"https?://\S+")
-# A key can sit in a URL or, in a requests error, in the path after "url: ".
-RPC_PATH_PATTERN = re.compile(r"(?<=url: )\S+")
 # A bare RPC endpoint can ride along on a revert line without a scheme, e.g.
 # "via rpc.internal:8545" or "192.168.1.5:8545". Scrub dotted hosts and IPv4
 # (optional :port) too. The domain arm requires a letters-only final label so
@@ -78,8 +76,3 @@ def validate_signature(value: str, name: str = "signature") -> None:
         raise ValueError(f"{name} must be valid hex") from None
     if len(sig_bytes) != 65:
         raise ValueError(f"{name} must be 65 bytes")
-
-
-def redact_error(exc: Exception) -> str:
-    """`exc` for a log line, without the RPC URL or path that can carry its key."""
-    return f"{type(exc).__name__}: {RPC_PATH_PATTERN.sub('[url]', URL_PATTERN.sub('[url]', str(exc)))}"

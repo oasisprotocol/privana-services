@@ -33,6 +33,14 @@ def test_load_settings_without_lp_key_does_not_crash(monkeypatch):
     config_module.load_settings(refresh=True)
 
 
+def test_earn_account_does_not_fall_back_to_the_lp_key(monkeypatch):
+    monkeypatch.setenv("LIQUIDITY_PROVIDER_SECRET_KEY", "0x" + "11" * 32)
+    monkeypatch.delenv("EARN_POOL_SECRET_KEY", raising=False)
+    settings = config_module.load_settings(refresh=True)
+    assert (settings.earn_pool_secret_key, settings.earn_pool_address) == ("", "")
+    config_module.load_settings(refresh=True)
+
+
 def test_sapphire_rpc_headers_unset_returns_empty(monkeypatch):
     monkeypatch.delenv("SAPPHIRE_RPC_HEADERS", raising=False)
     assert config_module._build_sapphire_rpc_headers() == {}

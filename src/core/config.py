@@ -68,9 +68,7 @@ def load_settings(refresh: bool = False) -> Settings:
     if _settings is None or refresh:
         lp_secret_key = os.getenv("LIQUIDITY_PROVIDER_SECRET_KEY")
         lp_address = Account.from_key(lp_secret_key).address if lp_secret_key else ""
-        # Falls back to the LP account so existing deployments keep working;
-        # pools created against the LP address predate the split.
-        earn_pool_secret_key = os.getenv("EARN_POOL_SECRET_KEY") or lp_secret_key or ""
+        earn_pool_secret_key = os.getenv("EARN_POOL_SECRET_KEY", "")
         earn_pool_address = (
             Account.from_key(earn_pool_secret_key).address if earn_pool_secret_key else ""
         )

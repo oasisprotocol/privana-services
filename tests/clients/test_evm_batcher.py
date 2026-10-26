@@ -384,7 +384,6 @@ def test_one_batcher_thread_starts_per_chain_and_account(monkeypatch, settings):
     from dataclasses import replace
 
     served = []
-    started = threading.Event()
 
     class Chain:
         def __init__(self, chain_id):
@@ -392,38 +391,40 @@ def test_one_batcher_thread_starts_per_chain_and_account(monkeypatch, settings):
 
     class Batcher:
         def __init__(self, evm, chain_id, db, stop):
+            self.evm = evm
             self.chain_id = chain_id
             self.stop = stop
 
         def run(self):
-            served.append(self.chain_id)
-            if len(served) == 2:
-                started.set()
+            served.append((self.chain_id, self.evm.address, self.evm._headers))
             self.stop.wait()
 
-    def client(rpc_url, key):
-        evm = EvmClient("http://localhost:1", key)
-        evm.w3.eth = Chain({"http://base": 8453, "http://eth": 1, "http://base-again": 8453}[rpc_url])
+    chains = {"http://base": 8453, "http://eth": 1, "http://base-again": 8453, "http://sapphire": 23295}
+
+    def client(rpc_url, key, headers):
+        evm = EvmClient("http://localhost:1", key, headers)
+        evm.w3.eth = Chain(chains[rpc_url])
         return evm
 
+    auth = {"Authorization": "Bearer t"}
     monkeypatch.setattr(module, "load_settings", lambda: replace(
-        settings, base_rpc_url="http://base", ethereum_rpc_url="http://eth", hyperevm_rpc_url="http://base-again"))
+        settings, base_rpc_url="http://base", ethereum_rpc_url="http://eth", hyperevm_rpc_url="http://base-again",
+        sapphire_rpc_url="http://sapphire", sapphire_rpc_headers=auth))
     monkeypatch.setattr(module, "EvmClient", client)
     monkeypatch.setattr(module, "EvmBatcher", Batcher)
     monkeypatch.setattr(module, "connect", lambda: __import__("sqlite3").connect(":memory:"))
 
     module.start_evm_batchers()
     try:
-        assert started.wait(5)
-        # The third thread ends once it finds its chain already served.
+        # The LP's thread for the second RPC of chain 8453 ends once it finds it served.
         deadline = time.monotonic() + 5
-        while sum(t.is_alive() for t in module._threads) > 2 and time.monotonic() < deadline:
+        while (len(served) < 3 or sum(t.is_alive() for t in module._threads) > 3) and time.monotonic() < deadline:
             time.sleep(0.01)
     finally:
         module.stop_evm_batchers()
 
-    # A second RPC for chain 8453 would be a second sender for its nonces.
-    assert sorted(served) == [1, 8453]
+    # A second RPC for chain 8453 would be a second LP sender for its nonces.
+    assert sorted(served) == sorted([(8453, LP, {}), (1, LP, {}), (23295, LP, auth)])
 
 
 def refuse_used_nonces(chain):

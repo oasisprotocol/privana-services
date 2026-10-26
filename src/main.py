@@ -37,6 +37,12 @@ def _validate_settings() -> None:
         errors.append("PRIVANA_API_BASE_URL is not set")
     if not settings.base_rpc_url:
         errors.append("BASE_RPC_URL is not set")
+    # Pool payouts and moves sign as the earn account: never the LP's float.
+    if settings.aave_pool_assets or settings.midas_pool_assets:
+        if not settings.earn_pool_address:
+            errors.append("EARN_POOL_SECRET_KEY is not set but earn pools are configured")
+        elif settings.earn_pool_address.lower() == settings.liquidity_provider_address.lower():
+            errors.append("EARN_POOL_SECRET_KEY is the LP's key; earn needs its own account")
     if not settings.internal_swap_token_ids:
         errors.append("INTERNAL_SWAP_TOKEN_IDS is not set")
     for token_id in sorted(settings.internal_swap_token_ids):

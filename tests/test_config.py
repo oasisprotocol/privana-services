@@ -166,3 +166,20 @@ def test_internal_swap_token_ids_parses_a_multiline_list(monkeypatch):
     monkeypatch.setenv("INTERNAL_SWAP_TOKEN_IDS", "\n    0xAA,\n    0xbb,\n")
     settings = config_module.load_settings(refresh=True)
     assert settings.internal_swap_token_ids == {"0xaa", "0xbb"}
+
+
+@pytest.mark.parametrize("earn_pool_address,error", [
+    ("", "EARN_POOL_SECRET_KEY is not set but earn pools are configured"),
+    ("LP", "EARN_POOL_SECRET_KEY is the LP's key"),
+])
+def test_validate_settings_refuses_earn_pools_without_their_own_account(monkeypatch, earn_pool_address, error):
+    lp = "0x" + "d" * 40
+    crafted = _settings_with(
+        liquidity_provider_address=lp,
+        earn_pool_address=lp if earn_pool_address == "LP" else earn_pool_address,
+        aave_pool_assets="0x" + "e" * 64,
+        environment="production",
+    )
+    monkeypatch.setattr(main_module, "settings", crafted)
+    with pytest.raises(RuntimeError, match=error):
+        main_module._validate_settings()

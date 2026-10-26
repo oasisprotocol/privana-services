@@ -16,6 +16,12 @@ from src.models.settings import Settings
 logger = logging.getLogger(__name__)
 
 BATCH_SIZE = 10
+# Txs one Sapphire account sends per round. oasis-core 26.3's compute node
+# panics (txpool maxPriorityTxHeap.replace, index out of range [-1]) when
+# several txs from one account reach its pool together: 3 to 10 crashed a
+# localnet, 2 did not, and 10 txs from 10 accounts were fine. Raise it only
+# once the node version Sapphire runs is known to be fixed.
+SAPPHIRE_BATCH_SIZE = 1
 TRANSFER_GAS_LIMIT = 100_000
 NATIVE_TRANSFER_GAS_LIMIT = 21_000
 APPROVE_GAS_LIMIT = 80_000
@@ -91,6 +97,7 @@ class EvmBatcher:
 
     def __init__(self, evm: EvmClient, chain_id: int, db: sqlite3.Connection, stop: threading.Event) -> None:
         self.evm = evm
+        self.batch_size = SAPPHIRE_BATCH_SIZE if evm.sapphire else BATCH_SIZE
         self.chain_id = chain_id
         self.db = db
         self.stop = stop
@@ -113,7 +120,7 @@ class EvmBatcher:
         rows = [dict(r) for r in self.db.execute(
             "SELECT * FROM evm_transactions WHERE chain_id = ? AND address = ? AND status = ? "
             "ORDER BY id LIMIT ?",
-            (self.chain_id, self.evm.address.lower(), QUEUED, BATCH_SIZE),
+            (self.chain_id, self.evm.address.lower(), QUEUED, self.batch_size),
         ).fetchall()]
         if not rows:
             return False

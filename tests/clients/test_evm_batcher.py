@@ -308,8 +308,8 @@ def test_a_send_that_may_have_reached_the_node_stays_queued(batcher, chain):
     assert result(tx_id)["attempts"].startswith("0:")
 
 
-def test_a_round_takes_at_most_the_batch_size(batcher, chain, monkeypatch):
-    monkeypatch.setattr(module, "BATCH_SIZE", 3)
+def test_a_round_takes_at_most_the_batch_size(batcher, chain):
+    batcher.batch_size = 3
     queue(batcher, 5)
 
     batcher.run_round()

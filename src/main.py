@@ -107,8 +107,14 @@ async def lifespan(_app: FastAPI):
     await swap_worker.start()
 
     from src.clients.evm_batcher import start_evm_batchers, stop_evm_batchers
+    from src.clients.privana_lanes import (
+        run_transfer_lanes,
+        start_withdraw_lanes,
+        stop_withdraw_lanes,
+    )
 
-    start_evm_batchers()
+    start_evm_batchers(run_transfer_lanes)
+    start_withdraw_lanes()
 
     try:
         await get_price_sampler().start()
@@ -161,6 +167,7 @@ async def lifespan(_app: FastAPI):
         await get_earn_worker().stop()
     except Exception:
         logger.warning("Error stopping earn worker")
+    await stop_withdraw_lanes()
     try:
         await get_accounting_client().close()
     except Exception:

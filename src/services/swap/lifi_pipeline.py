@@ -25,7 +25,7 @@ from src.clients.evm_batcher import (
     transfer_intent,
 )
 from src.clients.lifi import LIFI_DEFAULT_SLIPPAGE_BPS, get_lifi_client
-from src.clients.privana import get_swap_lp_privana_client
+from src.clients.privana import ACCEPTED_SUBMISSION_STATUSES, get_swap_lp_privana_client
 from src.core.config import load_settings
 from src.core.db import db_write, get_db
 from src.core.eip712 import sign_transfer
@@ -38,7 +38,6 @@ from src.services.swap.worker import lp_transfer_lock
 
 logger = logging.getLogger(__name__)
 
-ACCEPTED_SUBMISSION_STATUSES = {"submitted", "pending", "accepted"}
 LIFI_STATUS_DONE = "DONE"
 LIFI_STATUS_FAILED = "FAILED"
 LIFI_STATUS_INVALID = "INVALID"

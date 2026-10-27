@@ -6,6 +6,26 @@
       "outputs": [{"internalType": "uint256", "name": "", "type": "uint256"}],
       "stateMutability": "view",
       "type": "function"
+    },
+    {
+      "inputs": [{"internalType": "address", "name": "", "type": "address"}],
+      "name": "withdrawalNonces",
+      "outputs": [{"internalType": "uint256", "name": "", "type": "uint256"}],
+      "stateMutability": "view",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        {"internalType": "address", "name": "toAddress", "type": "address"},
+        {"internalType": "bytes32", "name": "tokenId", "type": "bytes32"},
+        {"internalType": "uint256", "name": "amount", "type": "uint256"},
+        {"internalType": "uint256", "name": "nonce", "type": "uint256"},
+        {"internalType": "bytes", "name": "signature", "type": "bytes"}
+      ],
+      "name": "transferBalance",
+      "outputs": [],
+      "stateMutability": "nonpayable",
+      "type": "function"
     }
   ]
 }

@@ -9,6 +9,7 @@ import httpx
 from eth_account import Account
 from eth_account.messages import encode_defunct
 from web3 import Web3
+from web3.contract import Contract
 
 from src.clients.sapphire import sapphire_http_provider
 from src.core.abi import load_abi
@@ -260,6 +261,17 @@ class AccountingClient:
         Transfer with the wrong nonce reverts as ``InvalidNonce``, so we read
         from where the verifier reads.
         """
+        return self._accounting().functions.transferNonces(
+            Web3.to_checksum_address(user_address)
+        ).call()
+
+    def withdrawal_nonce(self, user_address: str) -> int:
+        """``withdrawalNonces[user]`` on the Accounting contract."""
+        return self._accounting().functions.withdrawalNonces(
+            Web3.to_checksum_address(user_address)
+        ).call()
+
+    def _accounting(self) -> Contract:
         if self._accounting_contract is None:
             settings = load_settings()
             w3 = Web3(sapphire_http_provider(settings.sapphire_rpc_url, settings.sapphire_rpc_headers))
@@ -267,10 +279,7 @@ class AccountingClient:
                 address=Web3.to_checksum_address(settings.accounting_contract_address),
                 abi=load_abi("Accounting"),
             )
-
-        return self._accounting_contract.functions.transferNonces(
-            Web3.to_checksum_address(user_address)
-        ).call()
+        return self._accounting_contract
 
     async def close(self) -> None:
         await self.client.aclose()

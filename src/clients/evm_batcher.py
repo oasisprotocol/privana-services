@@ -3,7 +3,7 @@ import sqlite3
 import threading
 import time
 from dataclasses import dataclass
-from typing import Optional
+from typing import Callable, Optional
 
 from web3 import Web3
 from web3.exceptions import ContractLogicError, TransactionNotFound, Web3RPCError
@@ -49,6 +49,8 @@ STOPPED = "stopped"
 
 # The node's reply when the account cannot pay for the gas.
 GAS_REFUSED = ("insufficient funds", "insufficient balance to pay fees")
+# An unsimulated tx is built on the one before it, so it fails unsent with it.
+SUPERSEDED = "superseded: the tx before it failed"
 # Node replies meaning it will never take the tx as signed. Any other reply
 # may come from a node that took it anyway, so the tx is tried again later at
 # the same nonce instead of being failed.
@@ -88,16 +90,24 @@ def approve_intent(owner: str, token: str, spender: str, amount: int) -> TxInten
     return TxIntent(owner=owner, to=token, gas=APPROVE_GAS_LIMIT, data=data)
 
 
+# Run at the start of a sender's round with its connection and client;
+# returns whether it changed anything.
+RoundHook = Callable[[sqlite3.Connection, EvmClient], bool]
+
+
 class EvmBatcher:
     """The only sender for one account on one chain. It runs in its own thread
     with its own database connection: callers on the event loop queue txs with
     `submit` and poll `result`. Each round signs the oldest queued txs with
     consecutive nonces from a fresh count, sends them back to back, and waits
-    only for the last receipt."""
+    only for the last receipt. `before_round`, given for Sapphire senders,
+    first turns the account's Privana transfer lanes into txs."""
 
-    def __init__(self, evm: EvmClient, chain_id: int, db: sqlite3.Connection, stop: threading.Event) -> None:
+    def __init__(self, evm: EvmClient, chain_id: int, db: sqlite3.Connection, stop: threading.Event,
+                 before_round: Optional[RoundHook] = None) -> None:
         self.evm = evm
         self.batch_size = SAPPHIRE_BATCH_SIZE if evm.sapphire else BATCH_SIZE
+        self.before_round = before_round
         self.chain_id = chain_id
         self.db = db
         self.stop = stop
@@ -116,7 +126,11 @@ class EvmBatcher:
                 self.stop.wait(IDLE_INTERVAL_SEC)
 
     def run_round(self) -> bool:
-        """One batch. Returns whether it settled or sent anything."""
+        """One batch. Returns whether it settled, signed or sent anything."""
+        signed = self.before_round is not None and self.before_round(self.db, self.evm)
+        return self._run_batch() or signed
+
+    def _run_batch(self) -> bool:
         rows = [dict(r) for r in self.db.execute(
             "SELECT * FROM evm_transactions WHERE chain_id = ? AND address = ? AND status = ? "
             "ORDER BY id LIMIT ?",
@@ -156,10 +170,14 @@ class EvmBatcher:
         # other, both versions could be mined.
         nonce = max(used, self._next_after_mined())
         fees = self.evm.fees()
-        sent, last_hash = [], None
+        sent, last_hash, failed_before = [], None, False
         for row in unsent:
+            if failed_before and not row["simulate"] and not row["attempts"]:
+                self._finish(row, FAILED, error=SUPERSEDED)
+                continue
             at = self._attempts(row)[-1][0] if row["attempts"] else nonce
             outcome = self._send(row, at, fees)
+            failed_before = outcome == SKIPPED
             if outcome == STOPPED:
                 break
             if outcome == SENT:
@@ -391,14 +409,16 @@ def sending_accounts(settings: Settings) -> set[tuple[str, str]]:
     return {(setting, lp) for setting in (*RPC_SETTINGS, SAPPHIRE_RPC_SETTING) if lp and getattr(settings, setting)}
 
 
-def start_evm_batchers() -> None:
-    """Start one batcher thread per configured chain and account."""
+def start_evm_batchers(sapphire_round: RoundHook) -> None:
+    """Start one batcher thread per configured chain and account; Sapphire
+    senders run `sapphire_round` first in each round."""
     _stop.clear()
     settings = load_settings()
     for setting, key in sending_accounts(settings):
         sapphire = setting == SAPPHIRE_RPC_SETTING
         headers = settings.sapphire_rpc_headers if sapphire else None
-        thread = threading.Thread(target=_serve, args=(setting, getattr(settings, setting), key, headers),
+        hook = sapphire_round if sapphire else None
+        thread = threading.Thread(target=_serve, args=(setting, getattr(settings, setting), key, headers, hook),
                                   name=f"evm-batcher-{setting}", daemon=True)
         thread.start()
         _threads.append(thread)
@@ -412,7 +432,7 @@ def stop_evm_batchers() -> None:
     _serving.clear()
 
 
-def _serve(setting: str, rpc_url: str, secret_key: str, headers: Optional[dict]) -> None:
+def _serve(setting: str, rpc_url: str, secret_key: str, headers: Optional[dict], hook: Optional[RoundHook]) -> None:
     db = None
     try:
         db = connect()
@@ -436,7 +456,7 @@ def _serve(setting: str, rpc_url: str, secret_key: str, headers: Optional[dict])
                          setting, evm.address, chain_id, _serving[sender])
             return
         logger.info("evm batcher %s/%s started for %s", chain_id, evm.address, setting)
-        EvmBatcher(evm, chain_id, db, _stop).run()
+        EvmBatcher(evm, chain_id, db, _stop, hook).run()
     except Exception as exc:
         logger.error("evm batcher for %s stopped: %s", setting, exc)
     finally:

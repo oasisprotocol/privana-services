@@ -390,7 +390,7 @@ def test_one_batcher_thread_starts_per_chain_and_account(monkeypatch, settings):
             self.chain_id = chain_id
 
     class Batcher:
-        def __init__(self, evm, chain_id, db, stop):
+        def __init__(self, evm, chain_id, db, stop, before_round=None):
             self.evm = evm
             self.chain_id = chain_id
             self.stop = stop
@@ -414,7 +414,7 @@ def test_one_batcher_thread_starts_per_chain_and_account(monkeypatch, settings):
     monkeypatch.setattr(module, "EvmBatcher", Batcher)
     monkeypatch.setattr(module, "connect", lambda: __import__("sqlite3").connect(":memory:"))
 
-    module.start_evm_batchers()
+    module.start_evm_batchers(lambda db, evm: False)
     try:
         # The LP's thread for the second RPC of chain 8453 ends once it finds it served.
         deadline = time.monotonic() + 5

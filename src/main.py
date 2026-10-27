@@ -215,8 +215,17 @@ async def health():
     except Exception:
         checks["sapphire"] = "unavailable"
 
+    from src.clients.evm_batcher import STUCK_AFTER_SEC, sender_health
+    from src.clients.privana_lanes import lane_health
+
+    senders, lanes = sender_health(), lane_health()
+    # A dead sender thread or a write waiting past the stuck window needs a person.
+    waits = [*senders["oldest_queued_sec"].values(), *lanes.values()]
+    checks["senders"] = "ok" if senders["threads_alive"] == senders["threads"] else "thread stopped"
+    checks["queues"] = "ok" if all(w < STUCK_AFTER_SEC for w in waits) else "stalled"
+
     overall = "ok" if all(v == "ok" for v in checks.values()) else "degraded"
-    return {"status": overall, "checks": checks}
+    return {"status": overall, "checks": checks, "senders": senders, "lanes": lanes}
 
 
 def main():

@@ -429,6 +429,15 @@ class WithdrawLane:
             _finish(get_db(), row, FAILED, error=refusal)
 
 
+def lane_health() -> dict[str, int]:
+    """Signer -> how long its oldest unsettled lane row has waited."""
+    now = int(time.time())
+    return {r["signer"]: now - r["since"] for r in get_db().execute(
+        "SELECT signer, MIN(created_at) AS since FROM privana_transactions WHERE status IN (?, ?) GROUP BY signer",
+        (QUEUED, SENT),
+    )}
+
+
 def _withdraw_lanes() -> dict[str, tuple[str, Callable[[], Awaitable[PrivanaClient]]]]:
     """Signer -> its secret key and a Privana client acting as it: the LP."""
     settings = load_settings()

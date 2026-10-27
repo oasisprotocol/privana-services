@@ -424,6 +424,21 @@ def start_evm_batchers(sapphire_round: RoundHook) -> None:
         _threads.append(thread)
 
 
+def sender_health() -> dict:
+    """How many sender threads run, and how long each sender's oldest queued
+    tx has waited."""
+    now = int(time.time())
+    rows = get_db().execute(
+        "SELECT chain_id, address, MIN(created_at) AS since FROM evm_transactions WHERE status = ? "
+        "GROUP BY chain_id, address", (QUEUED,),
+    )
+    return {
+        "threads": len(_threads),
+        "threads_alive": sum(t.is_alive() for t in _threads),
+        "oldest_queued_sec": {f"{r['chain_id']}:{r['address']}": now - r["since"] for r in rows},
+    }
+
+
 def stop_evm_batchers() -> None:
     _stop.set()
     for thread in _threads:

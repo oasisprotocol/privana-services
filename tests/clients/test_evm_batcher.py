@@ -6,91 +6,30 @@ import pytest
 from eth_account.typed_transactions import TypedTransaction
 from hexbytes import HexBytes
 from web3 import Web3
-from web3.exceptions import ContractLogicError, TransactionNotFound, Web3RPCError
+from web3.exceptions import TransactionNotFound, Web3RPCError
 
 import src.clients.evm_batcher as module
 from src.clients.base_evm import EvmClient
-from src.clients.evm_batcher import EvmBatcher, TxIntent, find_evm_tx, result, submit
+from src.clients.evm_batcher import EvmBatcher, TxIntent, find_evm_tx, submit
 from src.core.config import load_settings
+from src.core.db import get_db
+from tests.clients.fake_chain import (
+    CHAIN_ID,
+    SAPPHIRE_CHAIN_ID,
+    FakeChain,
+    Unreachable,
+    decode,
+    hash_of,
+    nonce_of,
+    sapphire_sender,
+)
 
-CHAIN_ID = 8453
-LP = load_settings().liquidity_provider_address
 TARGET = "0x" + "dd" * 20
+LP = load_settings().liquidity_provider_address
 
 
-class Unreachable(ConnectionError):
-    """The RPC did not answer."""
-
-
-class FakeChain:
-    """A node that takes txs and mines them only when told to, or on its own
-    once `auto_mine` is set."""
-
-    def __init__(self) -> None:
-        self.mined_count = 0
-        self.pool: dict[int, str] = {}
-        self.sent: list[str] = []
-        self.receipts: dict[str, dict] = {}
-        self.chain_id = CHAIN_ID
-        self.max_priority_fee = 100
-        self.base_fee = 1_000
-        self.auto_mine = False
-        self.reverting_calls: set[str] = set()
-        self.refuse: list[Exception] = []
-        self.on_send = None
-
-    def get_transaction_count(self, address, block="latest"):
-        if block == "pending":
-            return max([self.mined_count, *[n + 1 for n in self.pool]])
-        return self.mined_count
-
-    def get_block(self, _):
-        return {"baseFeePerGas": self.base_fee}
-
-    def call(self, tx, *_):
-        if tx["data"] == "0xdown":
-            raise Unreachable("rpc timed out")
-        if tx["data"] in self.reverting_calls:
-            raise ContractLogicError("execution reverted")
-        return b""
-
-    def send_raw_transaction(self, raw):
-        raw = Web3.to_hex(HexBytes(raw))
-        if self.on_send is not None:
-            self.on_send(raw)
-        if self.refuse:
-            raise self.refuse.pop(0)
-        self.sent.append(raw)
-        self.pool[nonce_of(raw)] = raw
-        return Web3.keccak(hexstr=raw)
-
-    def mine(self, count: int = 1, status: int = 1) -> None:
-        for _ in range(count):
-            raw = self.pool.pop(self.mined_count)
-            self.receipts[Web3.to_hex(Web3.keccak(hexstr=raw))] = {"status": status, "logs": []}
-            self.mined_count += 1
-
-    def get_transaction(self, tx_hash):
-        for raw in self.pool.values():
-            if hash_of(raw) == tx_hash:
-                return TypedTransaction.from_bytes(HexBytes(raw)).as_dict()
-        raise TransactionNotFound(tx_hash)
-
-    def get_transaction_receipt(self, tx_hash):
-        if self.auto_mine:
-            while self.mined_count in self.pool:
-                self.mine()
-        if tx_hash not in self.receipts:
-            raise TransactionNotFound(tx_hash)
-        return self.receipts[tx_hash]
-
-
-def nonce_of(raw: str) -> int:
-    return TypedTransaction.from_bytes(HexBytes(raw)).as_dict()["nonce"]
-
-
-def hash_of(raw: str) -> str:
-    return Web3.to_hex(Web3.keccak(hexstr=raw))
+def result(tx_id: int) -> dict:
+    return dict(get_db().execute("SELECT * FROM evm_transactions WHERE id = ?", (tx_id,)).fetchone())
 
 
 @pytest.fixture(autouse=True)
@@ -106,7 +45,7 @@ def chain():
 
 @pytest.fixture
 def batcher(chain, test_db, settings):
-    # The LP account, which `submit` queues for.
+    # The LP account, which these tests queue for.
     evm = EvmClient("http://localhost:1", settings.liquidity_provider_secret_key)
     evm.w3.eth = chain
     return EvmBatcher(evm, CHAIN_ID, test_db, threading.Event())
@@ -315,6 +254,17 @@ def test_a_round_takes_at_most_the_batch_size(batcher, chain):
     batcher.run_round()
 
     assert len(chain.sent) == 3
+
+
+def test_a_sapphire_sender_sends_one_tx_per_round(test_db, settings):
+    chain = FakeChain(SAPPHIRE_CHAIN_ID)
+    chain.auto_mine = True
+    sender = sapphire_sender(chain, test_db, settings.liquidity_provider_secret_key)
+    submit(SAPPHIRE_CHAIN_ID, sender.evm.address, intent(owner="swap:a:lifi"), intent(owner="swap:b:lifi"))
+
+    sender.run_round()
+
+    assert len(chain.sent) == 1
 
 
 def test_an_empty_queue_asks_the_node_nothing(batcher, chain, monkeypatch):
@@ -801,3 +751,82 @@ def test_a_failed_send_logs_what_the_chain_says_about_it(batcher, chain, caplog)
 
     logged = " ".join(r.getMessage() for r in caplog.records)
     assert "latest_nonce=0 pending_nonce=0 known_to_node=False" in logged
+
+
+@pytest.fixture
+def sapphire(test_db, settings):
+    return sapphire_sender(FakeChain(SAPPHIRE_CHAIN_ID), test_db, settings.liquidity_provider_secret_key)
+
+
+def test_sapphire_calldata_goes_out_encrypted_to_the_current_key_on_every_attempt(sapphire, test_db):
+    chain = sapphire.evm.w3.eth
+    (tx_id,) = submit(SAPPHIRE_CHAIN_ID, LP, intent(data="0xa9059cbb" + "00" * 64))
+    sapphire.run_round()
+    chain.pool.clear()
+    chain.epoch = 2
+    age(test_db, module.RECEIPT_TIMEOUT_SEC + 1)
+
+    sapphire.run_round()
+
+    first, retry = (decode(raw) for raw in chain.sent)
+    assert first["nonce"] == retry["nonce"]
+    for tx, epoch in ((first, 1), (retry, 2)):
+        data = Web3.to_hex(tx["data"])
+        assert not data.startswith("0xa9059cbb")
+        assert chain.envelope(data)["epoch"] == epoch
+        assert chain.plaintext(data) == result(tx_id)["data"]
+
+
+def test_a_sapphire_retry_outbids_a_held_gas_price_only_once_it_is_priced_out(sapphire, test_db):
+    chain = sapphire.evm.w3.eth
+    submit(SAPPHIRE_CHAIN_ID, LP, intent())
+    sapphire.run_round()
+    for _ in range(3):
+        age(test_db, module.RECEIPT_TIMEOUT_SEC + 1)
+        sapphire.run_round()
+    assert len(chain.sent) == 1
+    chain.gas_price = 101
+    age(test_db, module.RECEIPT_TIMEOUT_SEC + 1)
+
+    sapphire.run_round()
+
+    first, retry = decode(chain.sent[0]), decode(chain.sent[1])
+    assert retry["nonce"] == first["nonce"]
+    assert retry["gasPrice"] >= first["gasPrice"] * 1.125
+
+
+def test_a_sapphire_call_is_signed_and_a_failure_short_of_a_revert_is_retried(test_db, settings):
+    calls = []
+
+    class SignedCalls:
+        def call(self, tx):
+            calls.append(tx)
+            if len(calls) == 1:
+                raise rpc_error("base block not found")
+            return b""
+
+    sender = sapphire_sender(FakeChain(SAPPHIRE_CHAIN_ID), test_db, settings.liquidity_provider_secret_key,
+                             SignedCalls())
+    (tx_id,) = submit(SAPPHIRE_CHAIN_ID, LP, intent(data="0xabcd"))
+    sender.run_round()
+    assert (result(tx_id)["status"], result(tx_id)["attempts"]) == ("queued", None)
+
+    sender.run_round()
+
+    assert result(tx_id)["attempts"]
+    # sapphirepy cannot sign a call with gas or fee fields.
+    assert calls[-1] == {"from": sender.evm.address, "to": Web3.to_checksum_address(TARGET), "data": "0xabcd",
+                         "value": 0}
+
+
+def test_a_retry_is_sent_even_when_its_call_now_reverts(batcher, chain, test_db):
+    # Its first attempt may have run: the state it reverts against can be its own.
+    (tx_id,) = queue(batcher, 1)
+    batcher.run_round()
+    age(test_db, module.RECEIPT_TIMEOUT_SEC + 1)
+    chain.base_fee = 50_000
+    chain.reverting_calls.add("0x")
+
+    batcher.run_round()
+
+    assert (result(tx_id)["status"], len(chain.sent)) == ("queued", 2)

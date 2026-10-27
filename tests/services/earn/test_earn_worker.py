@@ -1,8 +1,10 @@
 import time
+from dataclasses import replace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from src.core.config import load_settings
 from src.core.db import db_write
 from src.services.earn.worker import EarnWorker
 
@@ -443,3 +445,16 @@ def test_claim_leaves_requests_for_a_pool_mid_reclaim_queued(test_db):
 
     assert [c["id"] for c in claimed] == ["t2"]
     assert _status(test_db, "t1") == "scheduled"
+
+
+@pytest.mark.parametrize("earn_pool_address", ["", "LP"])
+async def test_the_worker_refuses_to_start_without_its_own_account(monkeypatch, earn_pool_address):
+    lp = "0x" + "d" * 40
+    settings = replace(load_settings(), liquidity_provider_address=lp,
+                       earn_pool_address=lp if earn_pool_address == "LP" else earn_pool_address)
+    monkeypatch.setattr("src.services.earn.worker.load_settings", lambda: settings)
+    worker = EarnWorker()
+
+    await worker.start()
+
+    assert worker._task is None

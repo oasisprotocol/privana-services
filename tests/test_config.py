@@ -168,18 +168,31 @@ def test_internal_swap_token_ids_parses_a_multiline_list(monkeypatch):
     assert settings.internal_swap_token_ids == {"0xaa", "0xbb"}
 
 
-@pytest.mark.parametrize("earn_pool_address,error", [
-    ("", "EARN_POOL_SECRET_KEY is not set but earn pools are configured"),
-    ("LP", "EARN_POOL_SECRET_KEY is the LP's key"),
+POOLS = '{"0x' + "e" * 64 + '": "0x' + "f" * 64 + '"}'
+
+
+@pytest.mark.parametrize("earn_pool_address,pools,error", [
+    ("", POOLS, "EARN_POOL_SECRET_KEY is not set but earn pools are configured"),
+    ("LP", POOLS, "EARN_POOL_SECRET_KEY is the LP's key"),
+    ("LP", "", "EARN_POOL_SECRET_KEY is the LP's key"),
+    ("0x" + "c" * 40, POOLS, None),
 ])
-def test_validate_settings_refuses_earn_pools_without_their_own_account(monkeypatch, earn_pool_address, error):
+def test_validate_settings_requires_earn_its_own_account(monkeypatch, earn_pool_address, pools, error):
     lp = "0x" + "d" * 40
     crafted = _settings_with(
         liquidity_provider_address=lp,
         earn_pool_address=lp if earn_pool_address == "LP" else earn_pool_address,
-        aave_pool_assets="0x" + "e" * 64,
+        aave_pool_assets=pools,
+        midas_pool_assets="",
         environment="production",
     )
     monkeypatch.setattr(main_module, "settings", crafted)
-    with pytest.raises(RuntimeError, match=error):
+    try:
         main_module._validate_settings()
+        raised = ""
+    except RuntimeError as exc:
+        raised = str(exc)
+    if error:
+        assert error in raised
+    else:
+        assert "EARN_POOL_SECRET_KEY" not in raised

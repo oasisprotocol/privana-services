@@ -248,9 +248,7 @@ class EvmBatcher:
             # A retry is never failed: its earlier attempt may still be mined.
             if row["attempts"] or not any(phrase in _rpc_message(exc) for phrase in REFUSED):
                 return STOPPED
-            # The node will never take it: the attempt never existed, and the
-            # nonce stays free for the next tx.
-            db_write(self.db, "UPDATE evm_transactions SET attempts = NULL WHERE id = ?", (row["id"],))
+            # The node will never take it, so the nonce stays free for the next tx.
             self._finish(row, FAILED, error=str(exc))
             return SKIPPED
         except Exception as exc:
@@ -435,7 +433,7 @@ def sender_health() -> dict:
     return {
         "threads": len(_threads),
         "threads_alive": sum(t.is_alive() for t in _threads),
-        "oldest_queued_sec": {f"{r['chain_id']}:{r['address']}": now - r["since"] for r in rows},
+        "oldest_queued_sec": {f"{r['chain_id']}/{r['address']}": now - r["since"] for r in rows},
     }
 
 

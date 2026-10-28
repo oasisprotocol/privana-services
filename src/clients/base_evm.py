@@ -96,7 +96,8 @@ class EvmClient:
     def simulate(self, tx: dict) -> None:
         """Run `tx` as a call, raising what its send would. Sapphire answers
         a call as its sender only when the call is signed, so it goes through
-        sapphirepy, which takes no gas or fee fields."""
+        sapphirepy. That fails on the hex gas value web3 passes it, so the call
+        runs at sapphirepy's own gas limit, above any limit sent here."""
         if not self.sapphire:
             self.w3.eth.call(tx)
             return
@@ -113,8 +114,7 @@ class EvmClient:
 
     def max_gas_cost(self, gas: int) -> int:
         """`gas` at the fee cap a send sets now."""
-        fees = self.fees()
-        return gas * (fees["gasPrice"] if self.sapphire else fees["maxFeePerGas"])
+        return gas * self.fees()["maxFeePerGas"]
 
 
 _clients: dict[str, EvmClient] = {}
@@ -141,4 +141,3 @@ def get_evm_client(chain_id: int) -> EvmClient:
         if _chain_ids[rpc_url] == chain_id:
             return _clients[rpc_url]
     raise ValueError(f"No RPC is configured for chain {chain_id}")
-

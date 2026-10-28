@@ -31,7 +31,6 @@ import time
 from dataclasses import dataclass
 from typing import Awaitable, Callable, Optional
 
-from eth_account import Account
 from hexbytes import HexBytes
 from privana import PrivanaClient
 from privana.client.errors import AccountingApiError, NetworkError
@@ -123,8 +122,6 @@ def submit_privana(signer: str, *intents: PrivanaIntent) -> list[int]:
     signer = signer.lower()
     if signer not in _transfer_keys():
         raise ValueError(f"no key signs Privana transfers of {signer}")
-    if any(i.kind not in GAS_LIMITS for i in intents):
-        raise ValueError(f"not a transfer lane kind: {[i.kind for i in intents]}")
     now = int(time.time())
     db_write_many(
         get_db(),
@@ -193,21 +190,16 @@ def _run_lane(db: sqlite3.Connection, evm: EvmClient, signer: str, gas_refused: 
     # One batch at a time: the next is signed from the counter it leaves.
     if _lane_rows(db, signer, SENT) or not _lane_rows(db, signer, QUEUED, 1):
         return progressed
+    # The sender's refusal is logged once a minute; signing again sooner is refused too.
     if gas_refused:
-        logger.warning("privana lane %s signs nothing: %s was refused for gas in the last %d s",
-                       signer, evm.address, GAS_REFUSAL_PAUSE_SEC)
         return progressed
-    key = _transfer_keys().get(signer)
-    if key is None:
-        logger.error("privana lane %s cannot sign: no key for it is configured", signer)
-        return progressed
-    return _sign(db, evm, signer, key, counter) or progressed
+    return _sign(db, evm, signer, _transfer_keys()[signer], counter) or progressed
 
 
 def _settle(db: sqlite3.Connection, row: dict, counter: int) -> bool:
     """Settle a sent row once its own evm tx is final. Returns whether it did."""
     tx = db.execute("SELECT status, tx_hash, error, simulate FROM evm_transactions WHERE owner = ?",
-                    (row["evm_owner"],)).fetchone()
+                    (_evm_owner(row),)).fetchone()
     if tx["status"] == EVM_QUEUED:
         return False
     if tx["status"] == EVM_MINED:
@@ -219,19 +211,19 @@ def _settle(db: sqlite3.Connection, row: dict, counter: int) -> bool:
     if counter > row["nonce"]:
         _finish(db, row, FAILED, error=FOREIGN_SPEND)
         logger.error("privana lane %s: nonce %d of %s %d for %s was spent by a tx we did not send (ours %s)",
-                     row["signer"], row["nonce"], row["kind"], row["id"], row["owner"], row["evm_owner"])
+                     row["signer"], row["nonce"], row["kind"], row["id"], row["owner"], _evm_owner(row))
         return True
     outcome = tx["error"] or f"reverted as {tx['tx_hash']}"
     # Simulated against the state at its own nonce, so its failure is its own.
-    # The rows after it reverted because it did not land, and are simulated
-    # in turn once first; a gas refusal is not the row's fault.
+    # A row signed after it failed only because it did not land, and is
+    # simulated once it is first in line; a gas refusal is not the row's fault.
     if tx["simulate"] and row["nonce"] == counter and not any(phrase in outcome for phrase in GAS_REFUSED):
         _finish(db, row, FAILED, error=outcome)
         return True
     db_write(
         db,
-        "UPDATE privana_transactions SET status = ?, nonce = NULL, signature = NULL, evm_owner = NULL, "
-        "error = ?, updated_at = ? WHERE id = ?",
+        "UPDATE privana_transactions SET status = ?, nonce = NULL, signature = NULL, error = ?, updated_at = ? "
+        "WHERE id = ?",
         (QUEUED, outcome, int(time.time()), row["id"]),
     )
     logger.info("privana lane %s %s %d for %s queued again from nonce %d: %s",
@@ -253,11 +245,12 @@ def _sign(db: sqlite3.Connection, evm: EvmClient, signer: str, key: str, counter
             signature = sign_transfer(key, evm.chain_id, settings.accounting_contract_address,
                                       payload["to"], payload["token"], payload["amount"], nonce)
             to, data = _call(settings, row["kind"], payload, nonce, signature)
-            evm_owner = f"privana:{row['id']}:{row['attempts'] + 1}"
+            row = {**row, "attempts": row["attempts"] + 1}
+            evm_owner = _evm_owner(row)
             if not db.execute(
-                "UPDATE privana_transactions SET status = ?, nonce = ?, signature = ?, evm_owner = ?, "
-                "attempts = attempts + 1, updated_at = ? WHERE id = ? AND status = ?",
-                (SENT, nonce, signature, evm_owner, now, row["id"], QUEUED),
+                "UPDATE privana_transactions SET status = ?, nonce = ?, signature = ?, attempts = ?, updated_at = ? "
+                "WHERE id = ? AND status = ?",
+                (SENT, nonce, signature, row["attempts"], now, row["id"], QUEUED),
             ).rowcount:
                 continue
             # Only the first can be simulated: the rest need the ones before them landed.
@@ -287,6 +280,11 @@ def _call(settings: Settings, kind: str, payload: dict, nonce: int, signature: s
         token, amount, nonce, signature,
     ])
     return settings.swap_manager_contract_address, data
+
+
+def _evm_owner(row: dict) -> str:
+    """The evm tx of a transfer lane row's latest signing."""
+    return f"privana:{row['id']}:{row['attempts']}"
 
 
 def _lane_rows(db: sqlite3.Connection, signer: str, status: str, limit: int = -1) -> list[dict]:
@@ -319,8 +317,10 @@ def _finish(db: sqlite3.Connection, row: dict, status: str, error: Optional[str]
 def _transfer_keys() -> dict[str, str]:
     """Address -> secret key of each account whose transfer lane this service
     runs: the LP, which has a Sapphire sender."""
-    key = load_settings().liquidity_provider_secret_key
-    return {Account.from_key(key).address.lower(): key} if key else {}
+    settings = load_settings()
+    if not settings.liquidity_provider_secret_key:
+        return {}
+    return {settings.liquidity_provider_address.lower(): settings.liquidity_provider_secret_key}
 
 
 class WithdrawLane:
@@ -329,10 +329,11 @@ class WithdrawLane:
     settled by the nonce on chain, never by the reply: replies get cut while
     the withdrawal still lands."""
 
-    def __init__(self, signer: str, secret_key: str, client: Callable[[], Awaitable[PrivanaClient]]) -> None:
+    def __init__(self, signer: str, secret_key: str,
+                 client_factory: Callable[[], Awaitable[PrivanaClient]]) -> None:
         self.signer = signer
         self._key = secret_key
-        self._client = client
+        self._client_factory = client_factory
 
     async def run(self) -> None:
         while True:
@@ -402,7 +403,7 @@ class WithdrawLane:
         request = WithdrawalRequest(token_id=payload["token"], amount=payload["amount"], nonce=row["nonce"],
                                     signature=row["signature"])
         try:
-            reply = await (await self._client()).request_withdrawal(request)
+            reply = await (await self._client_factory()).request_withdrawal(request)
         except NetworkError as exc:
             logger.warning("privana withdraw lane %s withdrawal %d at nonce %d got no reply (%s); "
                            "the nonce on chain settles it", self.signer, row["id"], row["nonce"], exc)

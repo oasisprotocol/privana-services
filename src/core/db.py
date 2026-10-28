@@ -192,9 +192,8 @@ MIGRATIONS = [
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_evm_tx_owner ON evm_transactions(owner);",
     # Privana writes, one row per transfer or withdrawal. `signer` is the
     # account whose nonce it spends. `payload` is the JSON the call is built
-    # from. `nonce` and `signature` are saved before anything is sent;
-    # `evm_owner` names the evm tx of the latest signing and `attempts`
-    # counts sends.
+    # from. `nonce` and `signature` are saved before anything is sent, and
+    # `attempts` counts signings of a transfer and sends of a withdrawal.
     """
     CREATE TABLE IF NOT EXISTS privana_transactions (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -204,7 +203,6 @@ MIGRATIONS = [
         payload TEXT NOT NULL,
         nonce INTEGER,
         signature TEXT,
-        evm_owner TEXT,
         attempts INTEGER NOT NULL DEFAULT 0,
         status TEXT NOT NULL DEFAULT 'queued',
         error TEXT,

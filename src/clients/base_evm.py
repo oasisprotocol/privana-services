@@ -114,7 +114,8 @@ class EvmClient:
 
     def max_gas_cost(self, gas: int) -> int:
         """`gas` at the fee cap a send sets now."""
-        return gas * self.fees()["maxFeePerGas"]
+        fees = self.fees()
+        return gas * (fees["gasPrice"] if self.sapphire else fees["maxFeePerGas"])
 
 
 _clients: dict[str, EvmClient] = {}

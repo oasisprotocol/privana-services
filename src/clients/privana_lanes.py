@@ -242,7 +242,7 @@ def _sign(db: sqlite3.Connection, evm: EvmClient, signer: str, key: str, counter
         for row in _lane_rows(db, signer, QUEUED, SAPPHIRE_BATCH_SIZE):
             nonce = counter + len(signed)
             payload = json.loads(row["payload"])
-            signature = sign_transfer(key, evm.chain_id, settings.accounting_contract_address,
+            signature = sign_transfer(key, settings.accounting_chain_id, settings.accounting_contract_address,
                                       payload["to"], payload["token"], payload["amount"], nonce)
             to, data = _call(settings, row["kind"], payload, nonce, signature)
             row = {**row, "attempts": row["attempts"] + 1}
@@ -360,6 +360,9 @@ class WithdrawLane:
             return
         elif time.time() - row["updated_at"] < WITHDRAW_RESEND_SEC:
             return
+        elif row["error"] and row["attempts"] == 1:
+            _finish(get_db(), row, FAILED, error=row["error"])
+            return
         elif row["attempts"] >= WITHDRAW_MAX_SENDS:
             logger.error("privana withdraw lane %s withdrawal %d for %s not landed at nonce %d after %d sends; "
                          "manual recovery required", self.signer, row["id"], row["owner"], row["nonce"],
@@ -427,7 +430,12 @@ class WithdrawLane:
             logger.warning("privana withdraw lane %s resend %d of withdrawal %d at nonce %d %s; an earlier send may "
                            "still land", self.signer, row["attempts"], row["id"], row["nonce"], refusal)
         else:
-            _finish(get_db(), row, FAILED, error=refusal)
+            # The API can refuse a withdrawal it already submitted, and the
+            # nonce read can lag: it fails only if the nonce is still unused
+            # WITHDRAW_RESEND_SEC after the send.
+            logger.warning("privana withdraw lane %s withdrawal %d at nonce %d %s; failing it if the nonce is still "
+                           "unused in %d s", self.signer, row["id"], row["nonce"], refusal, WITHDRAW_RESEND_SEC)
+            db_write(get_db(), "UPDATE privana_transactions SET error = ? WHERE id = ?", (refusal, row["id"]))
 
 
 def lane_health() -> dict[str, int]:

@@ -38,7 +38,7 @@ def fast(monkeypatch):
 
 @pytest.fixture
 def config(settings, monkeypatch):
-    config = replace(settings, swap_manager_contract_address=SWAP_MANAGER)
+    config = replace(settings, swap_manager_contract_address=SWAP_MANAGER, accounting_chain_id=SAPPHIRE_CHAIN_ID)
     monkeypatch.setattr(lanes, "load_settings", lambda: config)
     return config
 
@@ -357,9 +357,13 @@ async def test_a_resent_withdrawal_is_never_failed_and_its_nonce_never_reused(wi
     assert row(tx)["status"] == "landed"
 
 
-async def test_a_refused_withdrawal_fails_and_the_next_takes_its_unspent_nonce(withdraw_lane, api, config):
+async def test_a_refused_withdrawal_fails_and_the_next_takes_its_unspent_nonce(withdraw_lane, api, config, test_db):
     refused, behind = withdrawal(config), withdrawal(config, owner="swap:v:withdraw")
     api.replies = [(False, AccountingApiError("API request failed: 400 Bad Request", 400, "insufficient balance"))]
+    await withdraw_lane.run_round()
+    await withdraw_lane.run_round()
+    assert row(refused)["status"] == "sent"
+    age_withdrawals(test_db, lanes.WITHDRAW_RESEND_SEC)
 
     await withdraw_lane.run_round()
     await withdraw_lane.run_round()
@@ -399,10 +403,29 @@ async def test_a_lagging_withdrawal_nonce_read_never_signs_below_a_landed_one(wi
     assert api.contracts.withdrawal_nonces[api.signer] == 2
 
 
-async def test_a_withdrawal_the_api_answers_as_rejected_fails_on_its_first_send(withdraw_lane, api, config):
+async def test_a_withdrawal_the_api_answers_as_rejected_fails_without_a_resend(withdraw_lane, api, config, test_db):
     tx = withdrawal(config)
     api.replies = [(False, TransactionSubmissionResponse(submission_id="s", status="rejected", detail="no gas price"))]
+    await withdraw_lane.run_round()
+    age_withdrawals(test_db, lanes.WITHDRAW_RESEND_SEC)
 
     await withdraw_lane.run_round()
 
     assert row(tx)["status"] == "failed" and "rejected" in row(tx)["error"]
+    assert len(api.requests) == 1
+
+
+async def test_a_refused_withdrawal_that_lands_anyway_is_landed(withdraw_lane, api, config, test_db):
+    tx = withdrawal(config)
+    api.replies = [(False, AccountingApiError("API request failed: 400 Bad Request", 400, "bad reply"))]
+    # Submitted despite the 400, and seen only after the nonce read that followed it.
+    api.on_request = lambda _: api.contracts.withdrawal_nonces.update({api.signer: 1})
+    reads = [0, 0]
+    real = api.contracts.withdrawal_nonce
+    api.contracts.withdrawal_nonce = lambda address: reads.pop(0) if reads else real(address)
+    await withdraw_lane.run_round()
+    age_withdrawals(test_db, lanes.WITHDRAW_RESEND_SEC)
+
+    await withdraw_lane.run_round()
+
+    assert row(tx)["status"] == "landed"

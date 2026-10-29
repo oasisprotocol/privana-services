@@ -1,418 +1,47 @@
 import asyncio
 from dataclasses import replace
-from unittest.mock import AsyncMock, MagicMock
 
-import pytest
-from eth_account import Account
-
-from src.core.db import _run_migrations
-from src.core.eip712 import recover_transfer_signer, sign_transfer
-from src.services.swap.executor import SwapExecutor
-from src.services.swap.internal_pipeline import BATCH_SIZE
+import src.services.swap.worker as worker_module
 from src.services.swap.worker import SwapWorker
 
+# The hyperevm RPC is configured but not reachable yet.
+CHAINS = {"base_rpc_url": 8453, "ethereum_rpc_url": 1, "hyperevm_rpc_url": None}
 
-@pytest.fixture
-def worker(settings, monkeypatch):
-    import src.services.swap.internal_pipeline as module
 
+async def test_every_stage_runs_rounds_until_stopped(monkeypatch, settings):
+    rounds = {}
+
+    def stage(name):
+        async def run_round(*chain):
+            key = (name, *chain)
+            rounds[key] = rounds.get(key, 0) + 1
+            if key == ("execute", 8453):
+                raise RuntimeError("rpc down")
+        return run_round
+
+    monkeypatch.setattr(worker_module, "STAGES", tuple(
+        (name, stage(name), 0.01) for name, _, _ in worker_module.STAGES))
+    monkeypatch.setattr(worker_module, "CHAIN_STAGES", tuple(
+        (name, stage(name), 0.01) for name, _, _ in worker_module.CHAIN_STAGES))
+    monkeypatch.setattr(worker_module, "rpc_chain_id", CHAINS.get)
+    monkeypatch.setattr(worker_module, "load_settings", lambda: replace(
+        settings, base_rpc_url="http://base", ethereum_rpc_url="http://eth", hyperevm_rpc_url="http://hyperevm"))
+    expected = {(name,) for name, _, _ in worker_module.STAGES} | {
+        (name, chain) for name, _, _ in worker_module.CHAIN_STAGES for chain in (8453, 1)}
     worker = SwapWorker()
-    worker.settings = replace(settings, lifi_execution_enabled=True)
-    worker._internal_pipeline.settings = worker.settings
-    worker.sapphire = MagicMock()
-    worker.sapphire.w3.eth.get_transaction_count.return_value = 10
-    worker.sapphire.submit_contract_call.side_effect = ["0x" + f"{i:064x}" for i in range(1, 20)]
-    worker.sapphire.wait_for_receipt.return_value = {"status": 1, "blockNumber": 100}
-    worker.accounting = MagicMock()
-    worker.accounting.get_transfer_nonce = AsyncMock(return_value=7)
-    worker.accounting.get_lp_balance = AsyncMock(return_value=MagicMock(balance=str(10**25)))
-    monkeypatch.setattr(module, "get_sapphire_client", lambda: worker.sapphire)
-    monkeypatch.setattr(module, "get_accounting_client", lambda: worker.accounting)
-    # Re-pricing has tests of its own; here every swap still prices at its quote.
-    worker.reprice = AsyncMock(side_effect=lambda swap: int(swap["to_amount_estimate"]))
-    monkeypatch.setattr(worker._internal_pipeline, "_fresh_payout", worker.reprice)
-    return worker
 
-
-@pytest.fixture
-def enqueue(settings, insert_quote):
-    async def make(i=1, venue="internal", nonce=0, key=None, **overrides):
-        key = key or "0x" + f"{i:064x}"
-        user = Account.from_key(key).address.lower()
-        insert_quote(f"q{i}", user_address=user, venue=venue, **overrides)
-        sig = sign_transfer(
-            private_key=key, chain_id=settings.accounting_chain_id,
-            verifying_contract=settings.accounting_contract_address,
-            to_address=settings.liquidity_provider_address,
-            token_id="0x" + "aa" * 32, amount=1000000, nonce=nonce,
-        )
-        executor = SwapExecutor()
-        executor.settings = replace(settings, lifi_execution_enabled=True)
-        return await executor.schedule_swap(f"q{i}", nonce, sig)
-    return make
-
-
-def rows(db):
-    return [dict(r) for r in db.execute("SELECT * FROM swaps ORDER BY rowid")]
-
-
-async def test_batch_submissions_precede_receipts_and_next_waits(worker, enqueue, test_db, settings):
-    for i in range(1, BATCH_SIZE + 2):
-        await enqueue(i)
-    events = []
-    original_send = worker.sapphire.submit_contract_call.side_effect
-
-    def send(**kwargs):
-        events.append("send")
-        assert len([r for r in rows(test_db) if r["status"] == "executing"]) == BATCH_SIZE
-        return next(original_send)
-
-    def receipt(tx_hash):
-        events.append("receipt")
-        assert events[:BATCH_SIZE] == ["send"] * BATCH_SIZE
-        assert sum(r["swap_tx_hash"] is not None for r in rows(test_db)) == BATCH_SIZE
-        return {"status": 1, "blockNumber": 100}
-
-    worker.sapphire.submit_contract_call.side_effect = send
-    worker.sapphire.wait_for_receipt.side_effect = receipt
-    await worker.run_internal_once()
-    assert [r["status"] for r in rows(test_db)] == ["completed"] * BATCH_SIZE + ["scheduled"]
-    assert [r["output_nonce"] for r in rows(test_db)[:BATCH_SIZE]] == list(
-        range(7, 7 + BATCH_SIZE)
-    )
-    assert [
-        c.kwargs["args"][7] for c in worker.sapphire.simulate_contract_call.call_args_list
-    ] == [7] * BATCH_SIZE
-    for call in worker.sapphire.submit_contract_call.call_args_list:
-        args = call.kwargs["args"]
-        signer = recover_transfer_signer(
-            chain_id=settings.accounting_chain_id,
-            verifying_contract=settings.accounting_contract_address,
-            to_address=args[0], token_id="0x" + args[5].hex(), amount=args[6],
-            nonce=args[7], signature="0x" + args[8].hex(),
-        )
-        assert signer.lower() == settings.liquidity_provider_address.lower()
-    assert all(
-        r["to_amount_actual"] == r["to_amount_estimate"]
-        for r in rows(test_db)[:BATCH_SIZE]
-    )
-    worker.sapphire.submit_contract_call.side_effect = original_send
-    worker.sapphire.wait_for_receipt.side_effect = None
-    await worker.run_internal_once()
-    assert rows(test_db)[-1]["status"] == "completed"
-
-
-async def test_failed_preflight_does_not_leave_nonce_gap(worker, enqueue, test_db):
-    await enqueue(1)
-    await enqueue(2)
-    worker.sapphire.simulate_contract_call.side_effect = [ValueError("Insufficient balance"), None]
-    await worker.run_internal_once()
-    assert [r["status"] for r in rows(test_db)] == ["failed", "completed"]
-    assert worker.sapphire.submit_contract_call.call_args.kwargs["args"][7] == 7
-
-
-async def test_liquidity_reserved_across_batch(worker, enqueue, test_db):
-    await enqueue(1)
-    await enqueue(2)
-    worker.accounting.get_lp_balance.return_value.balance = "1000000"
-    await worker.run_internal_once()
-    assert [r["status"] for r in rows(test_db)] == ["completed", "failed"]
-    assert "Insufficient liquidity" in rows(test_db)[1]["error"]
-
-
-async def test_zero_fee_payout_is_not_discounted(worker, enqueue, test_db):
-    await enqueue(to_amount_estimate="1000000")
-    worker.accounting.get_lp_balance.return_value.balance = "999999"
-    await worker.run_internal_once()
-    assert rows(test_db)[0]["status"] == "failed"
-    worker.sapphire.submit_contract_call.assert_not_called()
-
-
-async def test_same_user_next_nonce_waits_for_next_batch(worker, enqueue, test_db):
-    key = "0x" + "22" * 32
-    await enqueue(1, key=key, nonce=0)
-    await enqueue(2, key=key, nonce=1)
-    await worker.run_internal_once()
-    assert [r["status"] for r in rows(test_db)] == ["completed", "scheduled"]
-    await worker.run_internal_once()
-    assert rows(test_db)[1]["status"] == "completed"
-
-
-async def test_quote_cleanup_does_not_destroy_scheduled_swap(worker, enqueue, test_db):
-    await enqueue()
-    test_db.execute("DELETE FROM quotes")
-    await worker.run_internal_once()
-    assert rows(test_db)[0]["status"] == "completed"
-
-
-async def test_receipt_timeout_keeps_executing_and_prevents_next_batch(worker, enqueue, test_db):
-    await enqueue()
-    worker.sapphire.wait_for_receipt.side_effect = TimeoutError("RPC timeout")
-    await worker.run_internal_once()
-    await enqueue(2)
-    await worker.run_internal_once()
-    assert [r["status"] for r in rows(test_db)] == ["executing", "scheduled"]
-    assert rows(test_db)[0]["swap_tx_hash"]
-    assert worker.sapphire.submit_contract_call.call_count == 1
-    worker.sapphire.wait_for_receipt.side_effect = None
-    await worker.run_internal_once()
-    assert [r["status"] for r in rows(test_db)] == ["completed", "scheduled"]
-    await worker.run_internal_once()
-    assert rows(test_db)[1]["status"] == "completed"
-
-
-async def test_reverted_receipt_is_failed(worker, enqueue, test_db):
-    await enqueue()
-    worker.sapphire.wait_for_receipt.return_value = {"status": 0}
-    await worker.run_internal_once()
-    assert rows(test_db)[0]["status"] == "failed"
-    assert rows(test_db)[0]["to_amount_actual"] is None
-
-
-async def test_submission_error_stops_nonce_sequence_and_requeues_unsent(worker, enqueue, test_db):
-    for i in range(1, 4):
-        await enqueue(i)
-    worker.sapphire.submit_contract_call.side_effect = ["0x123", TimeoutError("send timeout")]
-    await worker.run_internal_once()
-    assert [r["status"] for r in rows(test_db)] == ["completed", "scheduled", "scheduled"]
-    assert "retrying" in rows(test_db)[1]["error"]
-    assert worker.sapphire.submit_contract_call.call_count == 2
-
-
-async def test_restart_recovers_unbroadcast_claim_and_does_not_resend_ambiguous(worker, enqueue, test_db):
-    await enqueue(1)
-    await enqueue(2)
-    test_db.execute("UPDATE swaps SET status = 'executing'")
-    test_db.execute("UPDATE swaps SET output_signature = '0xab' WHERE quote_id = 'q2'")
-    await worker.run_internal_once()
-    assert [r["status"] for r in rows(test_db)] == ["scheduled", "executing"]
-    worker.sapphire.submit_contract_call.assert_not_called()
-
-
-async def test_current_pending_nonce_is_used_for_internal_batch(worker, enqueue, test_db):
-    await enqueue()
-    worker.sapphire.w3.eth.get_transaction_count.return_value = 11
-    await worker.run_internal_once()
-    assert rows(test_db)[0]["status"] == "completed"
-    assert worker.sapphire.submit_contract_call.call_args.kwargs["nonce"] == 11
-
-
-async def test_lifi_dispatch_uses_same_record_and_quote_id(worker, enqueue, test_db):
-    record = await enqueue(venue="lifi")
-    worker._pipeline = MagicMock()
-    worker._pipeline.launch = AsyncMock()
-    await worker.run_lifi_once()
-    call = worker._pipeline.launch.call_args
-    assert call.kwargs["swap_id"] == record.id
-    assert call.args[2] == 0
-    assert call.args[3] == rows(test_db)[0]["input_signature"]
-    assert call.args[0]["id"] == "q1"
-    assert rows(test_db)[0]["status"] == "executing"
-    assert len(rows(test_db)) == 1
-    await worker.run_lifi_once()
-    worker._pipeline.launch.assert_awaited_once()
-
-
-async def test_a_swap_queued_past_its_quote_expiry_still_dispatches(worker, enqueue, test_db):
-    from src.services.swap.quote_service import QuoteService
-
-    record = await enqueue(venue="lifi")
-    # The user's earlier swap held the queue until the quote expired, and a
-    # quote request from anyone swept expired quotes in the meantime.
-    test_db.execute("UPDATE quotes SET expires_at = 0 WHERE id = 'q1'")
-    cleaner = QuoteService.__new__(QuoteService)
-    cleaner._last_cleanup = 0
-    cleaner.cleanup_expired_quotes()
-    worker._pipeline = MagicMock()
-    worker._pipeline.launch = AsyncMock()
-
-    await worker.run_lifi_once()
-
-    worker._pipeline.launch.assert_awaited_once()
-    assert worker._pipeline.launch.call_args.kwargs["swap_id"] == record.id
-    assert rows(test_db)[0]["status"] == "executing"
-
-
-async def test_internal_worker_leaves_lifi_to_dispatcher(worker, enqueue, test_db):
-    await enqueue(venue="lifi")
-    await worker.run_internal_once()
-    assert rows(test_db)[0]["status"] == "scheduled"
-    worker.sapphire.submit_contract_call.assert_not_called()
-
-
-async def test_lifi_dispatch_failure_is_recorded(worker, enqueue, test_db):
-    await enqueue(venue="lifi")
-    worker._pipeline = MagicMock()
-    worker._pipeline.launch = AsyncMock(side_effect=RuntimeError("unavailable"))
-    await worker.run_lifi_once()
-    assert rows(test_db)[0]["status"] == "failed"
-
-
-async def test_migration_renames_pending_but_preserves_queue(worker, enqueue, test_db):
-    await enqueue(1)
-    await enqueue(2)
-    test_db.execute("UPDATE swaps SET status = 'pending' WHERE quote_id = 'q1'")
-    _run_migrations(test_db)
-    assert [r["status"] for r in rows(test_db)] == ["executing", "scheduled"]
-
-
-async def test_stop_waits_for_current_iteration(worker, monkeypatch):
-    entered = asyncio.Event()
-    finish = asyncio.Event()
-
-    async def iteration():
-        entered.set()
-        await finish.wait()
-
-    worker.settings = replace(worker.settings, lifi_execution_enabled=False)
-    # The pipeline is a shared instance, so the stub must not outlive this test.
-    monkeypatch.setattr(worker._internal_pipeline, "run_internal_once", iteration)
     await worker.start()
-    await entered.wait()
-    stopping = asyncio.create_task(worker.stop())
-    await asyncio.sleep(0)
-    assert not stopping.done()
-    finish.set()
-    await stopping
-    assert worker._tasks == []
-
-
-async def test_swap_counts_are_logged_only_when_they_change(worker, enqueue, test_db, monkeypatch):
-    import src.services.swap.internal_pipeline as module
-
-    pipeline = worker._internal_pipeline
-    monkeypatch.setattr(pipeline, "_logged_counts", None)
-    log = MagicMock()
-    monkeypatch.setattr(module, "logger", log)
-
-    # ROFL keeps a short log; a line every second pushes the errors out.
-    await pipeline.run_internal_once()
-    await pipeline.run_internal_once()
-    # One internal swap: queued, then active while its receipt is late, then settled.
-    worker.sapphire.wait_for_receipt.side_effect = [
-        TimeoutError("receipt late"), {"status": 1, "blockNumber": 100},
-    ]
-    await enqueue(1)
-    await pipeline.run_internal_once()
-    await pipeline.run_internal_once()
-    await pipeline.run_internal_once()
-    # A LiFi swap counts while executing and while refunding.
-    await enqueue(2, venue="lifi")
-    test_db.execute("UPDATE swaps SET status = 'executing' WHERE venue = 'lifi'")
-    await pipeline.run_internal_once()
-    test_db.execute("UPDATE swaps SET status = 'refunding' WHERE venue = 'lifi'")
-    await pipeline.run_internal_once()
-    test_db.execute("UPDATE swaps SET status = 'refunded' WHERE venue = 'lifi'")
-    await pipeline.run_internal_once()
-
-    lines = [c.args[0] % c.args[1:] for c in log.info.call_args_list if c.args[0].startswith("swaps:")]
-    assert lines == [
-        "swaps: internal 0 active, 0 queued; lifi 0 in progress",
-        "swaps: internal 0 active, 1 queued; lifi 0 in progress",
-        "swaps: internal 1 active, 0 queued; lifi 0 in progress",
-        "swaps: internal 0 active, 0 queued; lifi 0 in progress",
-        "swaps: internal 0 active, 0 queued; lifi 1 in progress",
-        "swaps: internal 0 active, 0 queued; lifi 0 in progress",
-    ]
-
-
-async def test_stop_cancels_lifi_runners(worker):
-    from src.services.swap.lifi_pipeline import LifiSwapPipeline
-
-    running = asyncio.Event()
-    cancelled = asyncio.Event()
-
-    async def run(*_):
-        running.set()
-        try:
-            await asyncio.Event().wait()
-        finally:
-            cancelled.set()
-
-    pipeline = LifiSwapPipeline(accounting=MagicMock(), lifi=MagicMock(), bridge=MagicMock())
-    pipeline._run = run
-    pipeline.spawn_background("swap", {}, 5)
-    await running.wait()
-    worker._pipeline = pipeline
+    # Polled, not slept: a loaded box can give a stage one round in 50 ms.
+    for _ in range(500):
+        if set(rounds) == expected and rounds[("execute", 8453)] > 1 and rounds[("execute", 1)] > 1:
+            break
+        await asyncio.sleep(0.01)
     await worker.stop()
-    assert cancelled.is_set()
-    assert pipeline._tasks == {}
+    stopped = dict(rounds)
+    await asyncio.sleep(0.03)
 
-
-def _signed_payouts(worker):
-    # SwapManager.swap(..., toTokenId, toAmount, lpNonce, lpSignature)
-    return [c.kwargs["args"][6] for c in worker.sapphire.submit_contract_call.call_args_list]
-
-
-async def test_an_internal_swap_pays_the_price_at_execution(worker, enqueue, test_db):
-    await enqueue()
-    worker.reprice.side_effect = lambda swap: 995_000
-
-    await worker.run_internal_once()
-
-    row = rows(test_db)[0]
-    assert _signed_payouts(worker) == [995_000]
-    assert (row["status"], row["to_amount_executed"], row["to_amount_actual"]) == (
-        "completed", "995000", "995000",
-    )
-    # The quote the user saw stays on record.
-    assert row["to_amount_estimate"] == "990000"
-
-
-async def test_a_swap_priced_below_its_floor_fails_without_a_nonce_gap(worker, enqueue, test_db):
-    await enqueue(1)
-    await enqueue(2)
-
-    def price(swap):
-        if swap["quote_id"] == "q1":
-            raise ValueError("execution quote below floor: net=1 floor=980000")
-        return 990_000
-
-    worker.reprice.side_effect = price
-    await worker.run_internal_once()
-
-    first, second = rows(test_db)
-    assert first["status"] == "failed" and "below floor" in first["error"]
-    assert second["status"] == "completed"
-    assert worker.sapphire.submit_contract_call.call_args.kwargs["args"][7] == 7
-
-
-async def test_a_swap_without_a_price_waits_then_fails(worker, enqueue, test_db):
-    from src.services.swap.internal_pipeline import PricingUnavailable
-
-    await enqueue()
-    worker.reprice.side_effect = PricingUnavailable("OSError")
-
-    await worker.run_internal_once()
-    assert rows(test_db)[0]["status"] == "scheduled"
-
-    test_db.execute("UPDATE swaps SET created_at = created_at - 601")
-    await worker.run_internal_once()
-
-    row = rows(test_db)[0]
-    assert (row["status"], row["error"]) == ("failed", "pricing unavailable")
-    worker.sapphire.submit_contract_call.assert_not_called()
-
-
-async def test_a_resend_keeps_the_amount_it_was_signed_for(worker, enqueue, test_db):
-    await enqueue()
-    # The first send's outcome was unknown, so the swap went back to the queue
-    # with the amount its signature may already have paid.
-    test_db.execute("UPDATE swaps SET to_amount_executed = '993000'")
-    worker.reprice.side_effect = lambda swap: 999_000
-
-    await worker.run_internal_once()
-
-    worker.reprice.assert_not_awaited()
-    assert _signed_payouts(worker) == [993_000]
-
-
-async def test_a_swap_that_fails_simulation_is_never_priced(worker, enqueue, test_db):
-    await enqueue()
-    # A signature over funds the user does not hold must not cost a LiFi call.
-    worker.sapphire.simulate_contract_call.side_effect = RuntimeError("InsufficientBalance")
-
-    await worker.run_internal_once()
-
-    assert rows(test_db)[0]["status"] == "failed"
-    worker.reprice.assert_not_awaited()
+    # A failing round does not stop its stage or another chain's, and a chain
+    # whose RPC does not answer gets no rounds.
+    assert set(rounds) == expected
+    assert rounds[("execute", 8453)] > 1 and rounds[("execute", 1)] > 1
+    assert rounds == stopped

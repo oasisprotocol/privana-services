@@ -1,105 +1,82 @@
-"""Persistent swap queue. One owner per database, with independent venue loops."""
+"""One asyncio worker per swap stage, and per chain for the stages that ask
+a chain about each swap, so a chain whose RPC hangs holds only its own swaps."""
+
 import asyncio
 import logging
-from typing import Optional
+from typing import Awaitable, Callable, Optional
 
+from src.clients.base_evm import RPC_SETTINGS, rpc_chain_id
 from src.core.config import load_settings
-from src.core.db import get_db
-from src.services.swap.failure import log_swap_failure
+from src.services.swap import internal_pipeline, lifi_pipeline
 
 logger = logging.getLogger(__name__)
-POLL_INTERVAL = 1.0
-lp_transfer_lock = asyncio.Lock()
+
+# Between rounds of a stage that reads only the database and its own lanes.
+ROUND_SEC = 1.0
+# Between rounds of a stage that asks a chain or an API about each swap, so
+# a hundred swaps waiting there make a hundred calls per recheck, not per second.
+RECHECK_SEC = 6.0
+
+STAGES: tuple[tuple[str, Callable[[], Awaitable[None]], float], ...] = (
+    ("internal_swap", internal_pipeline.internal_swap_round, ROUND_SEC),
+    ("input", lifi_pipeline.input_round, ROUND_SEC),
+    ("withdraw", lifi_pipeline.withdraw_round, ROUND_SEC),
+    ("credit", lifi_pipeline.credit_round, ROUND_SEC),
+    ("refund", lifi_pipeline.refund_round, RECHECK_SEC),
+)
+# Run once per configured chain RPC, each with the chain it serves.
+CHAIN_STAGES: tuple[tuple[str, Callable[[int], Awaitable[None]], float], ...] = (
+    ("execute", lifi_pipeline.execute_round, RECHECK_SEC),
+    ("deposit", lifi_pipeline.deposit_round, RECHECK_SEC),
+)
 
 
 class SwapWorker:
     def __init__(self) -> None:
-        self.settings = load_settings()
         self._stop = asyncio.Event()
         self._tasks: list[asyncio.Task] = []
-        from src.services.swap.internal_pipeline import get_internal_pipeline
-
-        self._internal_pipeline = get_internal_pipeline()
-        self._pipeline = None
 
     async def start(self) -> None:
         if self._tasks:
             return
         self._stop.clear()
-        self._tasks = [asyncio.create_task(self._internal_loop())]
-        if self.settings.lifi_execution_enabled:
-            self._tasks.append(asyncio.create_task(self._lifi_loop()))
+        self._tasks = [asyncio.create_task(self._run(name, run_round, interval), name=f"swap-{name}")
+                       for name, run_round, interval in STAGES]
+        settings = load_settings()
+        self._tasks += [asyncio.create_task(self._run_on_chain(name, setting, run_round, interval),
+                                            name=f"swap-{name}-{setting}")
+                        for name, run_round, interval in CHAIN_STAGES
+                        for setting in RPC_SETTINGS if getattr(settings, setting)]
 
     async def stop(self) -> None:
+        """Each stage ends its round first: the database closes after this."""
         self._stop.set()
-        # Do not cancel a to_thread broadcast: it could still be sending while
-        # the DB closes. Finish the current bounded internal batch first.
         await asyncio.gather(*self._tasks, return_exceptions=True)
         self._tasks.clear()
-        if self._pipeline is not None:
-            tasks = list(self._pipeline._tasks.values())
-            for task in tasks:
-                task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
 
-
-    async def run_internal_once(self) -> None:
-        """Compatibility delegate; execution lives in InternalSwapPipeline."""
-        await self._internal_pipeline.run_internal_once()
-
-    async def _internal_loop(self) -> None:
+    async def _run(self, name: str, run_round: Callable[[], Awaitable[None]], interval: float) -> None:
         while not self._stop.is_set():
             try:
-                await self._internal_pipeline.run_internal_once()
+                await run_round()
             except Exception:
-                logger.exception("Internal swap worker iteration failed")
-            await self._pause()
-
-    async def _lifi_loop(self) -> None:
-        recovered = False
-        while not self._stop.is_set():
+                logger.exception("swap stage %s round failed", name)
             try:
-                if not recovered:
-                    from src.services.swap.lifi_pipeline import (
-                        get_lifi_pipeline,
-                        recover_inflight_lifi_swaps,
-                    )
+                await asyncio.wait_for(self._stop.wait(), timeout=interval)
+            except TimeoutError:
+                pass
 
-                    self._pipeline = await asyncio.to_thread(get_lifi_pipeline)
-                    await recover_inflight_lifi_swaps(self._pipeline)
-                    recovered = True
-                await self.run_lifi_once()
-            except Exception:
-                logger.exception("LiFi swap dispatcher iteration failed")
-            await self._pause()
+    async def _run_on_chain(self, name: str, setting: str, run_round: Callable[[int], Awaitable[None]],
+                            interval: float) -> None:
+        chain_id: Optional[int] = None
 
-    async def run_lifi_once(self) -> None:
-        if not self.settings.lifi_execution_enabled:
-            return
-        if self._pipeline is None:
-            from src.services.swap.lifi_pipeline import get_lifi_pipeline
+        async def chain_round() -> None:
+            nonlocal chain_id
+            if chain_id is None:
+                chain_id = await asyncio.to_thread(rpc_chain_id, setting)
+            if chain_id is not None:
+                await run_round(chain_id)
 
-            self._pipeline = await asyncio.to_thread(get_lifi_pipeline)
-        for swap in self._internal_pipeline._claim("lifi", 5):
-            try:
-                row = get_db().execute("SELECT * FROM quotes WHERE id = ?", (swap["quote_id"],)).fetchone()
-                if row is None:
-                    raise ValueError("Scheduled swap quote not found")
-                quote = dict(row)
-                await self._pipeline.launch(
-                    quote, swap["user_address"], int(swap["input_nonce"]),
-                    swap["input_signature"], swap_id=swap["id"],
-                )
-            except Exception as exc:
-                self._internal_pipeline._update(swap["id"], status="failed", error=str(exc))
-                log_swap_failure(swap["id"], "lifi dispatch failed", exc)
-
-    async def _pause(self) -> None:
-        try:
-            await asyncio.wait_for(self._stop.wait(), timeout=POLL_INTERVAL)
-        except TimeoutError:
-            pass
-
+        await self._run(f"{name} ({setting})", chain_round, interval)
 
 
 _worker_instance: Optional[SwapWorker] = None

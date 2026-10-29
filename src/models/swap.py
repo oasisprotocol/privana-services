@@ -20,12 +20,27 @@ class SwapVenue(str, Enum):
     LIFI = "lifi"
 
 
-class LifiSwapStep(str, Enum):
-    INPUT_TRANSFER = "input_transfer"
-    WITHDRAW = "withdraw"
-    LIFI_EXECUTE = "lifi_execute"
-    DEPOSIT = "deposit"
-    CREDIT = "credit"
+class SwapStep(str, Enum):
+    """Where a swap is: `<stage>:<substatus>` while it executes or refunds,
+    and once it failed, whether a person has to return the user's funds."""
+
+    INTERNAL_SWAP_PRICING = "internal_swap:pricing"
+    INTERNAL_SWAP_SENT = "internal_swap:sent"
+    INPUT_SENT = "input:sent"
+    WITHDRAW_SENT = "withdraw:sent"
+    EXECUTE_FUNDING = "execute:funding"
+    EXECUTE_SENT = "execute:sent"
+    EXECUTE_BRIDGING = "execute:bridging"
+    DEPOSIT_SENT = "deposit:sent"
+    DEPOSIT_CREDITING = "deposit:crediting"
+    CREDIT_SENT = "credit:sent"
+    REFUND_REDEPOSIT = "refund:redeposit"
+    REFUND_CREDITING = "refund:crediting"
+    REFUND_PAYOUT = "refund:payout"
+    # Failed, and what the user's funds did: a parked swap may hold them
+    # until a person returns them.
+    PARKED = "parked"
+    NO_FUNDS_MOVED = "no_funds_moved"
 
 
 class QuoteRecord(BaseModel):

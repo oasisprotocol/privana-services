@@ -570,7 +570,7 @@ class TestRefund:
         pipeline.evm.balance_of = MagicMock(return_value=0)
         swap_id = _seed_swap(test_db, _quote("q_p"))
         pipeline._update_swap(swap_id, status="refunding", step="lifi_execute")
-        evm_batcher.submit(FROM_INFO.chain_id, transfer_intent(
+        evm_batcher.submit(FROM_INFO.chain_id, settings.liquidity_provider_address, transfer_intent(
             f"swap:{swap_id}:refund", FROM_INFO.token_address, DEPOSIT_ADDRESS, 1000000))
         await _recovered(pipeline)
         assert _swap_row(swap_id)["status"] == "refunded"
@@ -1176,8 +1176,8 @@ class TestQueuedTxs:
         pipeline = _make_pipeline(settings)
         submits = []
         submit = evm_batcher.submit
-        monkeypatch.setattr(evm_batcher, "submit", lambda chain_id, *intents: (
-            submits.append([i.owner.rsplit(":", 1)[1] for i in intents]) or submit(chain_id, *intents)))
+        monkeypatch.setattr(evm_batcher, "submit", lambda chain_id, address, *intents: (
+            submits.append([i.owner.rsplit(":", 1)[1] for i in intents]) or submit(chain_id, address, *intents)))
         spender = "0x" + "5a" * 20
         estimate = {**EXEC_QUOTE["estimate"], "approvalAddress": spender}
         pipeline.lifi.get_execution_quote = AsyncMock(return_value={**EXEC_QUOTE, "estimate": estimate})
@@ -1245,7 +1245,7 @@ class TestResume:
     async def test_a_sent_lifi_tx_is_settled_not_sent_again(self, settings, insert_quote):
         pipeline = _make_pipeline(settings)
         swap_id, quote = self._seed(pipeline, insert_quote, "qr1", step="lifi_execute")
-        evm_batcher.submit(FROM_INFO.chain_id, TxIntent(
+        evm_batcher.submit(FROM_INFO.chain_id, settings.liquidity_provider_address, TxIntent(
             owner=f"swap:{swap_id}:lifi", to=DIAMOND, gas=0x15fcbf, data="0xdead", simulate=False))
         # A restart can find the chain's RPC down: settling a sent tx needs none of it.
         pipeline._evm_for = MagicMock(side_effect=ValueError("No RPC is configured for chain 84532"))
@@ -1275,7 +1275,7 @@ class TestResume:
         swap_id, quote = self._seed(
             pipeline, insert_quote, "qr3", step="deposit", lifi_tx_hash=LIFI_TX,
             to_amount_received="60000")
-        evm_batcher.submit(TO_INFO.chain_id, transfer_intent(
+        evm_batcher.submit(TO_INFO.chain_id, settings.liquidity_provider_address, transfer_intent(
             f"swap:{swap_id}:deposit", TO_INFO.token_address, DEPOSIT_ADDRESS, 60000))
 
         await pipeline._run(swap_id, quote, 5)

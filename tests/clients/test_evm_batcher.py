@@ -6,89 +6,30 @@ import pytest
 from eth_account.typed_transactions import TypedTransaction
 from hexbytes import HexBytes
 from web3 import Web3
-from web3.exceptions import ContractLogicError, TransactionNotFound, Web3RPCError
+from web3.exceptions import TransactionNotFound, Web3RPCError
 
 import src.clients.evm_batcher as module
 from src.clients.base_evm import EvmClient
-from src.clients.evm_batcher import EvmBatcher, TxIntent, find_evm_tx, result, submit
+from src.clients.evm_batcher import EvmBatcher, TxIntent, find_evm_tx, submit
+from src.core.config import load_settings
+from src.core.db import get_db
+from tests.clients.fake_chain import (
+    CHAIN_ID,
+    SAPPHIRE_CHAIN_ID,
+    FakeChain,
+    Unreachable,
+    decode,
+    hash_of,
+    nonce_of,
+    sapphire_sender,
+)
 
-CHAIN_ID = 8453
 TARGET = "0x" + "dd" * 20
+LP = load_settings().liquidity_provider_address
 
 
-class Unreachable(ConnectionError):
-    """The RPC did not answer."""
-
-
-class FakeChain:
-    """A node that takes txs and mines them only when told to, or on its own
-    once `auto_mine` is set."""
-
-    def __init__(self) -> None:
-        self.mined_count = 0
-        self.pool: dict[int, str] = {}
-        self.sent: list[str] = []
-        self.receipts: dict[str, dict] = {}
-        self.chain_id = CHAIN_ID
-        self.max_priority_fee = 100
-        self.base_fee = 1_000
-        self.auto_mine = False
-        self.reverting_calls: set[str] = set()
-        self.refuse: list[Exception] = []
-        self.on_send = None
-
-    def get_transaction_count(self, address, block="latest"):
-        if block == "pending":
-            return max([self.mined_count, *[n + 1 for n in self.pool]])
-        return self.mined_count
-
-    def get_block(self, _):
-        return {"baseFeePerGas": self.base_fee}
-
-    def call(self, tx, *_):
-        if tx["data"] == "0xdown":
-            raise Unreachable("rpc timed out")
-        if tx["data"] in self.reverting_calls:
-            raise ContractLogicError("execution reverted")
-        return b""
-
-    def send_raw_transaction(self, raw):
-        raw = Web3.to_hex(HexBytes(raw))
-        if self.on_send is not None:
-            self.on_send(raw)
-        if self.refuse:
-            raise self.refuse.pop(0)
-        self.sent.append(raw)
-        self.pool[nonce_of(raw)] = raw
-        return Web3.keccak(hexstr=raw)
-
-    def mine(self, count: int = 1, status: int = 1) -> None:
-        for _ in range(count):
-            raw = self.pool.pop(self.mined_count)
-            self.receipts[Web3.to_hex(Web3.keccak(hexstr=raw))] = {"status": status, "logs": []}
-            self.mined_count += 1
-
-    def get_transaction(self, tx_hash):
-        for raw in self.pool.values():
-            if hash_of(raw) == tx_hash:
-                return TypedTransaction.from_bytes(HexBytes(raw)).as_dict()
-        raise TransactionNotFound(tx_hash)
-
-    def get_transaction_receipt(self, tx_hash):
-        if self.auto_mine:
-            while self.mined_count in self.pool:
-                self.mine()
-        if tx_hash not in self.receipts:
-            raise TransactionNotFound(tx_hash)
-        return self.receipts[tx_hash]
-
-
-def nonce_of(raw: str) -> int:
-    return TypedTransaction.from_bytes(HexBytes(raw)).as_dict()["nonce"]
-
-
-def hash_of(raw: str) -> str:
-    return Web3.to_hex(Web3.keccak(hexstr=raw))
+def result(tx_id: int) -> dict:
+    return dict(get_db().execute("SELECT * FROM evm_transactions WHERE id = ?", (tx_id,)).fetchone())
 
 
 @pytest.fixture(autouse=True)
@@ -104,10 +45,10 @@ def chain():
 
 @pytest.fixture
 def batcher(chain, test_db, settings):
-    # The LP account, which `submit` queues for.
+    # The LP account, which these tests queue for.
     evm = EvmClient("http://localhost:1", settings.liquidity_provider_secret_key)
     evm.w3.eth = chain
-    return EvmBatcher(evm, CHAIN_ID, test_db, threading.Event())
+    return EvmBatcher(evm, test_db, threading.Event())
 
 
 def intent(owner="swap:a:lifi", **fields):
@@ -115,12 +56,12 @@ def intent(owner="swap:a:lifi", **fields):
 
 
 def queue(batcher, count, **fields):
-    return [submit(CHAIN_ID, intent(owner=f"swap:{i}:lifi", **fields))[0] for i in range(count)]
+    return [submit(CHAIN_ID, LP, intent(owner=f"swap:{i}:lifi", **fields))[0] for i in range(count)]
 
 
 def test_submitting_an_owner_again_keeps_its_one_tx(batcher, test_db):
-    (first,) = submit(CHAIN_ID, intent(owner="swap:a:lifi"))
-    (again,) = submit(CHAIN_ID, intent(owner="swap:a:lifi", data="0xother"))
+    (first,) = submit(CHAIN_ID, LP, intent(owner="swap:a:lifi"))
+    (again,) = submit(CHAIN_ID, LP, intent(owner="swap:a:lifi", data="0xother"))
 
     assert again == first
     assert result(first)["data"] == "0x"
@@ -128,20 +69,20 @@ def test_submitting_an_owner_again_keeps_its_one_tx(batcher, test_db):
 
 
 def test_txs_submitted_together_get_consecutive_ids(batcher):
-    approve, swap = submit(CHAIN_ID, intent(owner="swap:a:approve"), intent(owner="swap:a:lifi"))
+    approve, swap = submit(CHAIN_ID, LP, intent(owner="swap:a:approve"), intent(owner="swap:a:lifi"))
 
     assert swap == approve + 1
 
 
 def test_a_tx_is_found_by_its_owner(batcher):
-    (tx_id,) = submit(CHAIN_ID, intent(owner="swap:a:deposit"))
+    (tx_id,) = submit(CHAIN_ID, LP, intent(owner="swap:a:deposit"))
 
     assert find_evm_tx("swap:a:deposit")["id"] == tx_id
     assert find_evm_tx("swap:b:deposit") is None
 
 
 def test_submit_only_queues_the_tx(batcher, chain):
-    (tx_id,) = submit(CHAIN_ID, TxIntent(owner="swap:a:deposit", to=TARGET, gas=65_000, data="0xabcd", value=5))
+    (tx_id,) = submit(CHAIN_ID, LP, TxIntent(owner="swap:a:deposit", to=TARGET, gas=65_000, data="0xabcd", value=5))
 
     row = result(tx_id)
     assert (row["status"], row["owner"], row["data"], row["value"], row["gas"]) == (
@@ -205,7 +146,7 @@ def test_a_tx_mined_before_a_restart_is_never_sent_again(batcher, chain):
     chain.mine()
     sent = list(chain.sent)
 
-    EvmBatcher(batcher.evm, CHAIN_ID, batcher.db, threading.Event()).run_round()
+    EvmBatcher(batcher.evm, batcher.db, threading.Event()).run_round()
 
     assert chain.sent == sent
     assert result(tx_id)["status"] == "mined"
@@ -240,8 +181,8 @@ def test_a_used_nonce_without_a_receipt_yet_holds_the_round(batcher, chain):
 
 
 def test_a_tx_whose_simulation_reverts_fails_without_using_a_nonce(batcher, chain):
-    (doomed,) = submit(CHAIN_ID, intent(owner="swap:a:lifi", data="0xdead"))
-    (fine,) = submit(CHAIN_ID, intent(owner="swap:b:lifi"))
+    (doomed,) = submit(CHAIN_ID, LP, intent(owner="swap:a:lifi", data="0xdead"))
+    (fine,) = submit(CHAIN_ID, LP, intent(owner="swap:b:lifi"))
     chain.reverting_calls.add("0xdead")
 
     batcher.run_round()
@@ -252,7 +193,7 @@ def test_a_tx_whose_simulation_reverts_fails_without_using_a_nonce(batcher, chai
 
 
 def test_a_dependent_tx_skips_simulation(batcher, chain):
-    (tx_id,) = submit(CHAIN_ID, intent(data="0xdead", simulate=False))
+    (tx_id,) = submit(CHAIN_ID, LP, intent(data="0xdead", simulate=False))
     chain.reverting_calls.add("0xdead")
 
     batcher.run_round()
@@ -306,13 +247,24 @@ def test_a_send_that_may_have_reached_the_node_stays_queued(batcher, chain):
     assert result(tx_id)["attempts"].startswith("0:")
 
 
-def test_a_round_takes_at_most_the_batch_size(batcher, chain, monkeypatch):
-    monkeypatch.setattr(module, "BATCH_SIZE", 3)
+def test_a_round_takes_at_most_the_batch_size(batcher, chain):
+    batcher.batch_size = 3
     queue(batcher, 5)
 
     batcher.run_round()
 
     assert len(chain.sent) == 3
+
+
+def test_a_sapphire_sender_sends_one_tx_per_round(test_db, settings):
+    chain = FakeChain(SAPPHIRE_CHAIN_ID)
+    chain.auto_mine = True
+    sender = sapphire_sender(chain, test_db, settings.liquidity_provider_secret_key)
+    submit(SAPPHIRE_CHAIN_ID, sender.evm.address, intent(owner="swap:a:lifi"), intent(owner="swap:b:lifi"))
+
+    sender.run_round()
+
+    assert len(chain.sent) == 1
 
 
 def test_an_empty_queue_asks_the_node_nothing(batcher, chain, monkeypatch):
@@ -322,8 +274,8 @@ def test_an_empty_queue_asks_the_node_nothing(batcher, chain, monkeypatch):
 
 
 def test_an_rpc_failure_mid_batch_still_settles_what_was_sent(batcher, chain):
-    (sent_first,) = submit(CHAIN_ID, intent(owner="swap:a:lifi"))
-    (unreachable,) = submit(CHAIN_ID, intent(owner="swap:b:lifi", data="0xdown"))
+    (sent_first,) = submit(CHAIN_ID, LP, intent(owner="swap:a:lifi"))
+    (unreachable,) = submit(CHAIN_ID, LP, intent(owner="swap:b:lifi", data="0xdown"))
     chain.auto_mine = True
 
     batcher.run_round()
@@ -378,50 +330,51 @@ def test_the_loop_drains_the_queue_until_stopped(batcher, chain):
     assert result(tx_id)["status"] == "mined"
 
 
-def test_one_batcher_thread_starts_per_configured_chain(monkeypatch, settings):
+def test_one_batcher_thread_starts_per_chain_and_account(monkeypatch, settings):
     from dataclasses import replace
 
     served = []
-    started = threading.Event()
 
     class Chain:
         def __init__(self, chain_id):
             self.chain_id = chain_id
 
     class Batcher:
-        def __init__(self, evm, chain_id, db, stop):
-            self.chain_id = chain_id
+        def __init__(self, evm, db, stop, before_round=None):
+            self.evm = evm
+            self.chain_id = evm.chain_id
             self.stop = stop
 
         def run(self):
-            served.append(self.chain_id)
-            if len(served) == 2:
-                started.set()
+            served.append((self.chain_id, self.evm.address, self.evm._headers))
             self.stop.wait()
 
-    def client(rpc_url, key):
-        evm = EvmClient("http://localhost:1", key)
-        evm.w3.eth = Chain({"http://base": 8453, "http://eth": 1, "http://base-again": 8453}[rpc_url])
+    chains = {"http://base": 8453, "http://eth": 1, "http://base-again": 8453, "http://sapphire": 23295}
+
+    def client(rpc_url, key, headers):
+        evm = EvmClient("http://localhost:1", key, headers)
+        evm.w3.eth = Chain(chains[rpc_url])
         return evm
 
+    auth = {"Authorization": "Bearer t"}
     monkeypatch.setattr(module, "load_settings", lambda: replace(
-        settings, base_rpc_url="http://base", ethereum_rpc_url="http://eth", hyperevm_rpc_url="http://base-again"))
+        settings, base_rpc_url="http://base", ethereum_rpc_url="http://eth", hyperevm_rpc_url="http://base-again",
+        sapphire_rpc_url="http://sapphire", sapphire_rpc_headers=auth))
     monkeypatch.setattr(module, "EvmClient", client)
     monkeypatch.setattr(module, "EvmBatcher", Batcher)
     monkeypatch.setattr(module, "connect", lambda: __import__("sqlite3").connect(":memory:"))
 
-    module.start_evm_batchers()
+    module.start_evm_batchers(lambda db, evm: False)
     try:
-        assert started.wait(5)
-        # The third thread ends once it finds its chain already served.
+        # The LP's thread for the second RPC of chain 8453 ends once it finds it served.
         deadline = time.monotonic() + 5
-        while sum(t.is_alive() for t in module._threads) > 2 and time.monotonic() < deadline:
+        while (len(served) < 3 or sum(t.is_alive() for t in module._threads) > 3) and time.monotonic() < deadline:
             time.sleep(0.01)
     finally:
         module.stop_evm_batchers()
 
-    # A second RPC for chain 8453 would be a second sender for its nonces.
-    assert sorted(served) == [1, 8453]
+    # A second RPC for chain 8453 would be a second LP sender for its nonces.
+    assert sorted(served) == sorted([(8453, LP, {}), (1, LP, {}), (23295, LP, auth)])
 
 
 def refuse_used_nonces(chain):
@@ -459,7 +412,7 @@ def executed(chain, tx_id):
 def test_a_tx_mined_while_the_round_reconciles_does_not_stall_the_queue(batcher, chain):
     (x,) = queue(batcher, 1)
     batcher.run_round()
-    (y,) = submit(CHAIN_ID, intent(owner="swap:y:lifi", data="0xbeef"))
+    (y,) = submit(CHAIN_ID, LP, intent(owner="swap:y:lifi", data="0xbeef"))
     real = mine_during_receipt_lookup(chain)
     refuse_used_nonces(chain)
 
@@ -475,7 +428,7 @@ def test_a_lagging_nonce_count_does_not_reuse_a_mined_nonce(batcher, chain):
     (x,) = queue(batcher, 1)
     chain.auto_mine = True
     batcher.run_round()
-    (y,) = submit(CHAIN_ID, intent(owner="swap:y:lifi", data="0xbeef"))
+    (y,) = submit(CHAIN_ID, LP, intent(owner="swap:y:lifi", data="0xbeef"))
     real = chain.get_transaction_count
     stale = [0]
     chain.get_transaction_count = lambda address, block="latest": stale.pop() if stale else real(address, block)
@@ -488,9 +441,9 @@ def test_a_lagging_nonce_count_does_not_reuse_a_mined_nonce(batcher, chain):
 
 
 def test_an_identical_tx_is_never_settled_by_another_rows_receipt(batcher, chain):
-    (x,) = submit(CHAIN_ID, intent(owner="swap:x:deposit"))
+    (x,) = submit(CHAIN_ID, LP, intent(owner="swap:x:deposit"))
     batcher.run_round()
-    (y,) = submit(CHAIN_ID, intent(owner="swap:y:deposit"))
+    (y,) = submit(CHAIN_ID, LP, intent(owner="swap:y:deposit"))
     real = mine_during_receipt_lookup(chain)
     refuse_used_nonces(chain)
 
@@ -512,7 +465,7 @@ def test_a_nonce_another_sender_took_fails_the_tx_and_frees_the_queue(batcher, c
     batcher.run_round()
     assert result(stuck)["status"] == "queued"
     batcher._used_since[stuck] -= module.STUCK_AFTER_SEC + 1
-    (behind,) = submit(CHAIN_ID, intent(owner="swap:b:lifi", data="0xbeef"))
+    (behind,) = submit(CHAIN_ID, LP, intent(owner="swap:b:lifi", data="0xbeef"))
     chain.auto_mine = True
 
     batcher.run_round()
@@ -546,7 +499,7 @@ def test_a_tx_waits_out_the_receipt_window_before_it_or_the_txs_behind_go_out(ba
     batcher.run_round()
     monkeypatch.setattr(module, "RECEIPT_TIMEOUT_SEC", 60)
     chain.pool.clear()
-    (behind,) = submit(CHAIN_ID, intent(owner="swap:z:lifi", data="0xbeef"))
+    (behind,) = submit(CHAIN_ID, LP, intent(owner="swap:z:lifi", data="0xbeef"))
     for _ in range(3):
         batcher.run_round()
     assert len(result(tx_id)["attempts"].split()) == 1
@@ -641,7 +594,7 @@ def test_a_held_version_that_can_still_be_mined_is_not_signed_again(batcher, cha
     assert len(chain.sent) == 1
 
 def test_a_simulation_the_node_rejects_fails_the_tx_unsigned(batcher, chain):
-    (doomed,) = submit(CHAIN_ID, intent(owner="swap:a:lifi", data="0xpoor"))
+    (doomed,) = submit(CHAIN_ID, LP, intent(owner="swap:a:lifi", data="0xpoor"))
     real = chain.call
     chain.call = lambda tx, *a: (_ for _ in ()).throw(Web3RPCError("insufficient funds for transfer")) \
         if tx["data"] == "0xpoor" else real(tx, *a)
@@ -751,8 +704,8 @@ def test_a_tx_mined_long_after_it_was_sent_is_not_failed_when_its_receipt_lags(b
 
 @pytest.mark.parametrize("reply", ["out of gas", "invalid opcode: INVALID", "stack underflow (0 <=> 1)"])
 def test_a_call_that_fails_as_built_fails_the_tx_unsigned(batcher, chain, reply):
-    (doomed,) = submit(CHAIN_ID, intent(owner="swap:a:lifi", data="0xbad0"))
-    (fine,) = submit(CHAIN_ID, intent(owner="swap:b:lifi"))
+    (doomed,) = submit(CHAIN_ID, LP, intent(owner="swap:a:lifi", data="0xbad0"))
+    (fine,) = submit(CHAIN_ID, LP, intent(owner="swap:b:lifi"))
     real = chain.call
     chain.call = lambda tx, *a: (_ for _ in ()).throw(rpc_error(reply)) if tx["data"] == "0xbad0" else real(tx, *a)
 
@@ -798,3 +751,82 @@ def test_a_failed_send_logs_what_the_chain_says_about_it(batcher, chain, caplog)
 
     logged = " ".join(r.getMessage() for r in caplog.records)
     assert "latest_nonce=0 pending_nonce=0 known_to_node=False" in logged
+
+
+@pytest.fixture
+def sapphire(test_db, settings):
+    return sapphire_sender(FakeChain(SAPPHIRE_CHAIN_ID), test_db, settings.liquidity_provider_secret_key)
+
+
+def test_sapphire_calldata_goes_out_encrypted_to_the_current_key_on_every_attempt(sapphire, test_db):
+    chain = sapphire.evm.w3.eth
+    (tx_id,) = submit(SAPPHIRE_CHAIN_ID, LP, intent(data="0xa9059cbb" + "00" * 64))
+    sapphire.run_round()
+    chain.pool.clear()
+    chain.epoch = 2
+    age(test_db, module.RECEIPT_TIMEOUT_SEC + 1)
+
+    sapphire.run_round()
+
+    first, retry = (decode(raw) for raw in chain.sent)
+    assert first["nonce"] == retry["nonce"]
+    for tx, epoch in ((first, 1), (retry, 2)):
+        data = Web3.to_hex(tx["data"])
+        assert not data.startswith("0xa9059cbb")
+        assert chain.envelope(data)["epoch"] == epoch
+        assert chain.plaintext(data) == result(tx_id)["data"]
+
+
+def test_a_sapphire_retry_outbids_a_held_gas_price_only_once_it_is_priced_out(sapphire, test_db):
+    chain = sapphire.evm.w3.eth
+    submit(SAPPHIRE_CHAIN_ID, LP, intent())
+    sapphire.run_round()
+    for _ in range(3):
+        age(test_db, module.RECEIPT_TIMEOUT_SEC + 1)
+        sapphire.run_round()
+    assert len(chain.sent) == 1
+    chain.gas_price = 101
+    age(test_db, module.RECEIPT_TIMEOUT_SEC + 1)
+
+    sapphire.run_round()
+
+    first, retry = decode(chain.sent[0]), decode(chain.sent[1])
+    assert retry["nonce"] == first["nonce"]
+    assert retry["gasPrice"] >= first["gasPrice"] * 1.125
+
+
+def test_a_sapphire_call_is_signed_and_a_failure_short_of_a_revert_is_retried(test_db, settings):
+    calls = []
+
+    class SignedCalls:
+        def call(self, tx):
+            calls.append(tx)
+            if len(calls) == 1:
+                raise rpc_error("base block not found")
+            return b""
+
+    sender = sapphire_sender(FakeChain(SAPPHIRE_CHAIN_ID), test_db, settings.liquidity_provider_secret_key,
+                             SignedCalls())
+    (tx_id,) = submit(SAPPHIRE_CHAIN_ID, LP, intent(data="0xabcd"))
+    sender.run_round()
+    assert (result(tx_id)["status"], result(tx_id)["attempts"]) == ("queued", None)
+
+    sender.run_round()
+
+    assert result(tx_id)["attempts"]
+    # sapphirepy cannot sign a call with gas or fee fields.
+    assert calls[-1] == {"from": sender.evm.address, "to": Web3.to_checksum_address(TARGET), "data": "0xabcd",
+                         "value": 0}
+
+
+def test_a_retry_is_sent_even_when_its_call_now_reverts(batcher, chain, test_db):
+    # Its first attempt may have run: the state it reverts against can be its own.
+    (tx_id,) = queue(batcher, 1)
+    batcher.run_round()
+    age(test_db, module.RECEIPT_TIMEOUT_SEC + 1)
+    chain.base_fee = 50_000
+    chain.reverting_calls.add("0x")
+
+    batcher.run_round()
+
+    assert (result(tx_id)["status"], len(chain.sent)) == ("queued", 2)

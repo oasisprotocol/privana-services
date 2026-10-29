@@ -1,8 +1,9 @@
 import logging
 import sqlite3
 import threading
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Optional
+from typing import Iterator, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -189,6 +190,26 @@ MIGRATIONS = [
     # One tx per owner, so a caller resubmitting after a restart finds its tx
     # instead of queuing a second one.
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_evm_tx_owner ON evm_transactions(owner);",
+    # Privana writes, one row per transfer or withdrawal. `signer` is the
+    # account whose nonce it spends. `payload` is the JSON the call is built
+    # from. `nonce` and `signature` are saved before anything is sent, and
+    # `attempts` counts signings of a transfer and sends of a withdrawal.
+    """
+    CREATE TABLE IF NOT EXISTS privana_transactions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        signer TEXT NOT NULL,
+        owner TEXT NOT NULL UNIQUE,
+        kind TEXT NOT NULL,
+        payload TEXT NOT NULL,
+        nonce INTEGER,
+        signature TEXT,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'queued',
+        error TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+    );
+    """,
 ]
 
 
@@ -227,6 +248,13 @@ def db_write_many(conn: sqlite3.Connection, sql: str, params: list[tuple]) -> in
         return 0
     with _write_lock, conn:
         return conn.executemany(sql, params).rowcount
+
+
+@contextmanager
+def db_transaction(conn: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
+    """Several writes that commit together or not at all."""
+    with _write_lock, conn:
+        yield conn
 
 
 def close_db() -> None:

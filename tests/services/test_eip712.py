@@ -1,7 +1,9 @@
 import pytest
 from eth_account import Account
+from privana.signatures import SignWithdrawParams, sign_withdraw_message
+from privana.signatures.eip712_types import WithdrawMessage
 
-from src.core.eip712 import _to_bytes32, sign_transfer
+from src.core.eip712 import _to_bytes32, sign_transfer, sign_withdrawal
 
 PRIVATE_KEY_1 = "0x4c0883a69102937d6231471b5dbb6204fe512961708279f69e0f0fcbf24b5830"
 PRIVATE_KEY_2 = "0x6370fd033278c143179d81c5526140625662532e7167470da27dbba4e8b3e0b0"
@@ -150,3 +152,13 @@ class TestSignTransfer:
         sig1 = sign_transfer(amount=1_000_000, **common)
         sig2 = sign_transfer(amount=2_000_000, **common)
         assert sig1 != sig2
+
+
+def test_a_withdrawal_is_signed_as_the_privana_sdk_signs_it():
+    contract = "0x" + "ac" * 20
+    sdk = sign_withdraw_message(SignWithdrawParams(
+        account=Account.from_key(PRIVATE_KEY_1), network="testnet", verifying_contract=contract,
+        message=WithdrawMessage(token_id=TOKEN_ID, amount=AMOUNT, nonce=3),
+    ))
+
+    assert sign_withdrawal(PRIVATE_KEY_1, 23295, contract, TOKEN_ID, AMOUNT, 3) == sdk

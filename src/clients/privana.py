@@ -13,6 +13,9 @@ from src.core.config import load_settings
 # each request gets its own.
 _HEADERS = {"Connection": "close"}
 
+# Replies to a submitted write that mean the API took it.
+ACCEPTED_SUBMISSION_STATUSES = {"submitted", "pending", "accepted"}
+
 _client: Optional[PrivanaClient] = None
 _swap_lp_client: Optional[PrivanaClient] = None
 _earn_pool_client: Optional[PrivanaClient] = None

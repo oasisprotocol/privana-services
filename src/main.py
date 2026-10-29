@@ -112,8 +112,14 @@ async def lifespan(_app: FastAPI):
     await swap_worker.start()
 
     from src.clients.evm_batcher import start_evm_batchers, stop_evm_batchers
+    from src.clients.privana_lanes import (
+        run_transfer_lanes,
+        start_withdraw_lanes,
+        stop_withdraw_lanes,
+    )
 
-    start_evm_batchers()
+    start_evm_batchers(run_transfer_lanes)
+    start_withdraw_lanes()
 
     try:
         await get_price_sampler().start()
@@ -166,6 +172,7 @@ async def lifespan(_app: FastAPI):
         await get_earn_worker().stop()
     except Exception:
         logger.warning("Error stopping earn worker")
+    await stop_withdraw_lanes()
     try:
         await get_accounting_client().close()
     except Exception:
@@ -213,8 +220,17 @@ async def health():
     except Exception:
         checks["sapphire"] = "unavailable"
 
+    from src.clients.evm_batcher import STUCK_AFTER_SEC, sender_health
+    from src.clients.privana_lanes import lane_health
+
+    senders, lanes = sender_health(), lane_health()
+    # A dead sender thread or a write waiting past the stuck window needs a person.
+    waits = [*senders["oldest_queued_sec"].values(), *lanes.values()]
+    checks["senders"] = "ok" if senders["threads_alive"] == senders["threads"] else "thread stopped"
+    checks["queues"] = "ok" if all(w < STUCK_AFTER_SEC for w in waits) else "stalled"
+
     overall = "ok" if all(v == "ok" for v in checks.values()) else "degraded"
-    return {"status": overall, "checks": checks}
+    return {"status": overall, "checks": checks, "senders": senders, "lanes": lanes}
 
 
 def main():

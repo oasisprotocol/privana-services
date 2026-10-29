@@ -8,7 +8,7 @@ from privana.signatures import SignWithdrawParams, sign_withdraw_message
 from privana.signatures.eip712_types import WithdrawMessage
 from privana.types import DepositCheckRequest, WithdrawalRequest
 
-from src.clients.privana import get_swap_lp_privana_client
+from src.clients.privana import ACCEPTED_SUBMISSION_STATUSES, get_swap_lp_privana_client
 from src.core.config import load_settings
 
 logger = logging.getLogger(__name__)
@@ -18,7 +18,6 @@ T = TypeVar("T")
 POLL_INTERVAL_SEC = 5.0
 MAX_POLL_ATTEMPTS = 120
 MAX_NETWORK_RETRIES = 10
-ACCEPTED_SUBMISSION_STATUSES = {"submitted", "pending", "accepted"}
 SAPPHIRE_TESTNET_CHAIN_ID = 23295
 
 # One per process, shared by every bridge: the LP has a single withdrawal nonce.

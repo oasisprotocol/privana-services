@@ -3,7 +3,7 @@ import sqlite3
 import threading
 import time
 from dataclasses import dataclass
-from typing import Optional
+from typing import Callable, Optional
 
 from web3 import Web3
 from web3.exceptions import ContractLogicError, TransactionNotFound, Web3RPCError
@@ -11,10 +11,17 @@ from web3.exceptions import ContractLogicError, TransactionNotFound, Web3RPCErro
 from src.clients.base_evm import ERC20_ABI, RPC_SETTINGS, EvmClient, is_native
 from src.core.config import load_settings
 from src.core.db import connect, db_write, db_write_many, get_db
+from src.models.settings import Settings
 
 logger = logging.getLogger(__name__)
 
 BATCH_SIZE = 10
+# Txs one Sapphire account sends per round. oasis-core 26.3's compute node
+# panics (txpool maxPriorityTxHeap.replace, index out of range [-1]) when
+# several txs from one account reach its pool together: 3 to 10 crashed a
+# localnet, 2 did not, and 10 txs from 10 accounts were fine. Raise it only
+# once the node version Sapphire runs is known to be fixed.
+SAPPHIRE_BATCH_SIZE = 1
 TRANSFER_GAS_LIMIT = 100_000
 NATIVE_TRANSFER_GAS_LIMIT = 21_000
 APPROVE_GAS_LIMIT = 80_000
@@ -40,10 +47,14 @@ SENT = "sent"
 SKIPPED = "skipped"
 STOPPED = "stopped"
 
+# The node's reply when the account cannot pay for the gas.
+GAS_REFUSED = ("insufficient funds", "insufficient balance to pay fees")
+# An unsimulated tx is built on the one before it, so it fails unsent with it.
+SUPERSEDED = "superseded: the tx before it failed"
 # Node replies meaning it will never take the tx as signed. Any other reply
 # may come from a node that took it anyway, so the tx is tried again later at
 # the same nonce instead of being failed.
-REFUSED = ("insufficient funds", "intrinsic gas too low", "exceeds block gas limit")
+REFUSED = (*GAS_REFUSED, "intrinsic gas too low", "exceeds block gas limit")
 # Simulation replies meaning the call fails as built, though not by a revert.
 CALL_FAILED = ("out of gas", "invalid opcode", "stack underflow", "stack overflow")
 
@@ -79,18 +90,28 @@ def approve_intent(owner: str, token: str, spender: str, amount: int) -> TxInten
     return TxIntent(owner=owner, to=token, gas=APPROVE_GAS_LIMIT, data=data)
 
 
+# Run at the start of a sender's round with its connection and client;
+# returns whether it changed anything.
+RoundHook = Callable[[sqlite3.Connection, EvmClient], bool]
+
+
 class EvmBatcher:
     """The only sender for one account on one chain. It runs in its own thread
     with its own database connection: callers on the event loop queue txs with
     `submit` and poll `result`. Each round signs the oldest queued txs with
     consecutive nonces from a fresh count, sends them back to back, and waits
-    only for the last receipt."""
+    only for the last receipt. `before_round`, given for Sapphire senders,
+    first turns the account's Privana transfer lanes into txs."""
 
-    def __init__(self, evm: EvmClient, chain_id: int, db: sqlite3.Connection, stop: threading.Event) -> None:
+    def __init__(self, evm: EvmClient, db: sqlite3.Connection, stop: threading.Event,
+                 before_round: Optional[RoundHook] = None) -> None:
         self.evm = evm
-        self.chain_id = chain_id
+        self.batch_size = SAPPHIRE_BATCH_SIZE if evm.sapphire else BATCH_SIZE
+        self.before_round = before_round
+        self.chain_id = evm.chain_id
         self.db = db
         self.stop = stop
+        self.label = f"{self.chain_id}/{evm.address}"
         # Tx id -> when its nonce was first seen used with no receipt for it.
         self._used_since: dict[int, float] = {}
 
@@ -99,17 +120,21 @@ class EvmBatcher:
             try:
                 progressed = self.run_round()
             except Exception as exc:
-                logger.warning("evm batcher %s round failed: %s", self.chain_id, exc)
+                logger.warning("evm batcher %s round failed: %s", self.label, exc)
                 progressed = False
             if not progressed:
                 self.stop.wait(IDLE_INTERVAL_SEC)
 
     def run_round(self) -> bool:
-        """One batch. Returns whether it settled or sent anything."""
+        """One batch. Returns whether it settled, signed or sent anything."""
+        signed = self.before_round is not None and self.before_round(self.db, self.evm)
+        return self._run_batch() or signed
+
+    def _run_batch(self) -> bool:
         rows = [dict(r) for r in self.db.execute(
             "SELECT * FROM evm_transactions WHERE chain_id = ? AND address = ? AND status = ? "
             "ORDER BY id LIMIT ?",
-            (self.chain_id, self.evm.address.lower(), QUEUED, BATCH_SIZE),
+            (self.chain_id, self.evm.address.lower(), QUEUED, self.batch_size),
         ).fetchall()]
         if not rows:
             return False
@@ -127,7 +152,7 @@ class EvmBatcher:
                 # and its swap parks for a person.
                 if row["id"] not in self._used_since:
                     logger.warning("evm batcher %s holds the queue: nonce of %s used, no receipt yet",
-                                   self.chain_id, row["owner"])
+                                   self.label, row["owner"])
                 since = self._used_since.setdefault(row["id"], time.monotonic())
                 if time.monotonic() - since < STUCK_AFTER_SEC:
                     return progressed
@@ -145,10 +170,14 @@ class EvmBatcher:
         # other, both versions could be mined.
         nonce = max(used, self._next_after_mined())
         fees = self.evm.fees()
-        sent, last_hash = [], None
+        sent, last_hash, failed_before = [], None, False
         for row in unsent:
+            if failed_before and not row["simulate"] and not row["attempts"]:
+                self._finish(row, FAILED, error=SUPERSEDED)
+                continue
             at = self._attempts(row)[-1][0] if row["attempts"] else nonce
             outcome = self._send(row, at, fees)
+            failed_before = outcome == SKIPPED
             if outcome == STOPPED:
                 break
             if outcome == SENT:
@@ -166,14 +195,13 @@ class EvmBatcher:
             try:
                 held = self._newest_held(row)
             except Exception as exc:
-                logger.warning("evm batcher %s lookup at nonce %d failed: %s", self.chain_id, nonce, exc)
+                logger.warning("evm batcher %s lookup at nonce %d failed: %s", self.label, nonce, exc)
                 return STOPPED
             if held is not None:
                 if _includable(held, fees):
                     # The node holds a version that can still be mined: wait for it.
                     return STOPPED
-                fees = {key: max(fees[key], held[key] + held[key] * FEE_BUMP_BPS // 10_000 + 1)
-                        for key in ("maxFeePerGas", "maxPriorityFeePerGas")}
+                fees = {key: max(fees[key], held[key] + held[key] * FEE_BUMP_BPS // 10_000 + 1) for key in fees}
         tx = {
             "from": self.evm.address,
             "to": Web3.to_checksum_address(row["to_address"]),
@@ -188,19 +216,24 @@ class EvmBatcher:
         # simulation, since its earlier attempt may still be mined.
         if row["simulate"] and not row["attempts"]:
             try:
-                self.evm.w3.eth.call(tx)
+                self.evm.simulate(tx)
             except (ContractLogicError, Web3RPCError) as exc:
                 # A revert or a refusal: the tx would fail, and nothing was signed.
                 if isinstance(exc, ContractLogicError) or any(p in _rpc_message(exc) for p in REFUSED + CALL_FAILED):
                     self._finish(row, FAILED, error=f"simulation failed: {exc}")
                     return SKIPPED
-                logger.warning("evm batcher %s simulation at nonce %d failed: %s", self.chain_id, nonce, exc)
+                logger.warning("evm batcher %s simulation at nonce %d failed: %s", self.label, nonce, exc)
                 return STOPPED
             except Exception as exc:
                 # The RPC, not the tx: what this round already sent is still awaited.
-                logger.warning("evm batcher %s simulation at nonce %d failed: %s", self.chain_id, nonce, exc)
+                logger.warning("evm batcher %s simulation at nonce %d failed: %s", self.label, nonce, exc)
                 return STOPPED
-        tx_hash, raw = self.evm.sign(tx)
+        try:
+            tx_hash, raw = self.evm.sign(tx)
+        except Exception as exc:
+            # Sapphire fetches its calldata key to sign: the RPC, not the tx.
+            logger.warning("evm batcher %s signing at nonce %d failed: %s", self.label, nonce, exc)
+            return STOPPED
         # Saved before broadcast: a later round checks it for a receipt before signing again.
         db_write(
             self.db,
@@ -222,9 +255,8 @@ class EvmBatcher:
             # It may have reached the node: the next round looks for its receipt.
             self._log_send_failure(tx_hash, nonce, exc)
             return STOPPED
-        logger.info("evm batcher %s sent %s for %s at nonce %d, attempt %d, max fee %d, tip %d",
-                    self.chain_id, tx_hash, row["owner"], nonce, len(self._attempts(row)) + 1,
-                    fees["maxFeePerGas"], fees["maxPriorityFeePerGas"])
+        logger.info("evm batcher %s sent %s for %s at nonce %d, attempt %d, fees %s",
+                    self.label, tx_hash, row["owner"], nonce, len(self._attempts(row)) + 1, fees)
         return SENT
 
     def _settle(self, row: dict, used: Optional[int]) -> Optional[bool]:
@@ -255,11 +287,11 @@ class EvmBatcher:
                 known = False
             logger.warning(
                 "evm batcher %s send of %s at nonce %d failed (%s): latest_nonce=%s pending_nonce=%s known_to_node=%s",
-                self.chain_id, tx_hash, nonce, exc, latest, pending, known,
+                self.label, tx_hash, nonce, exc, latest, pending, known,
             )
         except Exception as probe_exc:
             logger.warning("evm batcher %s send of %s at nonce %d failed (%s); state probe failed (%s)",
-                           self.chain_id, tx_hash, nonce, exc, probe_exc)
+                           self.label, tx_hash, nonce, exc, probe_exc)
 
     def _next_after_mined(self) -> int:
         top = self.db.execute(
@@ -284,7 +316,7 @@ class EvmBatcher:
                 return
             if self.stop.wait(RECEIPT_POLL_SEC):
                 return
-        logger.warning("evm batcher %s receipt of %s not seen, retrying next round", self.chain_id, tx_hash)
+        logger.warning("evm batcher %s receipt of %s not seen, retrying next round", self.label, tx_hash)
 
     def _row(self, tx_id: int) -> dict:
         return dict(self.db.execute("SELECT * FROM evm_transactions WHERE id = ?", (tx_id,)).fetchone())
@@ -303,12 +335,15 @@ class EvmBatcher:
             "updated_at = ? WHERE id = ?",
             (status, tx_hash, nonce, logs, error, int(time.time()), row["id"]),
         )
-        logger.info("evm batcher %s tx %d for %s %s%s", self.chain_id, row["id"], row["owner"], status,
+        logger.info("evm batcher %s tx %d for %s %s%s", self.label, row["id"], row["owner"], status,
                     f": {error}" if error else f" as {tx_hash}")
 
 
 def _includable(held: dict, fees: dict) -> bool:
-    """Whether `held` still pays the base fee and tip priced in `fees`."""
+    """Whether `held` still pays the base fee and tip priced in `fees`, or on
+    a legacy chain its gas price."""
+    if "gasPrice" in fees:
+        return held["gasPrice"] >= fees["gasPrice"]
     base_fee = (fees["maxFeePerGas"] - fees["maxPriorityFeePerGas"]) // 2
     return (held["maxPriorityFeePerGas"] >= fees["maxPriorityFeePerGas"]
             and held["maxFeePerGas"] >= base_fee + fees["maxPriorityFeePerGas"])
@@ -320,13 +355,13 @@ def _rpc_message(exc: Web3RPCError) -> str:
     return str(error.get("message") or exc).lower()
 
 
-def submit(chain_id: int, *intents: TxIntent) -> list[int]:
-    """Queue `intents` for the LP account's batcher on `chain_id` in one write,
+def submit(chain_id: int, address: str, *intents: TxIntent) -> list[int]:
+    """Queue `intents` for the batcher of `address` on `chain_id` in one write,
     so they get consecutive ids and go out in that order, and return their ids.
     An owner already queued keeps its tx: submitting again after a restart
     sends nothing twice."""
     now = int(time.time())
-    address = load_settings().liquidity_provider_address.lower()
+    address = address.lower()
     db_write_many(
         get_db(),
         "INSERT INTO evm_transactions (chain_id, address, owner, to_address, data, value, gas, "
@@ -356,23 +391,50 @@ def result(tx_id: int) -> Optional[dict]:
 # Long enough for a thread in the middle of an RPC call (30s timeout) to end its round.
 STOP_TIMEOUT_SEC = 60.0
 
+SAPPHIRE_RPC_SETTING = "sapphire_rpc_url"
+
 _stop = threading.Event()
 _threads: list[threading.Thread] = []
-# Chain id -> the setting whose batcher serves it: a second RPC for the same
-# chain would start a second sender for the same nonces.
-_serving: dict[int, str] = {}
+# (Chain id, address) -> the setting whose batcher serves it: a second RPC for
+# the same chain would start a second sender for the same nonces.
+_serving: dict[tuple[int, str], str] = {}
 
 
-def start_evm_batchers() -> None:
-    """Start one batcher thread per configured chain."""
+def sending_accounts(settings: Settings) -> set[tuple[str, str]]:
+    """(RPC setting, secret key) of every account that sends on a chain: the
+    LP on each configured chain, Sapphire included."""
+    lp = settings.liquidity_provider_secret_key
+    return {(setting, lp) for setting in (*RPC_SETTINGS, SAPPHIRE_RPC_SETTING) if lp and getattr(settings, setting)}
+
+
+def start_evm_batchers(sapphire_round: RoundHook) -> None:
+    """Start one batcher thread per configured chain and account; Sapphire
+    senders run `sapphire_round` first in each round."""
     _stop.clear()
     settings = load_settings()
-    for setting in RPC_SETTINGS:
-        rpc_url = getattr(settings, setting)
-        if rpc_url:
-            thread = threading.Thread(target=_serve, args=(setting, rpc_url), name=f"evm-batcher-{setting}", daemon=True)
-            thread.start()
-            _threads.append(thread)
+    for setting, key in sending_accounts(settings):
+        sapphire = setting == SAPPHIRE_RPC_SETTING
+        headers = settings.sapphire_rpc_headers if sapphire else None
+        hook = sapphire_round if sapphire else None
+        thread = threading.Thread(target=_serve, args=(setting, getattr(settings, setting), key, headers, hook),
+                                  name=f"evm-batcher-{setting}", daemon=True)
+        thread.start()
+        _threads.append(thread)
+
+
+def sender_health() -> dict:
+    """How many sender threads run, and how long each sender's oldest queued
+    tx has waited."""
+    now = int(time.time())
+    rows = get_db().execute(
+        "SELECT chain_id, address, MIN(created_at) AS since FROM evm_transactions WHERE status = ? "
+        "GROUP BY chain_id, address", (QUEUED,),
+    )
+    return {
+        "threads": len(_threads),
+        "threads_alive": sum(t.is_alive() for t in _threads),
+        "oldest_queued_sec": {f"{r['chain_id']}/{r['address']}": now - r["since"] for r in rows},
+    }
 
 
 def stop_evm_batchers() -> None:
@@ -383,15 +445,15 @@ def stop_evm_batchers() -> None:
     _serving.clear()
 
 
-def _serve(setting: str, rpc_url: str) -> None:
+def _serve(setting: str, rpc_url: str, secret_key: str, headers: Optional[dict], hook: Optional[RoundHook]) -> None:
     db = None
     try:
         db = connect()
-        evm = EvmClient(rpc_url, load_settings().liquidity_provider_secret_key)
+        evm = EvmClient(rpc_url, secret_key, headers)
         failures = 0
         while not _stop.is_set():
             try:
-                chain_id = evm.w3.eth.chain_id
+                chain_id = evm.chain_id
                 break
             except Exception as exc:
                 # Once a minute while it stays down.
@@ -401,12 +463,13 @@ def _serve(setting: str, rpc_url: str) -> None:
                 _stop.wait(IDLE_INTERVAL_SEC)
         else:
             return
-        if _serving.setdefault(chain_id, setting) != setting:
-            logger.error("evm batcher for %s not started: chain %s is already served by %s",
-                         setting, chain_id, _serving[chain_id])
+        sender = (chain_id, evm.address.lower())
+        if _serving.setdefault(sender, setting) != setting:
+            logger.error("evm batcher for %s not started: %s on chain %s is already served by %s",
+                         setting, evm.address, chain_id, _serving[sender])
             return
-        logger.info("evm batcher %s started for %s", chain_id, setting)
-        EvmBatcher(evm, chain_id, db, _stop).run()
+        logger.info("evm batcher %s/%s started for %s", chain_id, evm.address, setting)
+        EvmBatcher(evm, db, _stop, hook).run()
     except Exception as exc:
         logger.error("evm batcher for %s stopped: %s", setting, exc)
     finally:

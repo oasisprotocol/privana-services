@@ -25,7 +25,7 @@ from src.clients.evm_batcher import (
     transfer_intent,
 )
 from src.clients.lifi import LIFI_DEFAULT_SLIPPAGE_BPS, get_lifi_client
-from src.clients.privana import get_swap_lp_privana_client
+from src.clients.privana import ACCEPTED_SUBMISSION_STATUSES, get_swap_lp_privana_client
 from src.core.config import load_settings
 from src.core.db import db_write, get_db
 from src.core.eip712 import sign_transfer
@@ -38,7 +38,6 @@ from src.services.swap.worker import lp_transfer_lock
 
 logger = logging.getLogger(__name__)
 
-ACCEPTED_SUBMISSION_STATUSES = {"submitted", "pending", "accepted"}
 LIFI_STATUS_DONE = "DONE"
 LIFI_STATUS_FAILED = "FAILED"
 LIFI_STATUS_INVALID = "INVALID"
@@ -290,7 +289,7 @@ class LifiSwapPipeline:
                                        exec_quote["estimate"]["approvalAddress"], amount),
                         swap,
                     ]
-                    evm_batcher.submit(from_info.chain_id, *intents)
+                    evm_batcher.submit(from_info.chain_id, self.settings.liquidity_provider_address, *intents)
                     return
             await asyncio.sleep(self._poll_interval_sec)
         raise RuntimeError(f"swap funding unconfirmed after {FUNDING_POLLS} polls")
@@ -393,7 +392,8 @@ class LifiSwapPipeline:
         owner = _owner(swap_id, kind)
         if find_evm_tx(owner) is None:
             deposit_address = await self.bridge.get_deposit_address()
-            evm_batcher.submit(info.chain_id, transfer_intent(owner, info.token_address, deposit_address, amount))
+            evm_batcher.submit(info.chain_id, self.settings.liquidity_provider_address,
+                               transfer_intent(owner, info.token_address, deposit_address, amount))
         tx = await self._mined(swap_id, kind)
         self._update_swap(swap_id, deposit_tx_hash=tx["tx_hash"])
         for check in range(1, DEPOSIT_CREDIT_CHECKS + 1):

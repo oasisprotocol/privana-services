@@ -229,7 +229,7 @@ def sapphire_sender(chain: FakeChain, db, secret_key: str, signed_calls=None) ->
     evm.w3.eth = chain
     evm.calldata_public_key = chain.calldata_public_key
     evm.__dict__["_signed_calls"] = SimpleNamespace(eth=signed_calls or chain)
-    return EvmBatcher(evm, chain.chain_id, db, threading.Event(), run_transfer_lanes)
+    return EvmBatcher(evm, db, threading.Event(), run_transfer_lanes)
 
 
 def check_withdrawal_signature(settings, signer: str, request) -> None:

@@ -103,15 +103,15 @@ class EvmBatcher:
     only for the last receipt. `before_round`, given for Sapphire senders,
     first turns the account's Privana transfer lanes into txs."""
 
-    def __init__(self, evm: EvmClient, chain_id: int, db: sqlite3.Connection, stop: threading.Event,
+    def __init__(self, evm: EvmClient, db: sqlite3.Connection, stop: threading.Event,
                  before_round: Optional[RoundHook] = None) -> None:
         self.evm = evm
         self.batch_size = SAPPHIRE_BATCH_SIZE if evm.sapphire else BATCH_SIZE
         self.before_round = before_round
-        self.chain_id = chain_id
+        self.chain_id = evm.chain_id
         self.db = db
         self.stop = stop
-        self.label = f"{chain_id}/{evm.address}"
+        self.label = f"{self.chain_id}/{evm.address}"
         # Tx id -> when its nonce was first seen used with no receipt for it.
         self._used_since: dict[int, float] = {}
 
@@ -469,7 +469,7 @@ def _serve(setting: str, rpc_url: str, secret_key: str, headers: Optional[dict],
                          setting, evm.address, chain_id, _serving[sender])
             return
         logger.info("evm batcher %s/%s started for %s", chain_id, evm.address, setting)
-        EvmBatcher(evm, chain_id, db, _stop, hook).run()
+        EvmBatcher(evm, db, _stop, hook).run()
     except Exception as exc:
         logger.error("evm batcher for %s stopped: %s", setting, exc)
     finally:

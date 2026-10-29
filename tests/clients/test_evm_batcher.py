@@ -48,7 +48,7 @@ def batcher(chain, test_db, settings):
     # The LP account, which these tests queue for.
     evm = EvmClient("http://localhost:1", settings.liquidity_provider_secret_key)
     evm.w3.eth = chain
-    return EvmBatcher(evm, CHAIN_ID, test_db, threading.Event())
+    return EvmBatcher(evm, test_db, threading.Event())
 
 
 def intent(owner="swap:a:lifi", **fields):
@@ -146,7 +146,7 @@ def test_a_tx_mined_before_a_restart_is_never_sent_again(batcher, chain):
     chain.mine()
     sent = list(chain.sent)
 
-    EvmBatcher(batcher.evm, CHAIN_ID, batcher.db, threading.Event()).run_round()
+    EvmBatcher(batcher.evm, batcher.db, threading.Event()).run_round()
 
     assert chain.sent == sent
     assert result(tx_id)["status"] == "mined"
@@ -340,9 +340,9 @@ def test_one_batcher_thread_starts_per_chain_and_account(monkeypatch, settings):
             self.chain_id = chain_id
 
     class Batcher:
-        def __init__(self, evm, chain_id, db, stop, before_round=None):
+        def __init__(self, evm, db, stop, before_round=None):
             self.evm = evm
-            self.chain_id = chain_id
+            self.chain_id = evm.chain_id
             self.stop = stop
 
         def run(self):

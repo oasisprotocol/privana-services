@@ -25,6 +25,7 @@ from src.models.history import EarnHistoryPoint, EarnHistoryResponse, usd_string
 from src.services.earn.cache import get_pool_list_cache
 from src.services.earn.registry import get_strategy_registry
 from src.services.earn.vault_service import PendingLimitReached, get_vault_service
+from src.services.earn.worker import earn_signs_as_lp
 from src.services.portfolio.history_service import MAX_HISTORY_DAYS, earn_history
 from src.services.user_queue import OperationPendingError, StaleNonceError
 
@@ -169,8 +170,15 @@ async def get_deposit_quote(
         raise HTTPException(status_code=500, detail="Failed to get deposit quote") from exc
 
 
+def _require_earn_worker() -> None:
+    # with no worker a deposit would sit queued holding the user's transfer nonce, and their swaps behind it
+    if earn_signs_as_lp():
+        raise HTTPException(status_code=503, detail="Earn is disabled")
+
+
 @router.post("/deposit", response_model=DepositResponse)
 async def deposit(payload: DepositRequest) -> DepositResponse | JSONResponse:
+    _require_earn_worker()
     _pool_id_bytes(payload.pool_id)
     try:
         service = get_vault_service()
@@ -200,6 +208,7 @@ async def deposit(payload: DepositRequest) -> DepositResponse | JSONResponse:
 
 @router.post("/withdraw", response_model=WithdrawResponse)
 async def withdraw(payload: WithdrawRequest) -> WithdrawResponse:
+    _require_earn_worker()
     _pool_id_bytes(payload.pool_id)
     try:
         service = get_vault_service()

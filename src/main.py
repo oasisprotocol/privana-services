@@ -1,7 +1,6 @@
 import logging
 from contextlib import asynccontextmanager
 
-from eth_account import Account
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -13,6 +12,7 @@ from src.api.swap import router as swap_router
 from src.core.config import load_settings
 from src.core.db import close_db, get_db
 from src.core.validation import validate_token_id
+from src.services.earn.worker import earn_signs_as_lp
 
 logger = logging.getLogger(__name__)
 
@@ -63,14 +63,6 @@ def _validate_settings() -> None:
     elif errors:
         for e in errors:
             logger.warning(f"Config warning: {e}")
-
-
-def _earn_signs_as_lp() -> bool:
-    """EarnManager calls sign as the pool admin, or the LP when it has no key
-    of its own. The LP's Sapphire nonce belongs to its sender, so earn must
-    not write as the LP next to it."""
-    key = settings.pool_admin_secret_key or settings.liquidity_provider_secret_key
-    return bool(key) and Account.from_key(key).address.lower() == settings.liquidity_provider_address.lower()
 
 
 @asynccontextmanager
@@ -145,9 +137,9 @@ async def lifespan(_app: FastAPI):
     except Exception:
         logger.exception("Earn pool listing cache failed to start")
 
-    if _earn_signs_as_lp():
+    if earn_signs_as_lp():
         logger.error("Earn worker and idle deployer not started: the pool admin is the LP, whose Sapphire "
-                     "nonce its sender owns; queued earn operations will not run")
+                     "nonce its sender owns; earn requests are refused")
     else:
         try:
             await get_earn_worker().start()

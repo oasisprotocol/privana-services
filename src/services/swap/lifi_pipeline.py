@@ -101,7 +101,9 @@ class BelowFloor(RuntimeError):
 
 
 async def input_round() -> None:
-    claim(SwapVenue.LIFI, SwapStep.INPUT_SENT, CLAIM_LIMIT)
+    # lifi off: queued swaps wait, started ones still finish
+    if load_settings().lifi_execution_enabled:
+        claim(SwapVenue.LIFI, SwapStep.INPUT_SENT, CLAIM_LIMIT)
     await handle_each(swaps_at(SwapStep.INPUT_SENT), _settle_input)
 
 
@@ -125,7 +127,15 @@ async def _on_chain(swaps: list[dict], token_field: str, chain_id: int) -> list[
     """The oldest ROUND_LIMIT of `swaps` on `chain_id`, filtered before the
     limit so swaps waiting on one chain never crowd out another's."""
     accounting = get_accounting_client()
-    on_chain = [swap for swap in swaps if (await accounting.get_token_info(swap[token_field])).chain_id == chain_id]
+    on_chain = []
+    for swap in swaps:
+        try:
+            info = await accounting.get_token_info(swap[token_field])
+        except Exception as exc:
+            logger.warning("swap %s skipped this round, token lookup failed: %s", swap["id"], scrub_urls(repr(exc)))
+            continue
+        if info.chain_id == chain_id:
+            on_chain.append(swap)
     return on_chain[:ROUND_LIMIT]
 
 

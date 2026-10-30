@@ -1,6 +1,7 @@
 import logging
 from contextlib import asynccontextmanager
 
+from eth_account import Account
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -62,6 +63,14 @@ def _validate_settings() -> None:
     elif errors:
         for e in errors:
             logger.warning(f"Config warning: {e}")
+
+
+def _earn_signs_as_lp() -> bool:
+    """EarnManager calls sign as the pool admin, or the LP when it has no key
+    of its own. The LP's Sapphire nonce belongs to its sender, so earn must
+    not write as the LP next to it."""
+    key = settings.pool_admin_secret_key or settings.liquidity_provider_secret_key
+    return bool(key) and Account.from_key(key).address.lower() == settings.liquidity_provider_address.lower()
 
 
 @asynccontextmanager
@@ -136,15 +145,19 @@ async def lifespan(_app: FastAPI):
     except Exception:
         logger.exception("Earn pool listing cache failed to start")
 
-    try:
-        await get_earn_worker().start()
-    except Exception:
-        logger.exception("Earn worker failed to start; queued earn operations will not run")
+    if _earn_signs_as_lp():
+        logger.error("Earn worker and idle deployer not started: the pool admin is the LP, whose Sapphire "
+                     "nonce its sender owns; queued earn operations will not run")
+    else:
+        try:
+            await get_earn_worker().start()
+        except Exception:
+            logger.exception("Earn worker failed to start; queued earn operations will not run")
 
-    try:
-        await get_idle_deployer().start()
-    except Exception:
-        logger.exception("Idle deployer failed to start; seeded funds will sit undeployed")
+        try:
+            await get_idle_deployer().start()
+        except Exception:
+            logger.exception("Idle deployer failed to start; seeded funds will sit undeployed")
 
     try:
         yield

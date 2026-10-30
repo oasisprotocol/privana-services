@@ -2,6 +2,7 @@
 
 import asyncio
 import threading
+from dataclasses import replace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -12,6 +13,7 @@ from web3.exceptions import Web3RPCError
 import src.clients.evm_batcher as evm_batcher
 import src.clients.privana_lanes as privana_lanes
 import src.services.swap.lifi_pipeline as lifi_pipeline
+import src.services.swap.stage as stage
 from src.core.db import db_write
 from tests.clients.fake_chain import SAPPHIRE_CHAIN_ID, decode, nonce_of
 from tests.services.swap.world import (
@@ -532,3 +534,25 @@ async def test_a_credit_that_failed_parks_and_never_refunds_the_input(world):
 
     assert (swap["step"], world.lane_rows(swap_id)["credit"]["status"]) == ("parked", "failed")
     assert "refund_payout" not in world.lane_rows(swap_id)
+
+
+async def test_turning_lifi_off_leaves_queued_lifi_swaps_queued(world):
+    swap_id = await world.schedule("lifi")
+    world.config = replace(world.config, lifi_execution_enabled=False)
+
+    await world.run(rounds=3)
+
+    assert world.swap(swap_id)["status"] == "scheduled"
+    assert world.ledger.landed == []
+
+
+async def test_blocked_users_queued_swaps_never_hide_another_users_swap(world, monkeypatch):
+    monkeypatch.setattr(stage, "ROUND_LIMIT", 2)
+    await world.schedule("lifi", nonce=0)
+    await world.schedule("lifi", nonce=1)
+    world.config = replace(world.config, lifi_execution_enabled=False)
+    other = await world.schedule("internal", user=USERS[1])
+
+    await world.run()
+
+    assert world.swap(other)["status"] != "scheduled"

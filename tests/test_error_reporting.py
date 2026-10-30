@@ -26,6 +26,11 @@ class TestSanitizeError:
         assert "rpc.example" not in sanitized
         assert "[url]" in sanitized
 
+    def test_an_rpc_key_in_a_connection_error_path_is_stripped(self):
+        raw = "Max retries exceeded with url: /v2/SECRETKEY (Caused by NewConnectionError)"
+
+        assert "SECRETKEY" not in sanitize_error(raw)
+
     def test_bare_host_port_is_stripped_from_the_reason(self):
         raw = "execution reverted: dispatch failed via rpc.internal.oasis:8545"
 

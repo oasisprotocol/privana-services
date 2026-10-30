@@ -248,7 +248,10 @@ class EvmBatcher:
             # A retry is never failed: its earlier attempt may still be mined.
             if row["attempts"] or not any(phrase in _rpc_message(exc) for phrase in REFUSED):
                 return STOPPED
-            # The node will never take it, so the nonce stays free for the next tx.
+            # The node will never take it: the attempt never existed, so its
+            # owner can tell it from one that may have been mined, and the
+            # nonce stays free for the next tx.
+            db_write(self.db, "UPDATE evm_transactions SET attempts = NULL WHERE id = ?", (row["id"],))
             self._finish(row, FAILED, error=str(exc))
             return SKIPPED
         except Exception as exc:

@@ -8,7 +8,7 @@ import pytest
 
 import src.core.fee_policy as fee_policy_module
 from src.core.fee_policy import parse_fee_policies
-from src.services.swap.internal_pipeline import InternalSwapPipeline, PricingUnavailable
+from src.services.swap.internal_pipeline import PricingUnavailable, _fresh_payout
 
 USER = "0x" + "d8" * 20
 
@@ -37,6 +37,7 @@ def quotes(monkeypatch, insert_quote, settings):
     service._enforce_max_swap_size = MagicMock()
     monkeypatch.setattr(module, "get_quote_service", lambda: service)
     monkeypatch.setattr(fee_policy_module, "_policies", [])
+    monkeypatch.setattr(fee_policy_module, "load_settings", lambda: settings)
     monkeypatch.setattr(module, "resolve_internal_fee", fee_policy_module.resolve_internal_fee)
     return service
 
@@ -48,7 +49,7 @@ def _net(gross, settings):
 async def test_pays_the_current_price_when_it_beat_the_quote(quotes, settings, test_db):
     quotes.route["toAmount"] = "1010000"
 
-    payout = await InternalSwapPipeline()._fresh_payout(_swap())
+    payout = await _fresh_payout(_swap())
 
     # The user gets the better price, never more than the market pays.
     assert payout == _net(1_010_000, settings)
@@ -57,14 +58,14 @@ async def test_pays_the_current_price_when_it_beat_the_quote(quotes, settings, t
 async def test_a_price_move_inside_the_slippage_still_executes(quotes, settings, test_db):
     quotes.route["toAmount"] = "985000"
 
-    assert await InternalSwapPipeline()._fresh_payout(_swap()) == _net(985_000, settings)
+    assert await _fresh_payout(_swap()) == _net(985_000, settings)
 
 
 async def test_a_price_move_beyond_the_slippage_fails_the_swap(quotes, test_db):
     quotes.route["toAmount"] = "900000"
 
     with pytest.raises(ValueError, match="execution quote below floor"):
-        await InternalSwapPipeline()._fresh_payout(_swap())
+        await _fresh_payout(_swap())
 
 
 @pytest.mark.parametrize("failure", ["error", "timeout", "no route"])
@@ -84,7 +85,7 @@ async def test_no_price_is_not_a_price_move(quotes, monkeypatch, test_db, failur
         quotes._price_route = AsyncMock(return_value={"routes": []})
 
     with pytest.raises(PricingUnavailable):
-        await InternalSwapPipeline()._fresh_payout(_swap())
+        await _fresh_payout(_swap())
 
 
 async def test_an_exemption_that_ended_is_not_applied_at_execution(quotes, monkeypatch, settings, test_db):
@@ -94,7 +95,7 @@ async def test_an_exemption_that_ended_is_not_applied_at_execution(quotes, monke
         "wallets": [USER],
     }])))
 
-    assert await InternalSwapPipeline()._fresh_payout(_swap()) == _net(1_000_000, settings)
+    assert await _fresh_payout(_swap()) == _net(1_000_000, settings)
 
 
 async def test_an_exemption_still_running_is_applied(quotes, monkeypatch, test_db):
@@ -104,11 +105,11 @@ async def test_an_exemption_still_running_is_applied(quotes, monkeypatch, test_d
         "wallets": [USER],
     }])))
 
-    assert await InternalSwapPipeline()._fresh_payout(_swap()) == 1_000_000
+    assert await _fresh_payout(_swap()) == 1_000_000
 
 
 async def test_the_size_cap_is_checked_at_the_current_price(quotes, test_db):
     quotes._enforce_max_swap_size = MagicMock(side_effect=ValueError("Swap size exceeds the maximum"))
 
     with pytest.raises(ValueError, match="maximum"):
-        await InternalSwapPipeline()._fresh_payout(_swap())
+        await _fresh_payout(_swap())

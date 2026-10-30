@@ -37,7 +37,6 @@ _SWAP_SELECT = """
         NULL AS amount,
         input_nonce AS nonce,
         NULL AS stages,
-        venue,
         step
     FROM swaps
     WHERE user_address = ?"""
@@ -62,7 +61,6 @@ _EARN_SELECT = """
         amount,
         CAST(input_nonce AS TEXT) AS nonce,
         history AS stages,
-        NULL AS venue,
         NULL AS step
     FROM earn_transactions
     WHERE user_address = ?"""
@@ -72,9 +70,8 @@ def _operation(row) -> UnsettledOperation:
     fields = dict(row)
     if fields["operation_type"] == "swap":
         fields["reason"], fields["error"] = swap_failure(
-            fields["operation_id"], fields["status"], fields.pop("venue"), fields.pop("step"),
+            fields["operation_id"], fields["status"], fields.pop("step"),
         )
-    fields.pop("venue", None)
     fields.pop("step", None)
     return UnsettledOperation(**fields)
 

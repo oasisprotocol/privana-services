@@ -5,7 +5,7 @@ from typing import Optional
 
 from eth_account import Account
 from eth_account.messages import encode_defunct
-from privana import PrivanaClient
+from privana import DepositAddressRequest, DepositCheckRequest, PrivanaClient
 
 from src.core.config import load_settings
 
@@ -15,6 +15,8 @@ _HEADERS = {"Connection": "close"}
 
 # Replies to a submitted write that mean the API took it.
 ACCEPTED_SUBMISSION_STATUSES = {"submitted", "pending", "accepted"}
+# A deposit check's reply once the deposit is credited.
+DEPOSIT_CREDITED = "credited"
 
 _client: Optional[PrivanaClient] = None
 _swap_lp_client: Optional[PrivanaClient] = None
@@ -131,6 +133,17 @@ async def _siwe_login(
 
     login = await client.login_with_siwe(message, signature)
     return login.jwt_access_token, login.jwt_expires_in
+
+
+async def deposit_address(client: PrivanaClient) -> str:
+    """Where a transfer on an EVM chain credits `client`'s account."""
+    return (await client.get_deposit_address(DepositAddressRequest(chain_type="evm"))).deposit_address
+
+
+async def check_deposit(client: PrivanaClient, chain_id: int, tx_hash: str, amount: int):
+    """Report a deposit to Accounting, which has no deposit watcher. Reports
+    are idempotent, and refused until the deposit is final on its chain."""
+    return await client.check_deposit(DepositCheckRequest(chain_id=chain_id, tx_hash=tx_hash, amount=amount))
 
 
 __all__ = [

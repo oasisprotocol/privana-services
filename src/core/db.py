@@ -306,3 +306,25 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
                 "updated_at = CAST(strftime('%s', 'now') AS INTEGER) "
                 "WHERE venue = 'lifi' AND status IN ('executing', 'refunding')"
             )
+        # A failed swap's step becomes `parked` when its funds may have moved
+        # (a lifi step past the input, an error marked for manual recovery, or
+        # an internal swap with a signed output, which may have landed on an
+        # earlier attempt) and `no_funds_moved` otherwise. Swaps in flight, and
+        # scheduled internal swaps with a signed output, are parked: the
+        # stages have no record of what the old pipelines sent for them.
+        if conn.execute(
+            "INSERT OR IGNORE INTO data_migrations (name) VALUES ('swap_stages_v1')"
+        ).rowcount:
+            conn.execute(
+                "UPDATE swaps SET step = CASE WHEN (venue = 'lifi' AND step IN "
+                "('input_transfer', 'withdraw', 'lifi_execute', 'deposit', 'credit')) "
+                "OR error LIKE '%manual recovery required%' "
+                "OR (venue = 'internal' AND output_signature IS NOT NULL) "
+                "THEN 'parked' ELSE 'no_funds_moved' END WHERE status = 'failed'"
+            )
+            conn.execute(
+                "UPDATE swaps SET status = 'failed', step = 'parked', error = COALESCE(error || '; ', '') "
+                "|| 'in flight at the stage upgrade; manual recovery required', "
+                "updated_at = CAST(strftime('%s', 'now') AS INTEGER) "
+                "WHERE status IN ('executing', 'refunding') OR (status = 'scheduled' AND output_signature IS NOT NULL)"
+            )

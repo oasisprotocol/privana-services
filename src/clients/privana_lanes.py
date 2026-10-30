@@ -18,7 +18,8 @@ For callers:
 - `submit_withdrawal(signer, owner, token_id, amount)` queues a withdrawal of
   `signer`'s balance to its own address on the token's chain.
 - `find_privana_tx(owner)` is the row: `status` stays QUEUED or SENT until
-  it is LANDED or FAILED, with `error` saying why.
+  it is LANDED or FAILED, with `error` saying why. A withdrawal the lane
+  stopped resending stays SENT with `error` WITHDRAW_GIVEN_UP.
 Submitting an owner again returns its row, so a restart sends nothing twice.
 A row is one attempt: to try again after FAILED, submit a new owner.
 """
@@ -82,6 +83,8 @@ WITHDRAW_RESEND_SEC = 120
 # still land, so a withdrawal sent more than once is never failed: its nonce
 # is not free until the counter moves past it.
 WITHDRAW_MAX_SENDS = 15
+# The error of a withdrawal the lane stopped resending; it may still land.
+WITHDRAW_GIVEN_UP = "not landed after its last send; manual recovery required"
 # The API is still busy with a request at this nonce: it may yet land.
 API_CONFLICT = 409
 
@@ -199,7 +202,7 @@ def _run_lane(db: sqlite3.Connection, evm: EvmClient, signer: str, gas_refused: 
 def _settle(db: sqlite3.Connection, row: dict, counter: int) -> bool:
     """Settle a sent row once its own evm tx is final. Returns whether it did."""
     tx = db.execute("SELECT status, tx_hash, error, simulate FROM evm_transactions WHERE owner = ?",
-                    (_evm_owner(row),)).fetchone()
+                    (lane_evm_owner(row),)).fetchone()
     if tx["status"] == EVM_QUEUED:
         return False
     if tx["status"] == EVM_MINED:
@@ -211,7 +214,7 @@ def _settle(db: sqlite3.Connection, row: dict, counter: int) -> bool:
     if counter > row["nonce"]:
         _finish(db, row, FAILED, error=FOREIGN_SPEND)
         logger.error("privana lane %s: nonce %d of %s %d for %s was spent by a tx we did not send (ours %s)",
-                     row["signer"], row["nonce"], row["kind"], row["id"], row["owner"], _evm_owner(row))
+                     row["signer"], row["nonce"], row["kind"], row["id"], row["owner"], lane_evm_owner(row))
         return True
     outcome = tx["error"] or f"reverted as {tx['tx_hash']}"
     # Simulated against the state at its own nonce, so its failure is its own.
@@ -246,7 +249,7 @@ def _sign(db: sqlite3.Connection, evm: EvmClient, signer: str, key: str, counter
                                       payload["to"], payload["token"], payload["amount"], nonce)
             to, data = _call(settings, row["kind"], payload, nonce, signature)
             row = {**row, "attempts": row["attempts"] + 1}
-            evm_owner = _evm_owner(row)
+            evm_owner = lane_evm_owner(row)
             if not db.execute(
                 "UPDATE privana_transactions SET status = ?, nonce = ?, signature = ?, attempts = ?, updated_at = ? "
                 "WHERE id = ? AND status = ?",
@@ -282,7 +285,7 @@ def _call(settings: Settings, kind: str, payload: dict, nonce: int, signature: s
     return settings.swap_manager_contract_address, data
 
 
-def _evm_owner(row: dict) -> str:
+def lane_evm_owner(row: dict) -> str:
     """The evm tx of a transfer lane row's latest signing."""
     return f"privana:{row['id']}:{row['attempts']}"
 
@@ -367,8 +370,8 @@ class WithdrawLane:
             logger.error("privana withdraw lane %s withdrawal %d for %s not landed at nonce %d after %d sends; "
                          "manual recovery required", self.signer, row["id"], row["owner"], row["nonce"],
                          row["attempts"])
-            db_write(get_db(), "UPDATE privana_transactions SET updated_at = ? WHERE id = ?",
-                     (int(time.time()), row["id"]))
+            db_write(get_db(), "UPDATE privana_transactions SET error = ?, updated_at = ? WHERE id = ?",
+                     (WITHDRAW_GIVEN_UP, int(time.time()), row["id"]))
             return
         else:
             logger.warning("privana withdraw lane %s withdrawal %d for %s not landed at nonce %d; sending it again",
@@ -436,6 +439,17 @@ class WithdrawLane:
             logger.warning("privana withdraw lane %s withdrawal %d at nonce %d %s; failing it if the nonce is still "
                            "unused in %d s", self.signer, row["id"], row["nonce"], refusal, WITHDRAW_RESEND_SEC)
             db_write(get_db(), "UPDATE privana_transactions SET error = ? WHERE id = ?", (refusal, row["id"]))
+
+
+def lane_outflow(signer: str, token_id: str) -> int:
+    """What `signer`'s Privana writes not yet landed will take out of its
+    balance in `token_id`, on both its lanes."""
+    rows = get_db().execute(
+        "SELECT payload FROM privana_transactions WHERE signer = ? AND status IN (?, ?)",
+        (signer.lower(), QUEUED, SENT),
+    )
+    payloads = (json.loads(row["payload"]) for row in rows)
+    return sum(p["amount"] for p in payloads if p["token"].lower() == token_id.lower())
 
 
 def lane_health() -> dict[str, int]:

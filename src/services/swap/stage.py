@@ -49,7 +49,7 @@ def claim(venue: SwapVenue, step: SwapStep, limit: int) -> None:
     if limit <= 0:
         return
     users = users_with_inflight_work()
-    # no limit, otherwise a blocked user's queued swaps can hide everyone else's
+    # Every scheduled swap: blocked users' swaps could fill any limit.
     rows = get_db().execute(
         "SELECT * FROM swaps WHERE status = ? ORDER BY created_at, rowid", (SwapStatus.SCHEDULED.value,),
     ).fetchall()

@@ -171,7 +171,6 @@ async def get_deposit_quote(
 
 
 def _require_earn_worker() -> None:
-    # with no worker a deposit would sit queued holding the user's transfer nonce, and their swaps behind it
     if earn_signs_as_lp():
         raise HTTPException(status_code=503, detail="Earn is disabled")
 

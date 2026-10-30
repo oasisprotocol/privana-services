@@ -101,7 +101,6 @@ class BelowFloor(RuntimeError):
 
 
 async def input_round() -> None:
-    # lifi off: queued swaps wait, started ones still finish
     if load_settings().lifi_execution_enabled:
         claim(SwapVenue.LIFI, SwapStep.INPUT_SENT, CLAIM_LIMIT)
     await handle_each(swaps_at(SwapStep.INPUT_SENT), _settle_input)

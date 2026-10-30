@@ -74,6 +74,8 @@ class AccountingClient:
         self._chain_id = settings.accounting_chain_id
         self._siwe_token: Optional[str] = None
         self._jwt_token: Optional[str] = None
+        # A token id is a hash of its chain and address, so its info never changes.
+        self._token_infos: dict[str, TokenInfo] = {}
         self._auth_timestamp: Optional[float] = None
         self._jwt_siwe_cache: dict[str, _JwtSiweAuth] = {}
         self._jwt_siwe_lock = asyncio.Lock()
@@ -147,11 +149,13 @@ class AccountingClient:
         return Balance(**response.json())
 
     async def get_token_info(self, token_id: str) -> TokenInfo:
-        response = await _request_with_retry(
-            self.client, "GET",
-            f"{self.base_url}/v1/accounting/tokens/{token_id}",
-        )
-        return TokenInfo(**response.json())
+        if token_id not in self._token_infos:
+            response = await _request_with_retry(
+                self.client, "GET",
+                f"{self.base_url}/v1/accounting/tokens/{token_id}",
+            )
+            self._token_infos[token_id] = TokenInfo(**response.json())
+        return self._token_infos[token_id]
 
     async def list_all_tokens(self) -> list[TokenInfo]:
         response = await _request_with_retry(

@@ -326,6 +326,24 @@ async def test_a_lifi_tx_the_node_refuses_outright_refunds_the_input(world):
     assert world.paid(USER) == [(USDC, AMOUNT)]
 
 
+async def test_a_handler_working_from_a_stale_read_never_undoes_another_move(world):
+    # Two workers took the same funded swap: one sent it, the other's quote
+    # fell below the floor.
+    world.api.relay_paused = True
+    swap_id = await world.schedule("lifi")
+    stale = await world.until(swap_id, "execute:funding")
+    world.wallets[BASE].balances[TOKENS[USDC].token_address.lower()] += AMOUNT
+    await world.until(swap_id, "execute:sent")
+
+    lifi_pipeline._start_refund(stale, "below floor", stage.SwapStep.REFUND_REDEPOSIT)
+    assert stage.fail(stale, stage.SwapStep.NO_FUNDS_MOVED, "stale") is False
+
+    assert world.swap(swap_id)["step"] == "execute:sent"
+    await world.until(swap_id, "completed")
+    assert world.evm_owners(swap_id) == ONE_OF_EACH
+    assert world.paid(USER) == [(WETH, NET)]
+
+
 GAS_REFUSED = Web3RPCError("insufficient funds for gas * price + value")
 
 

@@ -3,6 +3,7 @@ a chain about each swap, so a chain whose RPC hangs holds only its own swaps."""
 
 import asyncio
 import logging
+from functools import partial
 from typing import Awaitable, Callable, Optional
 
 from src.clients.base_evm import RPC_SETTINGS, rpc_chain_id
@@ -35,6 +36,9 @@ class SwapWorker:
     def __init__(self) -> None:
         self._stop = asyncio.Event()
         self._tasks: list[asyncio.Task] = []
+        # (Stage, chain id) -> the setting whose task runs it: two RPCs for one
+        # chain would run its stage twice over the same swaps.
+        self._serving: dict[tuple[str, int], str] = {}
 
     async def start(self) -> None:
         if self._tasks:
@@ -53,6 +57,7 @@ class SwapWorker:
         self._stop.set()
         await asyncio.gather(*self._tasks, return_exceptions=True)
         self._tasks.clear()
+        self._serving.clear()
 
     async def _run(self, name: str, run_round: Callable[[], Awaitable[None]], interval: float) -> None:
         while not self._stop.is_set():
@@ -60,23 +65,28 @@ class SwapWorker:
                 await run_round()
             except Exception:
                 logger.exception("swap stage %s round failed", name)
-            try:
-                await asyncio.wait_for(self._stop.wait(), timeout=interval)
-            except TimeoutError:
-                pass
+            await self._pause(interval)
 
     async def _run_on_chain(self, name: str, setting: str, run_round: Callable[[int], Awaitable[None]],
                             interval: float) -> None:
         chain_id: Optional[int] = None
-
-        async def chain_round() -> None:
-            nonlocal chain_id
+        while chain_id is None:
+            if self._stop.is_set():
+                return
+            chain_id = await asyncio.to_thread(rpc_chain_id, setting)
             if chain_id is None:
-                chain_id = await asyncio.to_thread(rpc_chain_id, setting)
-            if chain_id is not None:
-                await run_round(chain_id)
+                await self._pause(interval)
+        if self._serving.setdefault((name, chain_id), setting) != setting:
+            logger.error("swap stage %s for %s not started: chain %s is already served by %s",
+                         name, setting, chain_id, self._serving[(name, chain_id)])
+            return
+        await self._run(f"{name} ({setting})", partial(run_round, chain_id), interval)
 
-        await self._run(f"{name} ({setting})", chain_round, interval)
+    async def _pause(self, interval: float) -> None:
+        try:
+            await asyncio.wait_for(self._stop.wait(), timeout=interval)
+        except TimeoutError:
+            pass
 
 
 _worker_instance: Optional[SwapWorker] = None

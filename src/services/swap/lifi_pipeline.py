@@ -57,6 +57,7 @@ from src.services.swap.stage import (
     input_transfer_call,
     note,
     owner,
+    still_at,
     swaps_at,
     waited,
 )
@@ -244,7 +245,7 @@ async def _send_lifi_tx(swap: dict) -> None:
         return
     # Nothing awaits between this check's read of the queued spends and the
     # submit, so another swap's spend is either counted or not queued yet.
-    if not await _holds(evm, token, swap["from_token_id"], amount, lifi_tx.gas):
+    if not await _holds(evm, token, swap["from_token_id"], amount, lifi_tx.gas) or not still_at(swap):
         return
     # The approval and the swap are queued together, so no other swap's
     # approval for the same spender lands between them.
@@ -321,7 +322,8 @@ async def _deposit(swap: dict) -> None:
         # among the queued spends, so the wallet must cover them all.
         if await _holds(get_evm_client(info.chain_id), info.token_address, swap["to_token_id"], 0,
                         NATIVE_TRANSFER_GAS_LIMIT):
-            _submit_deposit(swap, DEPOSIT, info, amount, to)
+            if still_at(swap):
+                _submit_deposit(swap, DEPOSIT, info, amount, to)
         elif waited(swap, FUNDING_WAIT_SEC):
             fail(swap, SwapStep.PARKED, f"output not in the LP's wallet to deposit after {FUNDING_WAIT_SEC} s")
         return
@@ -343,8 +345,8 @@ def _start_refund(swap: dict, reason: str, step: SwapStep) -> None:
     """Only where the input provably never left: a withdrawal that failed
     (REFUND_PAYOUT), or a LiFi tx never queued or settled unspent
     (REFUND_REDEPOSIT, the input back from the wallet first)."""
-    logger.info("lifi swap %s refunding: %s", swap["id"], reason)
-    advance(swap, step, SwapStatus.REFUNDING, error=reason)
+    if advance(swap, step, SwapStatus.REFUNDING, error=reason):
+        logger.info("lifi swap %s refunding: %s", swap["id"], reason)
 
 
 async def _refund(swap: dict) -> None:
@@ -365,7 +367,8 @@ async def _refund(swap: dict) -> None:
     info = await get_accounting_client().get_token_info(swap["from_token_id"])
     to = await deposit_address(await get_swap_lp_privana_client())
     # As at execute, nothing awaits between the queued spends read and the submit.
-    if await _holds(get_evm_client(info.chain_id), info.token_address, swap["from_token_id"], amount):
+    if await _holds(get_evm_client(info.chain_id), info.token_address, swap["from_token_id"], amount) \
+            and still_at(swap):
         _submit_deposit(swap, REFUND, info, amount, to)
 
 

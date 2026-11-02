@@ -93,16 +93,31 @@ def waited(swap: dict, seconds: int) -> bool:
     return int(time.time()) - swap["updated_at"] >= seconds
 
 
-def advance(swap: dict, step: SwapStep, status: Optional[SwapStatus] = None, **fields) -> None:
+def still_at(swap: dict) -> bool:
+    """Whether the swap is still where `swap` was read: check it after an
+    await and before a write that cannot be taken back."""
+    row = get_db().execute("SELECT status, step FROM swaps WHERE id = ?", (swap["id"],)).fetchone()
+    if (row["status"], row["step"]) == (swap["status"], swap["step"]):
+        return True
+    logger.warning("swap %s moved to %s %s while handled at %s %s", swap["id"], row["status"], row["step"],
+                   swap["status"], swap["step"])
+    return False
+
+
+def advance(swap: dict, step: SwapStep, status: Optional[SwapStatus] = None, **fields) -> bool:
     status = status or SwapStatus(swap["status"])
-    _update(swap["id"], status=status.value, step=step.value, **fields)
+    if not _update(swap, status=status.value, step=step.value, **fields):
+        return False
     logger.info("swap %s %s %s -> %s %s", swap["id"], swap["status"], swap["step"], status.value, step.value)
+    return True
 
 
-def finish(swap: dict, status: SwapStatus, **fields) -> None:
+def finish(swap: dict, status: SwapStatus, **fields) -> bool:
     """Completed or refunded: the step stays the last one it was at."""
-    _update(swap["id"], status=status.value, **fields)
+    if not _update(swap, status=status.value, **fields):
+        return False
     logger.info("swap %s %s at %s", swap["id"], status.value, swap["step"])
+    return True
 
 
 def note(swap: dict, reason: str) -> bool:
@@ -114,16 +129,25 @@ def note(swap: dict, reason: str) -> bool:
     return True
 
 
-def fail(swap: dict, outcome: SwapStep, error: str, exc: Optional[BaseException] = None) -> None:
+def fail(swap: dict, outcome: SwapStep, error: str, exc: Optional[BaseException] = None) -> bool:
     """Fail the swap for good. PARKED when the user's funds may have moved and
     a person has to settle it; NO_FUNDS_MOVED only when they provably did not."""
+    stored = f"{error}; manual recovery required" if outcome == SwapStep.PARKED else error
+    if not _update(swap, status=SwapStatus.FAILED.value, step=outcome.value, error=stored):
+        return False
     log_swap_failure(swap["id"], f"failed ({outcome.value}) at {swap['step'] or swap['status']}: {error}", exc)
-    if outcome == SwapStep.PARKED:
-        error = f"{error}; manual recovery required"
-    _update(swap["id"], status=SwapStatus.FAILED.value, step=outcome.value, error=error)
+    return True
 
 
-def _update(swap_id: str, **fields) -> None:
+def _update(swap: dict, **fields) -> bool:
+    """Write `fields` only while the swap is still where `swap` was read, so a
+    stale handler never undoes another's move. Returns whether it wrote."""
     fields["updated_at"] = int(time.time())
     assignments = ", ".join(f"{key} = ?" for key in fields)
-    db_write(get_db(), f"UPDATE swaps SET {assignments} WHERE id = ?", (*fields.values(), swap_id))
+    moved = db_write(
+        get_db(), f"UPDATE swaps SET {assignments} WHERE id = ? AND status = ? AND step IS ?",
+        (*fields.values(), swap["id"], swap["status"], swap["step"]),
+    ).rowcount
+    if not moved:
+        still_at(swap)
+    return bool(moved)

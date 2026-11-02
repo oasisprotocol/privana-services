@@ -74,7 +74,7 @@ class AccountingClient:
         self._chain_id = settings.accounting_chain_id
         self._siwe_token: Optional[str] = None
         self._jwt_token: Optional[str] = None
-        # A token id is a hash of its chain and address, so its info never changes.
+        # Cached values for token info.
         self._token_infos: dict[str, TokenInfo] = {}
         self._auth_timestamp: Optional[float] = None
         self._jwt_siwe_cache: dict[str, _JwtSiweAuth] = {}

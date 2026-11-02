@@ -315,7 +315,7 @@ async def test_a_lifi_tx_the_node_refuses_outright_refunds_the_input(world):
     # Refused before any node took it, so the input never left the wallet.
     def refuse_the_swap(raw):
         if Web3.to_checksum_address(decode(raw)["to"]) == DIAMOND:
-            raise Web3RPCError("insufficient funds for gas * price + value")
+            raise Web3RPCError("intrinsic gas too low")
 
     world.chains[BASE].on_send = refuse_the_swap
     swap_id = await world.schedule("lifi")
@@ -323,6 +323,97 @@ async def test_a_lifi_tx_the_node_refuses_outright_refunds_the_input(world):
     await world.until(swap_id, "refunded")
 
     assert world.evm_owners(swap_id) == ["input", "approve", "lifi", "refund"]
+    assert world.paid(USER) == [(USDC, AMOUNT)]
+
+
+GAS_REFUSED = Web3RPCError("insufficient funds for gas * price + value")
+
+
+def _retry_window_over(world, swap_id):
+    db_write(world.db, "UPDATE evm_transactions SET updated_at = updated_at - ? WHERE owner LIKE ?",
+             (evm_batcher.GAS_RETRY_SEC, f"swap:{swap_id}:%"))
+
+
+def _refuse_first_send_to(world, chain, to):
+    refused = []
+
+    def refuse(raw):
+        if not refused and Web3.to_checksum_address(decode(raw)["to"]) == Web3.to_checksum_address(to):
+            refused.append(raw)
+            raise GAS_REFUSED
+
+    world.chains[chain].on_send = refuse
+
+
+@pytest.mark.parametrize("step,chain,to", [
+    ("input:sent", SAPPHIRE_CHAIN_ID, None),
+    # The approval is refused, and the swap tx after it fails unsent.
+    ("execute:sent", BASE, TOKENS[USDC].token_address),
+    ("deposit:sent", BASE, TOKENS[WETH].token_address),
+])
+async def test_a_tx_refused_for_gas_is_sent_again_later_and_the_swap_completes(world, step, chain, to):
+    _refuse_first_send_to(world, chain, to or world.config.accounting_contract_address)
+    swap_id = await world.schedule("lifi")
+    await world.until(swap_id, step)
+    await world.run(3)
+
+    swap = world.swap(swap_id)
+    assert (swap["status"], swap["step"]) == ("executing", step)
+    assert swap["error"] == f"refused for gas on chain {chain}; retrying"
+
+    _retry_window_over(world, swap_id)
+    swap = await world.until(swap_id, "completed")
+
+    assert world.evm_owners(swap_id) == ONE_OF_EACH
+    assert world.paid(USER) == [(WETH, NET)]
+
+
+async def test_an_output_waiting_to_retry_its_deposit_is_never_spent_by_another_swap(world):
+    _refuse_first_send_to(world, BASE, TOKENS[WETH].token_address)
+    swap_id = await world.schedule("lifi")
+    await world.until(swap_id, "deposit:sent")
+    await world.run(2)
+    assert world.swap(swap_id)["step"] == "deposit:sent"
+
+    assert lifi_pipeline._queued_spend(WETH) == 60_000
+
+
+async def test_a_withdrawal_never_signed_in_time_is_cancelled_and_its_input_paid_back(world):
+    # The first swap's withdrawal may still land, so it holds the lane.
+    world.api.replies = [(False, NetworkError("Request timeout after 30s"))] * 50
+    held = await world.schedule("lifi")
+    await world.until(held, "withdraw:sent")
+    await world.run()
+    waiting = await world.schedule("lifi", user=USERS[1])
+    await world.until(waiting, "withdraw:sent")
+    await world.run(2)
+    assert world.lane_rows(waiting)["withdraw"]["status"] == "queued"
+
+    world.age(waiting, lifi_pipeline.WITHDRAW_QUEUE_WAIT_SEC)
+    swap = await world.until(waiting, "refunded")
+
+    assert world.lane_rows(waiting)["withdraw"]["status"] == "failed"
+    assert world.paid(USERS[1]) == [(USDC, AMOUNT)]
+    assert {r.nonce for r in world.api.requests} == {world.lane_rows(held)["withdraw"]["nonce"]}
+    assert swap["error"].startswith("withdrawal not sent")
+
+
+async def test_a_withdrawal_cancelled_while_the_lane_reads_the_nonce_is_never_sent(world):
+    counter = world.withdraw_lane._counter
+    cancelled = []
+
+    async def cancelled_meanwhile():
+        cancelled.append(privana_lanes.cancel_queued(f"swap:{swap_id}:withdraw", "cancelled"))
+        return await counter()
+
+    world.withdraw_lane._counter = cancelled_meanwhile
+    swap_id = await world.schedule("lifi")
+
+    await world.until(swap_id, "refunded")
+
+    assert cancelled[0] is True
+    assert world.lane_rows(swap_id)["withdraw"]["status"] == "failed"
+    assert world.api.requests == []
     assert world.paid(USER) == [(USDC, AMOUNT)]
 
 

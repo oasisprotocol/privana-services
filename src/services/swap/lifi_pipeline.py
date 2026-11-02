@@ -10,6 +10,7 @@ Each stage only submits to a batcher or lane and checks it on a later round."""
 import asyncio
 import json
 import logging
+import time
 from typing import Any, Optional
 
 import httpx
@@ -23,6 +24,7 @@ from src.clients.accounting import get_accounting_client
 from src.clients.base_evm import NATIVE_TOKEN, get_evm_client, is_native
 from src.clients.evm_batcher import (
     FAILED,
+    GAS_RETRY_SEC,
     MINED,
     NATIVE_TRANSFER_GAS_LIMIT,
     QUEUED,
@@ -53,6 +55,7 @@ from src.services.swap.stage import (
     finish,
     handle_each,
     input_transfer_call,
+    note,
     owner,
     swaps_at,
     waited,
@@ -75,10 +78,15 @@ DEPOSIT = "deposit"
 REFUND = "refund"
 CREDIT = "credit"
 REFUND_PAYOUT = "refund_payout"
+# The step a swap waits at while its wallet tx of each kind is out.
+_SENT_AT = {LIFI: SwapStep.EXECUTE_SENT, REFUND: SwapStep.REFUND_REDEPOSIT, DEPOSIT: SwapStep.DEPOSIT_SENT}
 
 # Scheduled swaps taken per round: the Sapphire sender of their input txs,
 # not this, sets the pace.
 CLAIM_LIMIT = 5
+# The withdraw lane sends one withdrawal at a time, and one that may still
+# land holds it: a withdrawal not signed within the hour is cancelled.
+WITHDRAW_QUEUE_WAIT_SEC = 3600
 # Funds already landed reach the LP's wallet in minutes: an input not there
 # after 30 min is redeposited, and an output or refund not there is parked.
 FUNDING_WAIT_SEC = 1800
@@ -159,7 +167,7 @@ async def _settle_input(swap: dict) -> None:
     if tx["status"] == MINED:
         advance(swap, SwapStep.WITHDRAW_SENT)
         return
-    if tx["status"] == QUEUED:
+    if tx["status"] == QUEUED or _retry_for_gas(swap, tx):
         return
     outcome = sanitize_error(tx["error"] or f"reverted as {tx['tx_hash']}")
     if not _unsent_or_reverted(tx):
@@ -189,6 +197,11 @@ async def _settle_withdraw(swap: dict) -> None:
     elif row["error"] == privana_lanes.WITHDRAW_GIVEN_UP:
         # It may still land, so the swap can neither go on nor be refunded.
         fail(swap, SwapStep.PARKED, f"withdrawal {row['id']} not landed after {row['attempts']} sends")
+    elif (row["status"] == privana_lanes.QUEUED and waited(swap, WITHDRAW_QUEUE_WAIT_SEC)
+          and privana_lanes.cancel_queued(owner(swap["id"], WITHDRAW), "cancelled: not sent in time")):
+        # Never signed, so it can never land: the input is still in the LP's
+        # Privana balance.
+        _start_refund(swap, f"withdrawal not sent after {WITHDRAW_QUEUE_WAIT_SEC} s", SwapStep.REFUND_PAYOUT)
 
 
 async def _execute(swap: dict) -> None:
@@ -246,6 +259,9 @@ async def _send_lifi_tx(swap: dict) -> None:
 async def _settle_lifi_tx(swap: dict) -> None:
     tx = find_evm_tx(owner(swap["id"], LIFI))
     if tx["status"] == QUEUED:
+        return
+    # An approval refused for gas fails the swap tx after it unsent too.
+    if tx["status"] != MINED and _retry_for_gas(swap, find_evm_tx(owner(swap["id"], APPROVE)), tx):
         return
     if tx["status"] != MINED:
         outcome = sanitize_error(tx["error"] or f"reverted as {tx['tx_hash']}")
@@ -378,7 +394,7 @@ def _submit_deposit(swap: dict, kind: str, info: Any, amount: int, deposit_addre
 def _settle_deposit(swap: dict, tx: dict, crediting: SwapStep) -> None:
     if tx["status"] == MINED:
         advance(swap, crediting, deposit_tx_hash=tx["tx_hash"])
-    elif tx["status"] != QUEUED:
+    elif tx["status"] != QUEUED and not _retry_for_gas(swap, tx):
         # The funds are in the LP's wallet, or may be.
         fail(swap, SwapStep.PARKED, f"deposit tx {tx['status']}: {sanitize_error(tx['error'] or tx['tx_hash'])}")
 
@@ -396,6 +412,23 @@ async def _check_credited(swap: dict, kind: str, amount: int, then: SwapStep) ->
         advance(swap, then)
     elif waited(swap, CREDITING_WAIT_SEC):
         fail(swap, SwapStep.PARKED, f"deposit {tx['tx_hash']} not credited after {CREDITING_WAIT_SEC} s: {status}")
+
+
+def _retry_for_gas(swap: dict, *txs: Optional[dict]) -> bool:
+    """Whether one of the swap's `txs` was refused because the LP could not
+    pay its gas. The swap then stays where it is, and the txs that failed
+    unsent are queued again once the LP has had a while to be topped up."""
+    unsent = [tx for tx in txs if tx is not None and tx["status"] == FAILED and not tx["attempts"]]
+    refused = [tx for tx in unsent if evm_batcher.refused_for_gas(tx)]
+    if not refused:
+        return False
+    if int(time.time()) - max(tx["updated_at"] for tx in refused) < GAS_RETRY_SEC:
+        if note(swap, f"refused for gas on chain {refused[0]['chain_id']}; retrying"):
+            logger.error("lifi swap %s: %s refused for gas on chain %s; retrying in %d s", swap["id"],
+                         refused[0]["owner"], refused[0]["chain_id"], GAS_RETRY_SEC)
+        return True
+    evm_batcher.requeue(*(tx["owner"] for tx in unsent))
+    return True
 
 
 def _unsent_or_reverted(tx: dict) -> bool:
@@ -466,14 +499,20 @@ def _queued_spend(token_id: str) -> int:
     queued swap txs and redeposits, and the outputs to deposit, queued or not
     yet, since they are in the wallet from the moment the swap delivers them."""
     rows = get_db().execute(
-        "SELECT e.owner, s.from_token_id, s.to_token_id, s.from_amount, s.to_amount_received "
-        "FROM evm_transactions e "
+        "SELECT e.owner, e.status, e.attempts, s.step, s.from_token_id, s.to_token_id, s.from_amount, "
+        "s.to_amount_received FROM evm_transactions e "
         "JOIN swaps s ON e.owner IN ('swap:' || s.id || ':' || ?, 'swap:' || s.id || ':' || ?, "
-        "'swap:' || s.id || ':' || ?) WHERE e.status = ? AND (s.from_token_id = ? OR s.to_token_id = ?)",
-        (LIFI, REFUND, DEPOSIT, QUEUED, token_id, token_id),
+        "'swap:' || s.id || ':' || ?) WHERE e.status IN (?, ?) AND (s.from_token_id = ? OR s.to_token_id = ?)",
+        (LIFI, REFUND, DEPOSIT, QUEUED, FAILED, token_id, token_id),
     ).fetchall()
     spend = 0
     for row in rows:
+        # A tx that failed unsent still spends while its swap waits at the
+        # step that sends it: refused for gas, it is queued again.
+        if row["status"] == FAILED and (
+            row["attempts"] or row["step"] != _SENT_AT[row["owner"].rsplit(":", 1)[1]].value
+        ):
+            continue
         if row["owner"].endswith(f":{DEPOSIT}"):
             if row["to_token_id"] == token_id:
                 spend += int(row["to_amount_received"])

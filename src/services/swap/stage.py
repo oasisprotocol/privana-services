@@ -105,6 +105,15 @@ def finish(swap: dict, status: SwapStatus, **fields) -> None:
     logger.info("swap %s %s at %s", swap["id"], status.value, swap["step"])
 
 
+def note(swap: dict, reason: str) -> bool:
+    """Record why the swap waits where it is, keeping `updated_at`, which its
+    deadlines count from. Returns whether the reason is new."""
+    if swap["error"] == reason:
+        return False
+    db_write(get_db(), "UPDATE swaps SET error = ? WHERE id = ?", (reason, swap["id"]))
+    return True
+
+
 def fail(swap: dict, outcome: SwapStep, error: str, exc: Optional[BaseException] = None) -> None:
     """Fail the swap for good. PARKED when the user's funds may have moved and
     a person has to settle it; NO_FUNDS_MOVED only when they provably did not."""

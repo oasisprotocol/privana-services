@@ -20,6 +20,7 @@ For callers:
 - `find_privana_tx(owner)` is the row: `status` stays QUEUED or SENT until
   it is LANDED or FAILED, with `error` saying why. A withdrawal the lane
   stopped resending stays SENT with `error` WITHDRAW_GIVEN_UP.
+- `cancel_queued(owner, error)` fails a row not signed yet, which can never land.
 Submitting an owner again returns its row, so a restart sends nothing twice.
 A row is one attempt: to try again after FAILED, submit a new owner.
 """
@@ -154,6 +155,18 @@ def submit_withdrawal(signer: str, owner: str, token_id: str, amount: int) -> in
     row_id = find_privana_tx(owner)["id"]
     logger.info("privana withdraw lane %s queued withdrawal %d for %s", signer, row_id, owner)
     return row_id
+
+
+def cancel_queued(owner: str, error: str) -> bool:
+    """Fail `owner`'s row if it was never signed, and return whether it was:
+    a row not signed can never land."""
+    cancelled = db_write(
+        get_db(), "UPDATE privana_transactions SET status = ?, error = ?, updated_at = ? WHERE owner = ? AND status = ?",
+        (FAILED, error, int(time.time()), owner, QUEUED),
+    ).rowcount
+    if cancelled:
+        logger.warning("privana lane cancelled %s before signing it: %s", owner, error)
+    return bool(cancelled)
 
 
 def find_privana_tx(owner: str) -> Optional[dict]:
@@ -358,6 +371,8 @@ class WithdrawLane:
         counter = await self._counter()
         if row["status"] == QUEUED:
             row = self._sign(row, counter)
+            if row is None:
+                return
         elif counter > row["nonce"]:
             _finish(get_db(), row, LANDED)
             return
@@ -387,19 +402,21 @@ class WithdrawLane:
         read = await asyncio.to_thread(get_accounting_client().withdrawal_nonce, self.signer)
         return max(read, _next_after_landed(get_db(), self.signer, WITHDRAW))
 
-    def _sign(self, row: dict, nonce: int) -> dict:
+    def _sign(self, row: dict, nonce: int) -> Optional[dict]:
         """Saved before it is sent: a restart sends the same request again
-        instead of signing a second one."""
+        instead of signing a second one. None when the row was cancelled
+        since this round read it."""
         settings = load_settings()
         payload = json.loads(row["payload"])
         signature = sign_withdrawal(self._key, settings.accounting_chain_id, settings.accounting_contract_address,
                                     payload["token"], payload["amount"], nonce)
-        db_write(
+        if not db_write(
             get_db(),
             "UPDATE privana_transactions SET status = ?, nonce = ?, signature = ?, attempts = attempts + 1, "
-            "updated_at = ? WHERE id = ?",
-            (SENT, nonce, signature, int(time.time()), row["id"]),
-        )
+            "updated_at = ? WHERE id = ? AND status = ?",
+            (SENT, nonce, signature, int(time.time()), row["id"], QUEUED),
+        ).rowcount:
+            return None
         logger.info("privana withdraw lane %s signed withdrawal %d for %s at nonce %d",
                     self.signer, row["id"], row["owner"], nonce)
         return {**row, "status": SENT, "nonce": nonce, "signature": signature, "attempts": row["attempts"] + 1}

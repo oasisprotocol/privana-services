@@ -24,7 +24,7 @@ from src.clients.privana_lanes import (
     swap_intent,
 )
 from src.core.config import load_settings
-from src.core.db import db_write, get_db
+from src.core.db import get_db
 from src.core.fee_policy import resolve_internal_fee
 from src.core.fees import calculate_fee
 from src.core.validation import sanitize_error
@@ -38,6 +38,7 @@ from src.services.swap.stage import (
     finish,
     handle_each,
     input_transfer_call,
+    note,
     owner,
     swaps_at,
     waited,
@@ -133,8 +134,7 @@ def _defer(swap: dict, reason: str) -> None:
     if waited(swap, PRICING_GIVE_UP_SEC):
         fail(swap, SwapStep.NO_FUNDS_MOVED, f"{reason} for {PRICING_GIVE_UP_SEC} s")
         return
-    if swap["error"] != reason:
-        db_write(get_db(), "UPDATE swaps SET error = ? WHERE id = ?", (reason, swap["id"]))
+    if note(swap, reason):
         logger.info("internal swap %s waits: %s", swap["id"], reason)
 
 

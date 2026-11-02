@@ -1,8 +1,11 @@
 """Internal swaps through the LP's real Sapphire sender and transfer lane."""
 
+from unittest.mock import AsyncMock
+
 import pytest
 
 import src.services.swap.internal_pipeline as internal_pipeline
+from src.core.db import db_write
 from tests.clients.fake_chain import nonce_of
 from tests.services.swap.world import BASE, ETHEREUM, USERS, WETH, World
 
@@ -85,9 +88,8 @@ async def test_a_swap_mined_late_completes(world):
     assert swap["to_amount_actual"] == str(NET)
 
 
-async def test_an_input_that_would_revert_fails_without_moving_funds(world):
-    swap_id = await world.schedule("internal")
-    world.ledger.transfer_nonces[USER.address.lower()] = 1
+async def test_an_input_signed_ahead_of_the_users_nonce_fails_without_moving_funds(world):
+    swap_id = await world.schedule("internal", nonce=1)
 
     swap = await world.until(swap_id, "failed")
 
@@ -96,18 +98,68 @@ async def test_an_input_that_would_revert_fails_without_moving_funds(world):
     assert world.ledger.landed == []
 
 
-async def test_a_swap_its_lane_could_not_land_moved_no_funds(world):
+async def test_an_input_whose_nonce_was_spent_elsewhere_parks(world):
+    # The user's signed transfer may have been sent without the swap.
     swap_id = await world.schedule("internal")
-    await world.stage_rounds("internal_swap")
-    await world.stage_rounds("internal_swap")
-    # The user spends the nonce before the lane sends the swap.
     world.ledger.transfer_nonces[USER.address.lower()] = 1
 
     swap = await world.until(swap_id, "failed")
 
-    assert swap["step"] == "no_funds_moved"
+    assert swap["step"] == "parked"
+    assert world.lane_rows(swap_id) == {}
+    assert world.ledger.landed == []
+
+
+async def test_a_swap_its_lane_could_not_land_after_the_nonce_was_spent_parks(world):
+    swap_id = await world.schedule("internal")
+    await world.stage_rounds("internal_swap")
+    await world.stage_rounds("internal_swap")
+    # The user's nonce is spent before the lane sends the swap.
+    world.ledger.transfer_nonces[USER.address.lower()] = 1
+
+    swap = await world.until(swap_id, "failed")
+
+    assert swap["step"] == "parked"
     assert world.lane_rows(swap_id)["internal"]["status"] == "failed"
     assert world.ledger.landed == []
+
+
+async def test_a_failure_waits_for_the_users_nonce_before_saying_no_funds_moved(world):
+    swap_id = await world.schedule("internal", nonce=1)
+    read = world.ledger.get_transfer_nonce
+    world.ledger.get_transfer_nonce = AsyncMock(side_effect=ConnectionError("rpc down"))
+    await world.run(3)
+    assert world.swap(swap_id)["status"] == "executing"
+
+    world.ledger.get_transfer_nonce = read
+    swap = await world.until(swap_id, "failed")
+
+    assert swap["step"] == "no_funds_moved"
+
+
+async def test_an_outflow_that_lands_during_the_balance_read_is_still_counted(world, monkeypatch):
+    world.ledger.set_lp_balance(WETH, 100_000)
+    first = await world.schedule("internal", user=USERS[0])
+    await world.stage_rounds("internal_swap")
+    await world.stage_rounds("internal_swap")
+    assert world.lane_rows(first)["internal"]["status"] == "queued"
+    second = await world.schedule("internal", user=USERS[1])
+    read = world.ledger.get_lp_balance
+
+    async def first_lands_after_the_read(token_id):
+        # The balance is read before the first swap's payout leaves it, and
+        # its lane row lands before the read returns.
+        balance = await read(token_id)
+        db_write(world.db, "UPDATE privana_transactions SET status = 'landed' WHERE owner = ?",
+                 (f"swap:{first}:internal",))
+        return balance
+
+    monkeypatch.setattr(world.ledger, "get_lp_balance", first_lands_after_the_read)
+    await world.stage_rounds("internal_swap")
+
+    swap = world.swap(second)
+    assert (swap["status"], swap["step"]) == ("failed", "no_funds_moved")
+    assert "Insufficient liquidity" in swap["error"]
 
 
 async def test_the_lps_balance_counts_payouts_still_on_its_lane(world):

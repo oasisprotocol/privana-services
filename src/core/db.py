@@ -306,25 +306,41 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
                 "updated_at = CAST(strftime('%s', 'now') AS INTEGER) "
                 "WHERE venue = 'lifi' AND status IN ('executing', 'refunding')"
             )
-        # A failed swap's step becomes `parked` when its funds may have moved
-        # (a lifi step past the input, an error marked for manual recovery, or
-        # an internal swap with a signed output, which may have landed on an
-        # earlier attempt) and `no_funds_moved` otherwise. Swaps in flight, and
-        # scheduled internal swaps with a signed output, are parked: the
+        # A failed swap's step becomes `no_funds_moved` only when the old
+        # pipelines prove nothing moved: an internal swap never signed, or a
+        # lifi swap failed before its input was sent or with the API refusing
+        # it. Any other failure may have moved funds (a lifi input whose reply
+        # was lost can still land) and is `parked`. Swaps in flight, and
+        # scheduled internal swaps with a signed output, are parked too: the
         # stages have no record of what the old pipelines sent for them.
         if conn.execute(
             "INSERT OR IGNORE INTO data_migrations (name) VALUES ('swap_stages_v1')"
         ).rowcount:
             conn.execute(
-                "UPDATE swaps SET step = CASE WHEN (venue = 'lifi' AND step IN "
-                "('input_transfer', 'withdraw', 'lifi_execute', 'deposit', 'credit')) "
-                "OR error LIKE '%manual recovery required%' "
-                "OR (venue = 'internal' AND output_signature IS NOT NULL) "
-                "THEN 'parked' ELSE 'no_funds_moved' END WHERE status = 'failed'"
+                "UPDATE swaps SET step = CASE WHEN error LIKE '%manual recovery required%' THEN 'parked' "
+                "WHEN venue = 'internal' AND output_signature IS NULL THEN 'no_funds_moved' "
+                "WHEN venue = 'lifi' AND step IS NULL AND (error LIKE 'input transfer rejected:%' "
+                "OR error = 'Scheduled swap quote not found') THEN 'no_funds_moved' "
+                "ELSE 'parked' END WHERE status = 'failed'"
             )
             conn.execute(
                 "UPDATE swaps SET status = 'failed', step = 'parked', error = COALESCE(error || '; ', '') "
                 "|| 'in flight at the stage upgrade; manual recovery required', "
                 "updated_at = CAST(strftime('%s', 'now') AS INTEGER) "
                 "WHERE status IN ('executing', 'refunding') OR (status = 'scheduled' AND output_signature IS NOT NULL)"
+            )
+            # A parked swap is settled by a person: nothing of it not signed
+            # yet may still go out. What was signed is left to its sender,
+            # since an attempt may already be mined.
+            parked = ("substr(owner, 6, instr(substr(owner, 6), ':') - 1) IN "
+                      "(SELECT id FROM swaps WHERE status = 'failed' AND step = 'parked')")
+            conn.execute(
+                "UPDATE evm_transactions SET status = 'failed', error = 'cancelled at the stage upgrade', "
+                "updated_at = CAST(strftime('%s', 'now') AS INTEGER) "
+                f"WHERE status = 'queued' AND attempts IS NULL AND owner LIKE 'swap:%' AND {parked}"
+            )
+            conn.execute(
+                "UPDATE privana_transactions SET status = 'failed', error = 'cancelled at the stage upgrade', "
+                "updated_at = CAST(strftime('%s', 'now') AS INTEGER) "
+                f"WHERE status = 'queued' AND owner LIKE 'swap:%' AND {parked}"
             )

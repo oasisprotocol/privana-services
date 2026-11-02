@@ -6,6 +6,7 @@ import asyncio
 import logging
 import time
 from functools import cache
+from typing import Optional
 
 from web3.exceptions import ContractLogicError
 
@@ -27,7 +28,7 @@ from src.core.config import load_settings
 from src.core.db import get_db
 from src.core.fee_policy import resolve_internal_fee
 from src.core.fees import calculate_fee
-from src.core.validation import sanitize_error
+from src.core.validation import sanitize_error, scrub_urls
 from src.models.swap import SwapStatus, SwapStep, SwapVenue
 from src.services.swap.lifi_pipeline import unqueued_lane_outflow
 from src.services.swap.quote_service import get_quote_service
@@ -81,9 +82,11 @@ async def _settle(swap: dict) -> None:
         finish(swap, SwapStatus.COMPLETED, to_amount_actual=swap["to_amount_executed"],
                swap_tx_hash=find_evm_tx(lane_evm_owner(row))["tx_hash"])
     elif row["status"] == FAILED:
-        # Both transfers or neither: a swap that did not land moved nothing.
-        fail(swap, SwapStep.PARKED if row["error"] == FOREIGN_SPEND else SwapStep.NO_FUNDS_MOVED,
-             f"swap failed: {row['error']}")
+        if row["error"] == FOREIGN_SPEND:
+            fail(swap, SwapStep.PARKED, f"swap failed: {row['error']}")
+        else:
+            # Both transfers or neither: the swap itself moved nothing.
+            await _fail_unless_input_spent(swap, f"swap failed: {row['error']}")
 
 
 async def _price(swaps: list[dict]) -> None:
@@ -98,44 +101,87 @@ async def _price(swaps: list[dict]) -> None:
         try:
             await asyncio.to_thread(_sapphire_lp().simulate, call)
         except ContractLogicError as exc:
-            fail(swap, SwapStep.NO_FUNDS_MOVED, f"input transfer would revert: {sanitize_error(str(exc))}", exc)
+            await _fail_unless_input_spent(swap, f"input transfer would revert: {sanitize_error(str(exc))}", exc)
             continue
         except Exception as exc:
-            _defer(swap, f"input simulation unavailable: {sanitize_error(str(exc))}")
+            await _defer(swap, f"input simulation unavailable: {sanitize_error(str(exc))}")
             continue
         candidates.append(swap)
     prices = await asyncio.gather(*(_fresh_payout(swap) for swap in candidates), return_exceptions=True)
-    available: dict[str, int] = {}
+    priced = []
     for swap, price in zip(candidates, prices):
         if isinstance(price, PricingUnavailable):
-            _defer(swap, f"no price: {price}")
-            continue
-        if isinstance(price, BaseException):
-            fail(swap, SwapStep.NO_FUNDS_MOVED, sanitize_error(str(price)), price)
-            continue
+            await _defer(swap, f"no price: {price}")
+        elif isinstance(price, BaseException):
+            await _fail_unless_input_spent(swap, sanitize_error(str(price)), price)
+        else:
+            priced.append((swap, price))
+    available, unavailable = await _lp_available([swap["to_token_id"] for swap, _ in priced])
+    # Nothing awaits from the reads in _lp_available to the last advance, so
+    # an outflow queued meanwhile is always counted.
+    short, deferred = [], []
+    for swap, price in priced:
         token = swap["to_token_id"]
         if token not in available:
-            try:
-                balance = int((await get_accounting_client().get_lp_balance(token)).balance)
-            except Exception as exc:
-                _defer(swap, f"LP balance unavailable: {sanitize_error(str(exc))}")
-                continue
-            available[token] = (balance - lane_outflow(load_settings().liquidity_provider_address, token)
-                                - unqueued_lane_outflow(token))
-        if available[token] < price:
-            fail(swap, SwapStep.NO_FUNDS_MOVED, f"Insufficient liquidity for this swap: {available[token]} < {price}")
-            continue
-        available[token] -= price
-        advance(swap, SwapStep.INTERNAL_SWAP_SENT, to_amount_executed=str(price))
+            deferred.append((swap, f"LP balance unavailable: {unavailable[token]}"))
+        elif available[token] < price:
+            short.append((swap, f"Insufficient liquidity for this swap: {available[token]} < {price}"))
+        else:
+            available[token] -= price
+            advance(swap, SwapStep.INTERNAL_SWAP_SENT, to_amount_executed=str(price))
+    for swap, reason in deferred:
+        await _defer(swap, reason)
+    for swap, error in short:
+        await _fail_unless_input_spent(swap, error)
 
 
-def _defer(swap: dict, reason: str) -> None:
+async def _lp_available(tokens: list[str]) -> tuple[dict[str, int], dict[str, str]]:
+    """What the LP can still pay in each of `tokens`: its balance less what its
+    lanes will take out, and why a balance could not be read."""
+    lp = load_settings().liquidity_provider_address
+    tokens = list(dict.fromkeys(tokens))
+
+    def outflow(token: str) -> int:
+        return lane_outflow(lp, token) + unqueued_lane_outflow(token)
+
+    before = {token: outflow(token) for token in tokens}
+    balances = await asyncio.gather(*(get_accounting_client().get_lp_balance(token) for token in tokens),
+                                    return_exceptions=True)
+    available, unavailable = {}, {}
+    for token, balance in zip(tokens, balances):
+        if isinstance(balance, BaseException):
+            unavailable[token] = sanitize_error(str(balance))
+        else:
+            # An outflow landing during the read has left the lane but maybe
+            # not the balance read: the larger of the two counts it.
+            available[token] = int(balance.balance) - max(before[token], outflow(token))
+    return available, unavailable
+
+
+async def _defer(swap: dict, reason: str) -> None:
     """Price it at a later round, or fail it once it has waited too long."""
     if waited(swap, PRICING_GIVE_UP_SEC):
-        fail(swap, SwapStep.NO_FUNDS_MOVED, f"{reason} for {PRICING_GIVE_UP_SEC} s")
+        await _fail_unless_input_spent(swap, f"{reason} for {PRICING_GIVE_UP_SEC} s")
         return
     if note(swap, reason):
         logger.info("internal swap %s waits: %s", swap["id"], reason)
+
+
+async def _fail_unless_input_spent(swap: dict, error: str, exc: Optional[BaseException] = None) -> None:
+    """Fail a claimed swap that did not go through. Its user's swaps wait for
+    it, so their transfer nonce moves only by a transfer signed at it: then
+    the input may have been sent to the LP without the swap, and a person has
+    to settle it. While the nonce is unread, it is tried again next round."""
+    try:
+        nonce = await get_accounting_client().get_transfer_nonce(swap["user_address"])
+    except Exception as read_exc:
+        logger.warning("internal swap %s not failed this round, transfer nonce unavailable: %s",
+                       swap["id"], scrub_urls(repr(read_exc)))
+        return
+    if nonce <= int(swap["input_nonce"]):
+        fail(swap, SwapStep.NO_FUNDS_MOVED, error, exc)
+    else:
+        fail(swap, SwapStep.PARKED, f"{error}, but the user's nonce is past it at {nonce}", exc)
 
 
 @cache

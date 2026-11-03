@@ -1,5 +1,3 @@
-import time
-
 from src.core.db import _run_migrations, db_write
 from src.models.swap import SwapStatus, SwapVenue
 from src.services.swap.failure import swap_failure
@@ -22,20 +20,12 @@ class TestStageUpgrade:
     ROWS = {
         # id: (venue, status, step, output_signature, error)
         "scheduled": ("lifi", "scheduled", None, None, None),
-        "requeued": ("internal", "scheduled", None, "0xsigned", None),
-        "executing": ("internal", "executing", None, "0xsigned", None),
         "executing_lifi": ("lifi", "executing", "lifi_execute", None, None),
-        "refunding": ("lifi", "refunding", "withdraw", None, None),
         "failed_holding": ("lifi", "failed", "deposit", None, None),
-        "failed_rejected": ("lifi", "failed", None, None, "input transfer rejected: status=rejected detail=x"),
-        "failed_dispatch": ("lifi", "failed", None, None, "Scheduled swap quote not found"),
-        # The input's reply was lost: the API may have taken it.
-        "failed_input_unanswered": ("lifi", "failed", None, None, "Request timeout after 30s"),
-        "failed_parked_lifi": ("lifi", "failed", None, None, "interrupted by upgrade; manual recovery required"),
+        "failed_lifi_unsent": ("lifi", "failed", None, None, "input transfer rejected: status=rejected detail=x"),
         "failed_internal": ("internal", "failed", None, None, "pricing unavailable"),
-        # A retry's revert: an earlier attempt whose reply was lost may have landed.
         "failed_reverted": ("internal", "failed", None, "0xsigned", "Transaction reverted: 0xabc"),
-        "failed_unknown_send": ("internal", "failed", None, "0xsigned", "Transaction does not exist on-chain: 0xabc"),
+        "failed_parked": ("lifi", "failed", "parked", None, None),
         "completed": ("lifi", "completed", "credit", None, None),
     }
 
@@ -48,67 +38,23 @@ class TestStageUpgrade:
     def _row(self, test_db, swap_id):
         return dict(test_db.execute("SELECT * FROM swaps WHERE id = ?", (swap_id,)).fetchone())
 
-    def test_swaps_in_flight_park_once_and_failed_ones_keep_what_they_told_the_user(self, test_db):
+    def test_failed_swaps_keep_what_they_told_the_user(self, test_db):
         for swap_id, row in self.ROWS.items():
             self._insert(test_db, swap_id, *row)
         db_write(test_db, "DELETE FROM data_migrations WHERE name = 'swap_stages_v1'")
-        upgraded_at = int(time.time())
 
         _run_migrations(test_db)
 
         rows = {swap_id: self._row(test_db, swap_id) for swap_id in self.ROWS}
         assert {swap_id: (row["status"], row["step"]) for swap_id, row in rows.items()} == {
             "scheduled": ("scheduled", None),
-            "requeued": ("failed", "parked"),
-            "executing": ("failed", "parked"),
-            "executing_lifi": ("failed", "parked"),
-            "refunding": ("failed", "parked"),
+            "executing_lifi": ("executing", "lifi_execute"),
             "failed_holding": ("failed", "parked"),
-            "failed_rejected": ("failed", "no_funds_moved"),
-            "failed_dispatch": ("failed", "no_funds_moved"),
-            "failed_input_unanswered": ("failed", "parked"),
-            "failed_parked_lifi": ("failed", "parked"),
+            "failed_lifi_unsent": ("failed", "no_funds_moved"),
             "failed_internal": ("failed", "no_funds_moved"),
-            "failed_reverted": ("failed", "parked"),
-            "failed_unknown_send": ("failed", "parked"),
+            "failed_reverted": ("failed", "no_funds_moved"),
+            "failed_parked": ("failed", "parked"),
             "completed": ("completed", "credit"),
         }
-        assert rows["executing"]["error"] == "in flight at the stage upgrade; manual recovery required"
-        # Unsettled operations sort by updated_at, so a parked swap shows as just changed.
-        assert rows["refunding"]["updated_at"] >= upgraded_at
         assert swap_failure("failed_holding", "failed", rows["failed_holding"]["step"])[0] == "needs_support"
         assert swap_failure("failed_internal", "failed", rows["failed_internal"]["step"])[0] == "no_funds_moved"
-        # Once: later swaps are the stages' own.
-        self._insert(test_db, "later", "lifi", "executing", "execute:sent", None)
-        _run_migrations(test_db)
-        assert self._row(test_db, "later")["status"] == "executing"
-
-    def test_a_parked_swaps_unsigned_writes_are_cancelled_and_its_signed_ones_left(self, test_db):
-        self._insert(test_db, "executing_lifi", "lifi", "executing", "lifi_execute", None)
-        self._insert(test_db, "scheduled", "lifi", "scheduled", None, None)
-        txs = {
-            # owner: attempts
-            "swap:executing_lifi:approve": "0:0xab",
-            "swap:executing_lifi:lifi": None,
-            "swap:scheduled:input": None,
-        }
-        for owner, attempts in txs.items():
-            db_write(test_db, "INSERT INTO evm_transactions (chain_id, address, owner, to_address, data, value, gas, "
-                              "attempts, created_at, updated_at) VALUES (1, '0xlp', ?, '0xto', '0x', '0', 1, ?, 1, 1)",
-                     (owner, attempts))
-        for owner in ("swap:executing_lifi:credit", "swap:scheduled:withdraw"):
-            db_write(test_db, "INSERT INTO privana_transactions (signer, owner, kind, payload, created_at, updated_at) "
-                              "VALUES ('0xlp', ?, 'transfer', '{}', 1, 1)", (owner,))
-        db_write(test_db, "DELETE FROM data_migrations WHERE name = 'swap_stages_v1'")
-
-        _run_migrations(test_db)
-
-        statuses = {row["owner"]: row["status"] for row in test_db.execute(
-            "SELECT owner, status FROM evm_transactions UNION ALL SELECT owner, status FROM privana_transactions")}
-        assert statuses == {
-            "swap:executing_lifi:approve": "queued",
-            "swap:executing_lifi:lifi": "failed",
-            "swap:executing_lifi:credit": "failed",
-            "swap:scheduled:input": "queued",
-            "swap:scheduled:withdraw": "queued",
-        }

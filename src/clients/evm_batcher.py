@@ -49,6 +49,9 @@ STOPPED = "stopped"
 
 # The node's reply when the account cannot pay for the gas.
 GAS_REFUSED = ("insufficient funds", "insufficient balance to pay fees")
+# A tx refused for gas is queued again after this, once the account may have
+# been topped up.
+GAS_RETRY_SEC = 60
 # An unsimulated tx is built on the one before it, so it fails unsent with it.
 SUPERSEDED = "superseded: the tx before it failed"
 # Node replies meaning it will never take the tx as signed. Any other reply
@@ -248,7 +251,10 @@ class EvmBatcher:
             # A retry is never failed: its earlier attempt may still be mined.
             if row["attempts"] or not any(phrase in _rpc_message(exc) for phrase in REFUSED):
                 return STOPPED
-            # The node will never take it, so the nonce stays free for the next tx.
+            # The node will never take it: the attempt never existed, so its
+            # owner can tell it from one that may have been mined, and the
+            # nonce stays free for the next tx.
+            db_write(self.db, "UPDATE evm_transactions SET attempts = NULL WHERE id = ?", (row["id"],))
             self._finish(row, FAILED, error=str(exc))
             return SKIPPED
         except Exception as exc:
@@ -374,6 +380,29 @@ def submit(chain_id: int, address: str, *intents: TxIntent) -> list[int]:
     for tx_id, intent in zip(tx_ids, intents):
         logger.info("evm batcher %s queued tx %d for %s", chain_id, tx_id, intent.owner)
     return tx_ids
+
+
+def refused_for_gas(tx: dict) -> bool:
+    """Whether the tx failed, before any attempt was signed, because its
+    account could not pay the gas: it can still go through once topped up."""
+    error = (tx["error"] or "").lower()
+    return tx["status"] == FAILED and not tx["attempts"] and any(phrase in error for phrase in GAS_REFUSED)
+
+
+def requeue(*owners: str) -> int:
+    """Queue again, in one write, the txs of `owners` that failed before any
+    attempt was signed, and return how many. None of them can be mined, so
+    nothing is sent twice, and they go out in their first order."""
+    placeholders = ", ".join("?" * len(owners))
+    cursor = db_write(
+        get_db(),
+        "UPDATE evm_transactions SET status = ?, error = NULL, tx_hash = NULL, nonce = NULL, logs = NULL, "
+        f"updated_at = ? WHERE owner IN ({placeholders}) AND status = ? AND attempts IS NULL",
+        (QUEUED, int(time.time()), *owners, FAILED),
+    )
+    for owner in owners:
+        logger.info("evm batcher queued %s again", owner)
+    return cursor.rowcount
 
 
 def find_evm_tx(owner: str) -> Optional[dict]:

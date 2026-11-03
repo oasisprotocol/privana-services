@@ -6,24 +6,19 @@ from src.core.db import db_write
 from src.services.swap.failure import log_swap_failure, swap_failure
 
 
-@pytest.mark.parametrize("venue,step", [
-    ("lifi", "input_transfer"), ("lifi", "withdraw"), ("lifi", "lifi_execute"),
-    ("lifi", "deposit"), ("lifi", "credit"),
-])
-def test_a_failed_swap_holding_the_users_funds_says_how_to_get_them_back(venue, step):
-    reason, message = swap_failure("swap-123", "failed", venue, step)
+def test_a_parked_swap_says_how_to_get_the_funds_back():
+    reason, message = swap_failure("swap-123", "failed", "parked")
 
     assert reason == "needs_support"
     assert "swap ID swap-123" in message
 
 
-@pytest.mark.parametrize("venue,step", [("internal", None), ("lifi", None)])
-def test_a_failed_swap_that_never_took_funds_says_so(venue, step):
-    assert swap_failure("swap-123", "failed", venue, step)[0] == "no_funds_moved"
+def test_a_failed_swap_that_moved_no_funds_says_so():
+    assert swap_failure("swap-123", "failed", "no_funds_moved")[0] == "no_funds_moved"
 
 
 def test_a_refunded_swap_says_the_funds_came_back():
-    reason, message = swap_failure("swap-123", "refunded", "lifi", "lifi_execute")
+    reason, message = swap_failure("swap-123", "refunded", "refund:payout")
 
     assert reason == "refunded"
     assert "returned" in message
@@ -31,7 +26,7 @@ def test_a_refunded_swap_says_the_funds_came_back():
 
 @pytest.mark.parametrize("status", ["scheduled", "executing", "refunding", "completed"])
 def test_a_swap_still_running_or_done_has_nothing_to_explain(status):
-    assert swap_failure("swap-123", status, "lifi", "withdraw") == (None, None)
+    assert swap_failure("swap-123", status, "withdraw:sent") == (None, None)
 
 
 def test_the_log_carries_the_provider_error_and_the_swap_state(test_db, caplog, monkeypatch):

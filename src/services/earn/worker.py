@@ -5,6 +5,7 @@ import logging
 import time
 from typing import Optional
 
+from eth_account import Account
 from web3.exceptions import TransactionNotFound
 
 from src.core.config import load_settings
@@ -49,6 +50,15 @@ def _public_error(exc: Exception) -> str:
 POLL_INTERVAL = 1.0
 # How often withdrawals waiting for liquidity check the pool account again.
 LIQUIDITY_RECHECK_SEC = 30
+
+
+def earn_signs_as_lp() -> bool:
+    """EarnManager calls sign as the pool admin, or the LP when it has no key
+    of its own. The LP's Sapphire nonce belongs to its sender, so earn must
+    not write as the LP next to it."""
+    settings = load_settings()
+    key = settings.pool_admin_secret_key or settings.liquidity_provider_secret_key
+    return bool(key) and Account.from_key(key).address.lower() == settings.liquidity_provider_address.lower()
 
 
 class EarnWorker:

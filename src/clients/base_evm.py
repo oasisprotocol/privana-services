@@ -122,23 +122,31 @@ _clients: dict[str, EvmClient] = {}
 _chain_ids: dict[str, int] = {}
 
 
+def rpc_chain_id(setting: str) -> Optional[int]:
+    """The chain the RPC named by `setting` serves, as it answers; None when
+    it is not configured or not reachable yet."""
+    settings = load_settings()
+    rpc_url = getattr(settings, setting)
+    if not rpc_url:
+        return None
+    if rpc_url not in _clients:
+        _clients[rpc_url] = EvmClient(rpc_url, settings.liquidity_provider_secret_key)
+    if rpc_url not in _chain_ids:
+        try:
+            _chain_ids[rpc_url] = _clients[rpc_url].w3.eth.chain_id
+        except Exception as exc:
+            # Type only: the error text can carry the RPC URL and its key.
+            logger.warning("EVM RPC unreachable while resolving its chain id: %s", type(exc).__name__)
+            return None
+    return _chain_ids[rpc_url]
+
+
 def get_evm_client(chain_id: int) -> EvmClient:
     """The LP client for `chain_id`, picked by asking each configured RPC
     which chain it serves, so a testnet RPC answers for its testnet chain and
     a misconfigured URL can never sign for the wrong one."""
     settings = load_settings()
-    for rpc_url in (getattr(settings, setting) for setting in RPC_SETTINGS):
-        if not rpc_url:
-            continue
-        if rpc_url not in _clients:
-            _clients[rpc_url] = EvmClient(rpc_url, settings.liquidity_provider_secret_key)
-        if rpc_url not in _chain_ids:
-            try:
-                _chain_ids[rpc_url] = _clients[rpc_url].w3.eth.chain_id
-            except Exception as exc:
-                # Type only: the error text can carry the RPC URL and its key.
-                logger.warning("EVM RPC unreachable while resolving its chain id: %s", type(exc).__name__)
-                continue
-        if _chain_ids[rpc_url] == chain_id:
-            return _clients[rpc_url]
+    for setting in RPC_SETTINGS:
+        if rpc_chain_id(setting) == chain_id:
+            return _clients[getattr(settings, setting)]
     raise ValueError(f"No RPC is configured for chain {chain_id}")

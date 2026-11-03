@@ -11,6 +11,12 @@ POOL_ADDRESS = "0x152E6a7125665764a4F1F1df80E8f5D49Bf0239c"
 USER_ADDRESS = "0x" + "d" * 40
 
 
+@pytest.fixture(autouse=True)
+def earn_worker_runs():
+    with patch("src.api.earn.earn_signs_as_lp", return_value=False):
+        yield
+
+
 def _mock_pool():
     return {
         "pool_id": POOL_ID,
@@ -227,6 +233,19 @@ class TestDepositQuoteRoute:
 
 
 class TestDepositRoute:
+    async def test_refused_when_the_earn_worker_cannot_run(self, api_client):
+        with patch("src.api.earn.earn_signs_as_lp", return_value=True), \
+                patch("src.api.earn.get_vault_service") as mock_svc:
+            r = await api_client.post("/v1/earn/deposit", json={
+                "pool_id": POOL_ID,
+                "user_address": USER_ADDRESS,
+                "amount": "1000",
+                "nonce": 0,
+                "signature": "0x" + "aa" * 65,
+            })
+            assert r.status_code == 503
+            mock_svc.return_value.schedule_deposit.assert_not_called()
+
     async def test_queues_the_deposit_and_returns_its_id(self, api_client):
         """The route records the request and returns; the worker executes it.
         Callers follow the outcome on /v1/operations/unsettled by deposit_id."""

@@ -162,6 +162,9 @@ class FakeAccounting:
     def transfer_nonce(self, address: str) -> int:
         return self.transfer_nonces[address.lower()]
 
+    async def get_transfer_nonce(self, address: str) -> int:
+        return self.transfer_nonce(address)
+
     def withdrawal_nonce(self, address: str) -> int:
         return self.withdrawal_nonces[address.lower()]
 

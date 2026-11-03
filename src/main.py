@@ -12,6 +12,7 @@ from src.api.swap import router as swap_router
 from src.core.config import load_settings
 from src.core.db import close_db, get_db
 from src.core.validation import validate_token_id
+from src.services.earn.worker import earn_signs_as_lp
 
 logger = logging.getLogger(__name__)
 
@@ -136,15 +137,19 @@ async def lifespan(_app: FastAPI):
     except Exception:
         logger.exception("Earn pool listing cache failed to start")
 
-    try:
-        await get_earn_worker().start()
-    except Exception:
-        logger.exception("Earn worker failed to start; queued earn operations will not run")
+    if earn_signs_as_lp():
+        logger.error("Earn worker and idle deployer not started: the pool admin is the LP, whose Sapphire "
+                     "nonce its sender owns; earn requests are refused")
+    else:
+        try:
+            await get_earn_worker().start()
+        except Exception:
+            logger.exception("Earn worker failed to start; queued earn operations will not run")
 
-    try:
-        await get_idle_deployer().start()
-    except Exception:
-        logger.exception("Idle deployer failed to start; seeded funds will sit undeployed")
+        try:
+            await get_idle_deployer().start()
+        except Exception:
+            logger.exception("Idle deployer failed to start; seeded funds will sit undeployed")
 
     try:
         yield

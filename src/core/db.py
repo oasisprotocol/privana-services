@@ -306,3 +306,15 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
                 "updated_at = CAST(strftime('%s', 'now') AS INTEGER) "
                 "WHERE venue = 'lifi' AND status IN ('executing', 'refunding')"
             )
+        # Failed swaps keep what the old pipelines told the user: a lifi swap
+        # failed at a step that held its funds needs support, any other did
+        # not move funds.
+        if conn.execute(
+            "INSERT OR IGNORE INTO data_migrations (name) VALUES ('swap_stages_v1')"
+        ).rowcount:
+            conn.execute(
+                "UPDATE swaps SET step = CASE WHEN venue = 'lifi' AND step IN "
+                "('input_transfer', 'withdraw', 'lifi_execute', 'deposit', 'credit') "
+                "THEN 'parked' ELSE 'no_funds_moved' END "
+                "WHERE status = 'failed' AND (step IS NULL OR step NOT IN ('parked', 'no_funds_moved'))"
+            )

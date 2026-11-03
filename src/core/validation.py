@@ -32,6 +32,8 @@ MAX_ERROR_LENGTH = 500
 MAX_REVERT_REASON_LENGTH = 200
 
 URL_PATTERN = re.compile(r"https?://\S+")
+# requests names the path alone ("Max retries exceeded with url: /v2/KEY").
+URL_PATH_PATTERN = re.compile(r"(\burl: )/\S*")
 # A bare RPC endpoint can ride along on a revert line without a scheme, e.g.
 # "via rpc.internal:8545" or "192.168.1.5:8545". Scrub dotted hosts and IPv4
 # (optional :port) too. The domain arm requires a letters-only final label so
@@ -62,9 +64,12 @@ def sanitize_error(error: str) -> str:
         return "Insufficient gas funds for transaction"
     if "nonce" in lower:
         return "Transaction nonce conflict"
-    if len(error) > MAX_ERROR_LENGTH:
-        return error[:MAX_ERROR_LENGTH]
-    return error
+    return scrub_urls(error)[:MAX_ERROR_LENGTH]
+
+
+def scrub_urls(text: str) -> str:
+    """`text` without the URLs an RPC or API error carries, which can hold its key."""
+    return URL_PATH_PATTERN.sub(r"\1[url]", URL_PATTERN.sub("[url]", text))
 
 
 def validate_signature(value: str, name: str = "signature") -> None:

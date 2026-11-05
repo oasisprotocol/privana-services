@@ -16,6 +16,7 @@ from src.clients.privana_lanes import (
     swap_intent,
     transfer_balance_intent,
 )
+from src.core.db import db_transaction
 from src.core.eip712 import sign_transfer
 from tests.clients.fake_chain import (
     SAPPHIRE_CHAIN_ID,
@@ -266,8 +267,10 @@ def withdraw_lane(api, config):
     return WithdrawLane(config.liquidity_provider_address.lower(), config.liquidity_provider_secret_key, client)
 
 
-def withdrawal(config, owner="swap:w:withdraw", amount=5):
-    return submit_withdrawal(config.liquidity_provider_address, owner, TOKEN, amount)
+def withdrawal(config, owner="withdraw:w", amount=5):
+    with db_transaction(lanes.get_db()) as db:
+        submit_withdrawal(db, config.liquidity_provider_address, owner, TOKEN, amount)
+    return lanes.find_privana_tx(owner)["id"]
 
 
 def age_withdrawals(test_db, seconds):

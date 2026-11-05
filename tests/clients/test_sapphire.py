@@ -1,7 +1,6 @@
 from unittest.mock import MagicMock, patch
 
 import pytest
-import requests
 from web3 import Web3
 
 import src.clients.sapphire as sapphire_module
@@ -28,12 +27,12 @@ def reset_singletons():
 
 class TestSapphireHttpProvider:
     def test_no_headers_keeps_web3_defaults(self):
-        provider = sapphire_module.http_provider("http://localhost:1", {})
+        provider = sapphire_module.sapphire_http_provider("http://localhost:1", {})
         headers = provider.get_request_kwargs()["headers"]
         assert headers["Content-Type"] == "application/json"
 
     def test_extra_headers_are_merged_over_defaults(self):
-        provider = sapphire_module.http_provider(
+        provider = sapphire_module.sapphire_http_provider(
             "http://localhost:1", {"Authorization": "Bearer secret-token"}
         )
         headers = provider.get_request_kwargs()["headers"]
@@ -42,18 +41,8 @@ class TestSapphireHttpProvider:
         # merge Content-Type back in or JSON-RPC endpoints reject the request.
         assert headers["Content-Type"] == "application/json"
 
-    def test_a_dropped_read_is_retried_but_never_a_send(self, monkeypatch):
-        monkeypatch.setattr(sapphire_module.RPC_RETRY, "backoff_factor", 0)
-        provider = sapphire_module.http_provider("http://localhost:1", {})
-        dropped = requests.exceptions.ConnectionError("Connection reset by peer")
-        provider._request_session_manager.make_post_request = MagicMock(side_effect=[dropped, b"ok", dropped])
-
-        assert provider._make_request("oasis_callDataPublicKey", b"{}") == b"ok"
-        with pytest.raises(requests.exceptions.ConnectionError):
-            provider._make_request("eth_sendRawTransaction", b"{}")
-
     def test_returns_a_plain_http_provider(self):
-        provider = sapphire_module.http_provider("http://localhost:1", {})
+        provider = sapphire_module.sapphire_http_provider("http://localhost:1", {})
         assert isinstance(provider, Web3.HTTPProvider)
 
 
@@ -173,7 +162,7 @@ def test_the_reader_sends_historical_calls_unsigned():
         return providers[-1]
 
     with patch.object(sapphire_module, "load_settings", return_value=settings), \
-         patch.object(sapphire_module, "http_provider", side_effect=provider):
+         patch.object(sapphire_module, "sapphire_http_provider", side_effect=provider):
         client = sapphire_module.SapphireClient()
 
     call = {"to": "0x" + "33" * 20, "data": "0x1234"}

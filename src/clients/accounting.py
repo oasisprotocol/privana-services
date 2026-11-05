@@ -11,7 +11,7 @@ from eth_account.messages import encode_defunct
 from web3 import Web3
 from web3.contract import Contract
 
-from src.clients.sapphire import http_provider
+from src.clients.sapphire import call_with_transient_retry, sapphire_http_provider
 from src.core.abi import load_abi
 from src.core.config import load_settings
 from src.models.common import (
@@ -254,7 +254,9 @@ class AccountingClient:
         return entries
 
     async def get_transfer_nonce(self, user_address: str) -> int:
-        return await asyncio.to_thread(self.transfer_nonce, user_address)
+        return await call_with_transient_retry(
+            lambda: asyncio.to_thread(self.transfer_nonce, user_address), "transfer nonce"
+        )
 
     def transfer_nonce(self, user_address: str) -> int:
         """Read ``transferNonces[user]`` directly from the Accounting contract.
@@ -278,7 +280,7 @@ class AccountingClient:
     def _accounting(self) -> Contract:
         if self._accounting_contract is None:
             settings = load_settings()
-            w3 = Web3(http_provider(settings.sapphire_rpc_url, settings.sapphire_rpc_headers))
+            w3 = Web3(sapphire_http_provider(settings.sapphire_rpc_url, settings.sapphire_rpc_headers))
             self._accounting_contract = w3.eth.contract(
                 address=Web3.to_checksum_address(settings.accounting_contract_address),
                 abi=load_abi("Accounting"),

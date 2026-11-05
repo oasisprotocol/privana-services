@@ -213,6 +213,13 @@ MIGRATIONS = [
         updated_at INTEGER NOT NULL
     );
     """,
+    # A swap queued its own withdrawal before withdrawals were batched: point
+    # it at that row so the next batch never withdraws its input again.
+    """
+    UPDATE swaps SET withdraw_owner = 'swap:' || id || ':withdraw'
+    WHERE withdraw_owner IS NULL
+    AND EXISTS (SELECT 1 FROM privana_transactions WHERE owner = 'swap:' || swaps.id || ':withdraw');
+    """,
 ]
 
 

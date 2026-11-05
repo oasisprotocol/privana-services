@@ -2,10 +2,12 @@ import logging
 import threading
 from typing import Dict, Optional
 
+import requests
 from eth_account import Account
 from sapphirepy import sapphire
 from web3 import Web3
 from web3.middleware import SignAndSendRawMiddlewareBuilder
+from web3.providers.rpc.utils import REQUEST_RETRY_ALLOWLIST, ExceptionRetryConfiguration
 
 from src.core.config import load_settings
 
@@ -16,9 +18,18 @@ DEFAULT_GAS_LIMIT = 500_000
 # Also serializes Earn submissions using the same signer.
 _submission_lock = threading.Lock()
 
+# web3's retry, plus a connection the node reset while idle, which web3's
+# default misses. A send is never retried: it may have reached the node, and
+# its sender resends it.
+RPC_RETRY = ExceptionRetryConfiguration(
+    errors=(requests.exceptions.ConnectionError, requests.exceptions.HTTPError, requests.exceptions.Timeout),
+    method_allowlist=[m for m in REQUEST_RETRY_ALLOWLIST if m != "eth_sendRawTransaction"]
+    + ["oasis_callDataPublicKey"],
+)
 
-def sapphire_http_provider(rpc_url: str, headers: Dict[str, str]) -> Web3.HTTPProvider:
-    """Build the HTTPProvider every Sapphire reader/writer should use.
+
+def http_provider(rpc_url: str, headers: Dict[str, str]) -> Web3.HTTPProvider:
+    """Build the HTTPProvider every EVM reader/writer should use.
 
     Web3.HTTPProvider only injects its default headers (Content-Type,
     User-Agent) when the caller passes none at all, so gateway auth headers
@@ -28,7 +39,7 @@ def sapphire_http_provider(rpc_url: str, headers: Dict[str, str]) -> Web3.HTTPPr
     request_kwargs = None
     if headers:
         request_kwargs = {"headers": {**Web3.HTTPProvider.get_request_headers(), **headers}}
-    return Web3.HTTPProvider(rpc_url, request_kwargs=request_kwargs)
+    return Web3.HTTPProvider(rpc_url, request_kwargs=request_kwargs, exception_retry_configuration=RPC_RETRY)
 
 
 class SapphireClient:
@@ -48,9 +59,9 @@ class SapphireClient:
         self.account = Account.from_key(
             secret_key or settings.liquidity_provider_secret_key
         )
-        self.w3 = Web3(sapphire_http_provider(self.rpc_url, settings.sapphire_rpc_headers))
+        self.w3 = Web3(http_provider(self.rpc_url, settings.sapphire_rpc_headers))
         # Unsigned: Sapphire rejects signed queries pinned to a past block.
-        self.w3_unwrapped = Web3(sapphire_http_provider(self.rpc_url, settings.sapphire_rpc_headers))
+        self.w3_unwrapped = Web3(http_provider(self.rpc_url, settings.sapphire_rpc_headers))
         self.w3.middleware_onion.add(SignAndSendRawMiddlewareBuilder.build(self.account))
         self.w3 = sapphire.wrap(self.w3, self.account)
         self.w3.eth.default_account = self.account.address

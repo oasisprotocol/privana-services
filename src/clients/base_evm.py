@@ -11,7 +11,7 @@ from web3 import Web3
 from web3.exceptions import TransactionNotFound
 from web3.types import RPCEndpoint, TxReceipt
 
-from src.clients.sapphire import sapphire_http_provider
+from src.clients.sapphire import http_provider
 from src.core.abi import load_abi
 from src.core.config import load_settings
 
@@ -108,9 +108,7 @@ class EvmClient:
         return sapphire.wrap(Web3(self._provider()), self._account)
 
     def _provider(self) -> Web3.HTTPProvider:
-        if self._headers:
-            return sapphire_http_provider(self._rpc_url, self._headers)
-        return Web3.HTTPProvider(self._rpc_url)
+        return http_provider(self._rpc_url, self._headers)
 
     def max_gas_cost(self, gas: int) -> int:
         """`gas` at the fee cap a send sets now."""

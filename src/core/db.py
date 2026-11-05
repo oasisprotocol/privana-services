@@ -162,6 +162,9 @@ MIGRATIONS = [
     # The output an internal swap was signed for. It is priced at execution
     # and can differ from to_amount_estimate.
     "ALTER TABLE swaps ADD COLUMN to_amount_executed TEXT;",
+    # The owner of the withdrawal a LiFi swap's input goes out in: one
+    # withdrawal carries the inputs of every swap of a token waiting for one.
+    "ALTER TABLE swaps ADD COLUMN withdraw_owner TEXT;",
     # Txs queued for the EVM batcher of an account. `attempts` lists every
     # signed version as `nonce:hash`, space-separated, each saved before its
     # broadcast: a later round finds a mined one before signing again. `nonce`

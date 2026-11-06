@@ -3,6 +3,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from privana import PrivanaClient
+from privana.client.errors import AccountingApiError
 
 from src.clients.privana import (
     _siwe_login_as_lp,
@@ -144,6 +145,25 @@ async def test_login_signs_siwe_and_returns_the_lifetime():
     assert LP_ADDRESS in siwe_msg
     assert "Nonce: abc123" in siwe_msg
     assert signature.startswith("0x")
+    reset_privana_client()
+
+
+@pytest.mark.asyncio
+async def test_a_login_that_lost_its_nonce_to_another_signs_in_again():
+    reset_privana_client()
+
+    with patch("src.clients.privana.load_settings", return_value=_settings()):
+        client = get_privana_client()
+        client.get_siwe_nonce = AsyncMock(return_value=_SiweNonce(address=LP_ADDRESS, nonce="abc123"))
+        client.login_with_siwe = AsyncMock(side_effect=[
+            AccountingApiError("API request failed: 400 Bad Request", 400, "Invalid or expired nonce"),
+            _SiweLogin(siwe_token="siwe", jwt_access_token="jwt-token"),
+        ])
+
+        token, _ = await _siwe_login_as_lp()
+
+    assert token == "jwt-token"
+    assert client.get_siwe_nonce.await_count == 2
     reset_privana_client()
 
 

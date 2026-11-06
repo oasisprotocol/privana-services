@@ -230,6 +230,7 @@ class TestSwapStatusRoute:
             from_amount="1000000",
             to_amount_estimate="495000000000000",
             status="completed",
+            step="credit:sent",
             swap_tx_hash="0x" + "ff" * 32,
             created_at=1000,
             updated_at=1000,
@@ -245,6 +246,7 @@ class TestSwapStatusRoute:
             data = r.json()
             assert data["swap_id"] == "swap-456"
             assert data["status"] == "completed"
+            assert data["step"] == "credit:sent"
 
     async def test_a_refunded_swap_explains_itself_without_internal_detail(self, api_client):
         swap = SwapRecord(

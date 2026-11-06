@@ -50,6 +50,7 @@ class SwapResponse(BaseModel):
 class SwapStatusResponse(BaseModel):
     swap_id: str
     status: str
+    step: Optional[str] = None
     from_token_id: str
     to_token_id: str
     from_amount: str

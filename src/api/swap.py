@@ -76,6 +76,7 @@ async def get_swap_status(swap_id: str) -> SwapStatusResponse:
         return SwapStatusResponse(
             swap_id=swap.id,
             status=swap.status,
+            step=swap.step,
             from_token_id=swap.from_token_id,
             to_token_id=swap.to_token_id,
             from_amount=swap.from_amount,

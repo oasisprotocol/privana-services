@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import threading
 from typing import Dict, Optional
@@ -5,6 +6,7 @@ from typing import Dict, Optional
 from eth_account import Account
 from sapphirepy import sapphire
 from web3 import Web3
+from web3.exceptions import ContractLogicError
 from web3.middleware import SignAndSendRawMiddlewareBuilder
 
 from src.core.config import load_settings
@@ -15,6 +17,33 @@ DEFAULT_GAS_LIMIT = 500_000
 
 # Also serializes Earn submissions using the same signer.
 _submission_lock = threading.Lock()
+
+_TRANSIENT_READ_ATTEMPTS = 10
+_TRANSIENT_READ_BACKOFF_SEC = 1.0
+
+
+async def call_with_transient_retry(factory, op: str):
+    """Run an idempotent confidential read, retrying transient RPC failures.
+
+    The Sapphire RPC resets connections left idle, failing the next read.
+    Contract-level reverts are not transient and re-raise immediately.
+    """
+    for attempt in range(1, _TRANSIENT_READ_ATTEMPTS + 1):
+        try:
+            return await factory()
+        except ContractLogicError:
+            raise
+        except Exception as exc:
+            if attempt == _TRANSIENT_READ_ATTEMPTS:
+                raise
+            logger.warning(
+                "Transient %s read failure (attempt %d/%d), retrying: %s",
+                op,
+                attempt,
+                _TRANSIENT_READ_ATTEMPTS,
+                exc,
+            )
+            await asyncio.sleep(_TRANSIENT_READ_BACKOFF_SEC * attempt)
 
 
 def sapphire_http_provider(rpc_url: str, headers: Dict[str, str]) -> Web3.HTTPProvider:

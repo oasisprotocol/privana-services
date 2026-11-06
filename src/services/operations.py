@@ -69,10 +69,7 @@ _EARN_SELECT = """
 def _operation(row) -> UnsettledOperation:
     fields = dict(row)
     if fields["operation_type"] == "swap":
-        fields["reason"], fields["error"] = swap_failure(
-            fields["operation_id"], fields["status"], fields.pop("step"),
-        )
-    fields.pop("step", None)
+        fields["reason"], fields["error"] = swap_failure(fields["operation_id"], fields["status"], fields["step"])
     return UnsettledOperation(**fields)
 
 

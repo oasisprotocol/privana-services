@@ -1,13 +1,22 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from eth_account import Account
 from eth_account.messages import encode_defunct
 from privana import DepositAddressRequest, DepositCheckRequest, PrivanaClient
+from privana.client.errors import AccountingApiError
 
 from src.core.config import load_settings
+
+logger = logging.getLogger(__name__)
+
+# Privana hands every login as one address the same nonce until one uses it,
+# so a login racing another as the same account (the LP is also the pool
+# admin) is refused and signs in again with a fresh nonce.
+LOGIN_ATTEMPTS = 3
 
 # rofl-proxy cuts each connection 45 s after it opens, even mid-request, so
 # each request gets its own.
@@ -108,11 +117,22 @@ async def _siwe_login(
     bearer token, and borrowing the authenticated one would re-enter the very
     login this is serving.
     """
-    settings = load_settings()
     if not secret_key:
         raise RuntimeError(f"privana SIWE auth requires {setting_name} to be set")
 
     client = get_privana_client()
+    for attempt in range(1, LOGIN_ATTEMPTS + 1):
+        try:
+            return await _siwe_login_once(client, secret_key, address)
+        except AccountingApiError as exc:
+            if attempt == LOGIN_ATTEMPTS:
+                raise
+            logger.warning("privana login as %s refused (attempt %d/%d), signing in again: %s",
+                           address, attempt, LOGIN_ATTEMPTS, exc)
+
+
+async def _siwe_login_once(client: PrivanaClient, secret_key: str, address: str) -> tuple[str, int]:
+    settings = load_settings()
     nonce = (await client.get_siwe_nonce(address)).nonce
 
     now = datetime.now(timezone.utc)

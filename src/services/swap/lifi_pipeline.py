@@ -622,21 +622,20 @@ def _delivered(status: dict, to_info: Any, recipient: str) -> Optional[dict]:
 
 
 def _transferred(logs: list, token: Optional[str], recipient: str, receiving: dict) -> int:
-    """What the delivery tx's `logs` transferred `recipient` in `token`."""
-    amount = 0
-    if not is_native(token):
-        for log in logs:
-            topics = log["topics"]
-            if (
-                log["address"].lower() == token.lower()
-                and len(topics) == 3
-                and HexBytes(topics[0]) == ERC20_TRANSFER_TOPIC
-                and HexBytes(topics[2])[-20:] == HexBytes(recipient)
-            ):
-                amount += int.from_bytes(HexBytes(log["data"]), "big")
-    if not amount:
+    """What the delivery tx's `logs` transferred `recipient` in `token`. A
+    solver can fill several routes in one tx, so more than one such transfer
+    cannot be told apart and raises."""
+    amounts = [] if is_native(token) else [
+        int.from_bytes(HexBytes(log["data"]), "big")
+        for log in logs
+        if log["address"].lower() == token.lower()
+        and len(log["topics"]) == 3
+        and HexBytes(log["topics"][0]) == ERC20_TRANSFER_TOPIC
+        and HexBytes(log["topics"][2])[-20:] == HexBytes(recipient)
+    ]
+    if len(amounts) != 1:
         raise RuntimeError(f"delivered elsewhere: {receiving}")
-    return amount
+    return amounts[0]
 
 
 def _net_min(exec_quote: dict, fee_bps: int) -> int:

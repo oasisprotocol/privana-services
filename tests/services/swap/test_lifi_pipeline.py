@@ -225,5 +225,7 @@ def test_a_route_that_swaps_after_the_bridge_is_read_from_the_delivery_tx():
             transfer(target, LP, 548_427)]
 
     assert _transferred(logs, target, LP, {}) == 548_427
-    with pytest.raises(RuntimeError, match="delivered elsewhere"):
-        _transferred(logs[:2], target, LP, {})
+    # None, or two that one solver tx may have paid for two routes.
+    for unclear in (logs[:2], logs + [transfer(target, LP, 1)]):
+        with pytest.raises(RuntimeError, match="delivered elsewhere"):
+            _transferred(unclear, target, LP, {})

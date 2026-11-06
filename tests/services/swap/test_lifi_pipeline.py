@@ -16,6 +16,7 @@ from src.services.swap.lifi_pipeline import (
     _holds,
     _slippage_bps_to_floor,
     _swap_output,
+    _transferred,
 )
 from tests.services.swap.world import BASE, TOKENS, USDC, WETH
 
@@ -196,7 +197,7 @@ def _done(chain_id=BASE, to=LP, token=None, substatus="COMPLETED"):
 def test_a_bridge_delivers_what_lifi_reports_once_it_is_done():
     assert _delivered({"status": "PENDING", "substatus": "WAIT_DESTINATION_TRANSACTION"}, TOKENS[WETH], LP) is None
     assert _delivered({}, TOKENS[WETH], LP) is None
-    assert _delivered(_done(), TOKENS[WETH], LP) == 60_000
+    assert _delivered(_done(), TOKENS[WETH], LP)["amount"] == "60000"
 
 
 @pytest.mark.parametrize("status", [
@@ -206,8 +207,23 @@ def test_a_bridge_delivers_what_lifi_reports_once_it_is_done():
     _done(substatus="REFUNDED"),
     _done(to="0x" + "77" * 20),
     _done(chain_id=10),
-    _done(token="0x" + "99" * 20),
-], ids=["failed", "invalid", "partial", "refunded", "another recipient", "another chain", "another token"])
+], ids=["failed", "invalid", "partial", "refunded", "another recipient", "another chain"])
 def test_anything_but_a_full_delivery_to_the_lp_is_refused(status):
     with pytest.raises(RuntimeError):
         _delivered(status, TOKENS[WETH], LP)
+
+
+def test_a_route_that_swaps_after_the_bridge_is_read_from_the_delivery_tx():
+    # LiFi reports the bridged WETH; the tx then swaps it and pays the LP in the target.
+    target = TOKENS[USDC].token_address
+
+    def transfer(token, to, amount):
+        return {"address": token, "data": HexBytes(amount.to_bytes(32, "big")),
+                "topics": [lifi_pipeline.ERC20_TRANSFER_TOPIC, HexBytes("00" * 32), HexBytes("00" * 12) + HexBytes(to)]}
+
+    logs = [transfer(TOKENS[WETH].token_address, LP, 9), transfer(target, "0x" + "77" * 20, 5),
+            transfer(target, LP, 548_427)]
+
+    assert _transferred(logs, target, LP, {}) == 548_427
+    with pytest.raises(RuntimeError, match="delivered elsewhere"):
+        _transferred(logs[:2], target, LP, {})

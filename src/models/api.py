@@ -50,6 +50,22 @@ class SwapResponse(BaseModel):
 class SwapStatusResponse(BaseModel):
     swap_id: str
     status: str
+    # Where the swap is (SwapStep), empty while scheduled:
+    #   internal_swap:pricing  internal swap being priced
+    #   internal_swap:sent     internal swap sent
+    #   input:sent             user's funds being taken
+    #   withdraw:sent          funds being withdrawn from Privana
+    #   execute:funding        waiting for the withdrawn funds to arrive
+    #   execute:sent           lifi swap sent
+    #   execute:bridging       waiting for the bridge
+    #   deposit:sent           output being deposited into Privana
+    #   deposit:crediting      waiting for Privana to credit the deposit
+    #   credit:sent            output being credited to the user
+    #   refund:redeposit       input being deposited back into Privana
+    #   refund:crediting       waiting for Privana to credit it
+    #   refund:payout          input being returned to the user
+    #   parked                 failed, funds are returned by hand
+    #   no_funds_moved         failed before any funds moved
     step: Optional[str] = None
     from_token_id: str
     to_token_id: str

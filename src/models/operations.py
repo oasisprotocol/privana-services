@@ -25,6 +25,8 @@ class UnsettledOperation(BaseModel):
     # For swaps: price_moved, no_funds_moved, delayed or under_review, with
     # `error` the matching sentence for users rather than the internal error.
     reason: Optional[str] = None
+    # Where a swap is, as in GET /v1/swap/{id}/status. Empty for earn.
+    step: Optional[str] = None
 
     quote_id: Optional[str] = None
     from_token_id: Optional[str] = None

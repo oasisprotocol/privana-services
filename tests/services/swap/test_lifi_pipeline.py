@@ -96,6 +96,15 @@ class TestSlippageFloor:
         # The minimum LiFi enforces on chain still credits the floor.
         assert calculate_fee(_min_at(dropped, narrowed), FEE_BPS)[0] >= floor
 
+    async def test_a_tiny_move_before_the_narrowed_quote_narrows_again(self, pricing):
+        dropped = int(PRICE * 0.99)
+        moved = int(dropped * 0.9995)
+        lifi = pricing(dropped, moved, moved)
+
+        await _quote(300, _floor(PRICE, 300))
+
+        assert len(lifi.asked) == 3
+
     async def test_a_further_drop_before_the_narrowed_quote_is_below_the_floor(self, pricing):
         pricing(int(PRICE * 0.99), int(PRICE * 0.95))
 

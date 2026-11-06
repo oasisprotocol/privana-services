@@ -96,6 +96,9 @@ BRIDGE_WAIT_SEC = 4320
 # Accounting credits a deposit once it is final on its chain and swept:
 # Ethereum finality plus the sweep can take most of an hour.
 CREDITING_WAIT_SEC = 3600
+# LiFi quotes a second apart can differ slightly: slippage is narrowed again
+# from each new quote, at most this many times.
+NARROW_ATTEMPTS = 3
 
 # Emitted by the LiFi diamond for a same-chain swap (lifinance/contracts ILiFi.sol).
 SWAP_COMPLETED_TOPIC = Web3.keccak(
@@ -467,13 +470,16 @@ async def _execution_quote(
     # The floor came from a route priced at this slippage. A different one
     # moves toAmountMin, not the price.
     exec_quote = await lifi.get_execution_quote(**request, slippage_bps=slippage_bps)
-    if _net_min(exec_quote, fee_bps) < floor:
+    for _ in range(NARROW_ATTEMPTS):
+        if _net_min(exec_quote, fee_bps) >= floor:
+            break
         # The price fell since the quote. Spend less of the tolerance so
         # the minimum LiFi enforces on chain still pays out the floor.
         narrowed_bps = _slippage_bps_to_floor(int(exec_quote["estimate"]["toAmount"]), floor, fee_bps)
-        if narrowed_bps is not None:
-            logger.info("lifi swap %s narrowing slippage to %s bps", swap_id, narrowed_bps)
-            exec_quote = await lifi.get_execution_quote(**request, slippage_bps=narrowed_bps)
+        if narrowed_bps is None:
+            break
+        logger.info("lifi swap %s narrowing slippage to %s bps", swap_id, narrowed_bps)
+        exec_quote = await lifi.get_execution_quote(**request, slippage_bps=narrowed_bps)
     net_min = _net_min(exec_quote, fee_bps)
     if net_min < floor:
         raise BelowFloor(f"execution quote below floor: net_min={net_min} floor={floor}")

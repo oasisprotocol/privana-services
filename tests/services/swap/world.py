@@ -357,7 +357,7 @@ class World:
         rows = {row["owner"].rsplit(":", 1)[1]: dict(row) for row in get_db().execute(
             "SELECT * FROM privana_transactions WHERE owner LIKE ?", (f"swap:{swap_id}:%",))}
         withdrawal = get_db().execute(
-            "SELECT p.* FROM privana_transactions p JOIN swaps s ON p.owner = s.withdraw_owner WHERE s.id = ?",
+            "SELECT p.* FROM privana_transactions p JOIN swaps s ON p.owner = s.withdraw_batch_id WHERE s.id = ?",
             (swap_id,)).fetchone()
         if withdrawal:
             rows["withdraw"] = dict(withdrawal)

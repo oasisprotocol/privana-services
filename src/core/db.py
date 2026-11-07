@@ -164,7 +164,7 @@ MIGRATIONS = [
     "ALTER TABLE swaps ADD COLUMN to_amount_executed TEXT;",
     # The owner of the withdrawal a LiFi swap's input goes out in: one
     # withdrawal carries the inputs of every swap of a token waiting for one.
-    "ALTER TABLE swaps ADD COLUMN withdraw_owner TEXT;",
+    "ALTER TABLE swaps ADD COLUMN withdraw_batch_id TEXT;",
     # Txs queued for the EVM batcher of an account. `attempts` lists every
     # signed version as `nonce:hash`, space-separated, each saved before its
     # broadcast: a later round finds a mined one before signing again. `nonce`
@@ -216,8 +216,8 @@ MIGRATIONS = [
     # A swap queued its own withdrawal before withdrawals were batched: point
     # it at that row so the next batch never withdraws its input again.
     """
-    UPDATE swaps SET withdraw_owner = 'swap:' || id || ':withdraw'
-    WHERE withdraw_owner IS NULL
+    UPDATE swaps SET withdraw_batch_id = 'swap:' || id || ':withdraw'
+    WHERE withdraw_batch_id IS NULL
     AND EXISTS (SELECT 1 FROM privana_transactions WHERE owner = 'swap:' || swaps.id || ':withdraw');
     """,
 ]

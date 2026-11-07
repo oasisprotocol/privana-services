@@ -426,7 +426,7 @@ async def test_a_withdrawal_cancelled_while_the_lane_reads_the_nonce_is_never_se
     cancelled = []
 
     async def cancelled_meanwhile():
-        cancelled.append(privana_lanes.cancel_queued(f"withdraw:{swap_id}", "cancelled"))
+        cancelled.append(privana_lanes.cancel_queued(stage.owner(swap_id, lifi_pipeline.WITHDRAW), "cancelled"))
         return await counter()
 
     world.withdraw_lane._counter = cancelled_meanwhile

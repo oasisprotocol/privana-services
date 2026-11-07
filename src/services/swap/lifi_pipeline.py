@@ -132,17 +132,17 @@ def _batch_withdrawals() -> None:
         waiting = defaultdict(list)
         for swap in db.execute(
             "SELECT id, from_token_id, from_amount FROM swaps WHERE status = ? AND step = ? "
-            "AND withdraw_owner IS NULL ORDER BY created_at",
+            "AND withdraw_batch_id IS NULL ORDER BY created_at",
             (SwapStatus.EXECUTING.value, SwapStep.WITHDRAW_SENT.value),
         ):
             waiting[swap["from_token_id"]].append(swap)
         for token_id, swaps in waiting.items():
-            batch = f"withdraw:{swaps[0]['id']}"
+            batch = owner(swaps[0]['id'], WITHDRAW)
             privana_lanes.submit_withdrawal(db, lp, batch, token_id, sum(int(s["from_amount"]) for s in swaps))
-            db.executemany("UPDATE swaps SET withdraw_owner = ?, updated_at = ? WHERE id = ?",
+            db.executemany("UPDATE swaps SET withdraw_batch_id = ?, updated_at = ? WHERE id = ?",
                            [(batch, int(time.time()), s["id"]) for s in swaps])
     for token_id, swaps in waiting.items():
-        logger.info("withdrawal withdraw:%s queued for %d lifi swaps of %s", swaps[0]["id"], len(swaps), token_id)
+        logger.info("withdrawal %s queued for %d lifi swaps of %s", owner(swaps[0]["id"], WITHDRAW), len(swaps), token_id)
 
 
 async def execute_round(chain_id: int) -> None:
@@ -211,10 +211,10 @@ async def _settle_input(swap: dict) -> None:
 
 
 async def _settle_withdraw(swap: dict) -> None:
-    if swap["withdraw_owner"] is None:
+    if swap["withdraw_batch_id"] is None:
         # Queued in a withdrawal at the start of the next round.
         return
-    row = privana_lanes.find_privana_tx(swap["withdraw_owner"])
+    row = privana_lanes.find_privana_tx(swap["withdraw_batch_id"])
     if row["status"] == privana_lanes.LANDED:
         advance(swap, SwapStep.EXECUTE_FUNDING)
     elif row["status"] == privana_lanes.FAILED:
@@ -225,7 +225,7 @@ async def _settle_withdraw(swap: dict) -> None:
         # It may still land, so the swap can neither go on nor be refunded.
         fail(swap, SwapStep.PARKED, f"withdrawal {row['id']} not landed after {row['attempts']} sends")
     elif (row["status"] == privana_lanes.QUEUED and waited(swap, WITHDRAW_QUEUE_WAIT_SEC)
-          and privana_lanes.cancel_queued(swap["withdraw_owner"], "cancelled: not sent in time")):
+          and privana_lanes.cancel_queued(swap["withdraw_batch_id"], "cancelled: not sent in time")):
         # Never signed, so it can never land: the input is still in the LP's
         # Privana balance. The other swaps in it see it FAILED next round.
         _start_refund(swap, f"withdrawal not sent after {WITHDRAW_QUEUE_WAIT_SEC} s", SwapStep.REFUND_PAYOUT)
@@ -583,9 +583,9 @@ def _not_on_lane(swap: dict, kind: str) -> bool:
     queues its refund payout."""
     if kind != WITHDRAW:
         return privana_lanes.find_privana_tx(owner(swap["id"], kind)) is None
-    if swap["withdraw_owner"] is None:
+    if swap["withdraw_batch_id"] is None:
         return True
-    return privana_lanes.find_privana_tx(swap["withdraw_owner"])["status"] == privana_lanes.FAILED
+    return privana_lanes.find_privana_tx(swap["withdraw_batch_id"])["status"] == privana_lanes.FAILED
 
 
 def _swap_intent(owner: str, chain_id: int, request: dict, simulate: bool) -> TxIntent:

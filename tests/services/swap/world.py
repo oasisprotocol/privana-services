@@ -354,8 +354,14 @@ class World:
             "SELECT owner FROM evm_transactions WHERE owner LIKE ? ORDER BY id", (f"swap:{swap_id}:%",))]
 
     def lane_rows(self, swap_id: str) -> dict[str, dict]:
-        return {row["owner"].rsplit(":", 1)[1]: dict(row) for row in get_db().execute(
+        rows = {row["owner"].rsplit(":", 1)[1]: dict(row) for row in get_db().execute(
             "SELECT * FROM privana_transactions WHERE owner LIKE ?", (f"swap:{swap_id}:%",))}
+        withdrawal = get_db().execute(
+            "SELECT p.* FROM privana_transactions p JOIN swaps s ON p.owner = s.withdraw_batch_id WHERE s.id = ?",
+            (swap_id,)).fetchone()
+        if withdrawal:
+            rows["withdraw"] = dict(withdrawal)
+        return rows
 
     def paid(self, user) -> list[tuple[str, int]]:
         """What the LP's landed writes paid `user`: (token, amount) each."""

@@ -15,8 +15,9 @@ For callers:
 - `submit_privana(signer, *intents)` queues transfer lane rows built by
   `transfer_balance_intent` or `swap_intent` and returns their ids. `signer`
   is the account whose transfer nonce the row spends, which sends it too.
-- `submit_withdrawal(signer, owner, token_id, amount)` queues a withdrawal of
-  `signer`'s balance to its own address on the token's chain.
+- `submit_withdrawal(conn, signer, owner, token_id, amount)` queues a
+  withdrawal of `signer`'s balance to its own address on the token's chain,
+  inside the caller's `db_transaction`.
 - `find_privana_tx(owner)` is the row: `status` stays QUEUED or SENT until
   it is LANDED or FAILED, with `error` saying why. A withdrawal the lane
   stopped resending stays SENT with `error` WITHDRAW_GIVEN_UP.
@@ -139,22 +140,18 @@ def submit_privana(signer: str, *intents: PrivanaIntent) -> list[int]:
     return ids
 
 
-def submit_withdrawal(signer: str, owner: str, token_id: str, amount: int) -> int:
-    """Queue a withdrawal of `amount` of `token_id` from `signer`'s balance
-    and return its id."""
+def submit_withdrawal(conn: sqlite3.Connection, signer: str, owner: str, token_id: str, amount: int) -> None:
+    """Queue a withdrawal of `amount` of `token_id` from `signer`'s balance,
+    in the caller's `db_transaction` so it commits with the caller's writes."""
     signer = signer.lower()
     if signer not in _withdraw_lanes():
         raise ValueError(f"no withdraw lane for {signer}")
     now = int(time.time())
-    db_write(
-        get_db(),
+    conn.execute(
         "INSERT INTO privana_transactions (signer, owner, kind, payload, created_at, updated_at) "
         "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(owner) DO NOTHING",
         (signer, owner, WITHDRAW, json.dumps({"token": token_id, "amount": amount}), now, now),
     )
-    row_id = find_privana_tx(owner)["id"]
-    logger.info("privana withdraw lane %s queued withdrawal %d for %s", signer, row_id, owner)
-    return row_id
 
 
 def cancel_queued(owner: str, error: str) -> bool:

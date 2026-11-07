@@ -247,6 +247,7 @@ def main():
         port=settings.api_port,
         reload=settings.environment.lower() == "development",
         log_level=settings.log_level.lower(),
+        use_colors=False,
     )
 
 

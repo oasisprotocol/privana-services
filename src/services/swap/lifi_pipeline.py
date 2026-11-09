@@ -36,7 +36,6 @@ from src.clients.evm_batcher import (
 )
 from src.clients.lifi import LIFI_DEFAULT_SLIPPAGE_BPS, get_lifi_client
 from src.clients.privana import (
-    DEPOSIT_CREDITED,
     check_deposit,
     deposit_address,
     get_swap_lp_privana_client,
@@ -311,7 +310,7 @@ async def _settle_bridge(swap: dict) -> None:
 async def _deposit(swap: dict) -> None:
     amount = int(swap["to_amount_received"])
     if swap["step"] == SwapStep.DEPOSIT_CREDITING.value:
-        await _check_credited(swap, DEPOSIT, amount, SwapStep.CREDIT_SENT)
+        await _check_credited(swap, DEPOSIT, swap["to_token_id"], amount, SwapStep.CREDIT_SENT)
         return
     tx = find_evm_tx(owner(swap["id"], DEPOSIT))
     if tx is None:
@@ -352,7 +351,7 @@ def _start_refund(swap: dict, reason: str, step: SwapStep) -> None:
 async def _refund(swap: dict) -> None:
     amount = int(swap["from_amount"])
     if swap["step"] == SwapStep.REFUND_CREDITING.value:
-        await _check_credited(swap, REFUND, amount, SwapStep.REFUND_PAYOUT)
+        await _check_credited(swap, REFUND, swap["from_token_id"], amount, SwapStep.REFUND_PAYOUT)
         return
     if swap["step"] == SwapStep.REFUND_PAYOUT.value:
         _settle_refund_payout(swap, amount)
@@ -402,19 +401,40 @@ def _settle_deposit(swap: dict, tx: dict, crediting: SwapStep) -> None:
         fail(swap, SwapStep.PARKED, f"deposit tx {tx['status']}: {sanitize_error(tx['error'] or tx['tx_hash'])}")
 
 
-async def _check_credited(swap: dict, kind: str, amount: int, then: SwapStep) -> None:
-    """One deposit check per round."""
+async def _check_credited(swap: dict, kind: str, token_id: str, amount: int, then: SwapStep) -> None:
+    """One claim per round. Accounting sweeps the LP's whole finalized balance
+    of the token, other swaps' deposits with it, and answers "pending" while a
+    sweep is unfinished. Only a sweep moves funds out of the deposit address,
+    so a "none" once it holds less than this deposit means a finished sweep
+    took it, whatever finality Accounting waits for."""
     tx = find_evm_tx(owner(swap["id"], kind))
+    info = await get_accounting_client().get_token_info(token_id)
     try:
-        status = (await check_deposit(await get_swap_lp_privana_client(), tx["chain_id"], tx["tx_hash"], amount)).status
+        client = await get_swap_lp_privana_client()
+        status = (await check_deposit(client, info.chain_id, info.token_address)).status
+        if status == "none" and await _holds_less(info, await deposit_address(client), tx["tx_hash"], amount):
+            advance(swap, then)
+            return
     except (AccountingApiError, NetworkError) as exc:
-        # Refused until the deposit is final on its chain.
         status = f"not accepted: {scrub_urls(str(exc))}"
         logger.warning("lifi swap %s deposit %s %s", swap["id"], tx["tx_hash"], status)
-    if status == DEPOSIT_CREDITED:
-        advance(swap, then)
-    elif waited(swap, CREDITING_WAIT_SEC):
+    if waited(swap, CREDITING_WAIT_SEC):
         fail(swap, SwapStep.PARKED, f"deposit {tx['tx_hash']} not credited after {CREDITING_WAIT_SEC} s: {status}")
+
+
+async def _holds_less(info: Any, holder: str, tx_hash: str, amount: int) -> bool:
+    """Whether `holder` holds less than `amount` of the token, read at a block
+    that has `tx_hash`: a node behind it would not show the deposit yet."""
+    evm = get_evm_client(info.chain_id)
+    try:
+        receipt = await asyncio.to_thread(evm.get_receipt, tx_hash)
+        block = await asyncio.to_thread(lambda: evm.w3.eth.block_number)
+        if receipt is None or block < receipt["blockNumber"]:
+            return False
+        return await asyncio.to_thread(evm.balance_of, info.token_address, holder, block) < amount
+    except Exception as exc:
+        logger.warning("balance of %s on chain %s unavailable: %s", holder, info.chain_id, scrub_urls(str(exc)))
+        return False
 
 
 def _retry_for_gas(swap: dict, *txs: Optional[dict]) -> bool:

@@ -34,8 +34,8 @@ def test_records_each_stage_in_order_for_the_tracked_operation(test_db):
 def test_a_repeated_stage_updates_its_detail_instead_of_adding_an_entry(test_db):
     _row(test_db)
     with progress.tracking("tx-1"):
-        progress.update_finality("400 Bad Request: Insufficient finality: 9/32 confirmations")
-        progress.update_finality("400 Bad Request: Insufficient finality: 20/32 confirmations")
+        progress.update(progress.FINALITY, {"confirmations": 9, "required": 32})
+        progress.update(progress.FINALITY, {"confirmations": 20, "required": 32})
 
     stages = _stages(test_db)
     assert len(stages) == 1
@@ -46,14 +46,6 @@ def test_a_repeated_stage_updates_its_detail_instead_of_adding_an_entry(test_db)
 def test_reports_nothing_outside_a_tracked_operation(test_db):
     _row(test_db)
     progress.update(progress.BRIDGING)
-
-    assert _stages(test_db) == []
-
-
-def test_an_error_without_a_confirmation_count_is_ignored(test_db):
-    _row(test_db)
-    with progress.tracking("tx-1"):
-        progress.update_finality("connection reset")
 
     assert _stages(test_db) == []
 

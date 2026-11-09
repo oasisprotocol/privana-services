@@ -46,6 +46,7 @@ ETHEREUM = 1
 SWAP_MANAGER = "0x" + "5a" * 20
 DIAMOND = "0x1231DEB6f5749EF6cE6943a275A1D3E7486F4EaE"
 DEPOSIT_ADDRESS = "0x" + "dd" * 20
+SWEEP_ID = "0x" + "5e" * 32
 USDC = "0x" + "aa" * 32
 WETH = "0x" + "bb" * 32
 ETH_WETH = "0x" + "cc" * 32
@@ -195,14 +196,16 @@ class Lifi:
 
 class PrivanaApi(FakeApi):
     """The Privana API as the LP's client: its withdrawals reach the LP's
-    wallet at once unless `relay_paused`, and a deposit is credited once its
-    tx is mined."""
+    wallet at once unless `relay_paused`, and a claim sweeps and credits every
+    mined transfer of the token to the deposit address at once. Unless `final`,
+    a claim finds nothing yet; unless `credits`, its sweep never finishes."""
 
     def __init__(self, world: "World") -> None:
         super().__init__(world.ledger, world.lp_address.lower())
         self.world = world
         self.relay_paused = False
         self.credits = True
+        self.final = True
         self.credited: set[str] = set()
 
     async def request_withdrawal(self, request):
@@ -217,20 +220,35 @@ class PrivanaApi(FakeApi):
     async def get_deposit_address(self, request=None):
         return SimpleNamespace(deposit_address=DEPOSIT_ADDRESS)
 
+    def _arrived(self, chain_id: int, token_address: str) -> dict[str, int]:
+        """The mined transfers of the token to the deposit address not swept yet."""
+        chain = self.world.chains[chain_id]
+        arrived = {}
+        for raw in chain.sent:
+            tx, tx_hash = decode(raw), hash_of(raw)
+            receipt = chain.receipts.get(tx_hash)
+            if receipt is None or receipt["status"] != 1 or tx_hash in self.credited \
+                    or Web3.to_checksum_address(tx["to"]).lower() != token_address.lower():
+                continue
+            call, args = _ERC20.decode_function_input(Web3.to_hex(tx["data"]))
+            if call.fn_name == "transfer" and args["to"].lower() == DEPOSIT_ADDRESS.lower():
+                arrived[tx_hash] = args["amount"]
+        return arrived
+
+    def held(self, chain_id: int, token_address: str) -> int:
+        return sum(self._arrived(chain_id, token_address).values())
+
     async def check_deposit(self, request):
-        chain = self.world.chains[request.chain_id]
-        receipt = chain.receipts.get(request.tx_hash)
-        raw = next(r for r in chain.sent if hash_of(r) == request.tx_hash)
-        _, transfer = _ERC20.decode_function_input(Web3.to_hex(decode(raw)["data"]))
-        # Only a transfer of the reported amount to the deposit address is credited.
-        to_us = (transfer["to"].lower(), transfer["amount"]) == (DEPOSIT_ADDRESS.lower(), request.amount)
-        credited = self.credits and receipt is not None and receipt["status"] == 1 and to_us
-        if credited and request.tx_hash not in self.credited:
-            self.credited.add(request.tx_hash)
-            token = next(t for t, info in TOKENS.items() if info.chain_id == request.chain_id
-                         and info.token_address.lower() == Web3.to_checksum_address(decode(raw)["to"]).lower())
-            self.contracts.balances[(self.signer, token)] += request.amount
-        return SimpleNamespace(status="credited" if credited else "pending", detail=None)
+        if not self.credits:
+            return SimpleNamespace(status="pending", deposit_id=SWEEP_ID, amount=None, detail=None)
+        arrived = self._arrived(request.chain_id, request.token_address) if self.final else {}
+        if not arrived:
+            return SimpleNamespace(status="none", deposit_id=None, amount="0", detail="No finalized balance")
+        self.credited.update(arrived)
+        token = next(t for t, info in TOKENS.items() if info.chain_id == request.chain_id
+                     and info.token_address.lower() == request.token_address.lower())
+        self.contracts.balances[(self.signer, token)] += sum(arrived.values())
+        return SimpleNamespace(status="pending", deposit_id=SWEEP_ID, amount=str(sum(arrived.values())), detail=None)
 
 
 class World:
@@ -291,7 +309,9 @@ class World:
             evm.__dict__["_signed_calls"] = SimpleNamespace(eth=chain)
             if chain_id != SAPPHIRE_CHAIN_ID:
                 wallet = self.wallets[chain_id]
-                evm.balance_of = lambda token, owner, wallet=wallet: wallet.balances[token.lower()]
+                evm.balance_of = lambda token, owner, block="latest", wallet=wallet, chain_id=chain_id: (
+                    self.api.held(chain_id, token) if owner.lower() == DEPOSIT_ADDRESS.lower()
+                    else wallet.balances[token.lower()])
                 evm.max_gas_cost = lambda gas: gas
             hook = privana_lanes.run_transfer_lanes if chain_id == SAPPHIRE_CHAIN_ID else None
             self.senders[chain_id] = EvmBatcher(evm, self.db, threading.Event(), hook)

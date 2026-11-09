@@ -55,12 +55,12 @@ class EvmClient:
     def sapphire(self) -> bool:
         return self.chain_id in SAPPHIRE_CHAIN_IDS
 
-    def balance_of(self, token: Optional[str], owner: str) -> int:
+    def balance_of(self, token: Optional[str], owner: str, block: int | str = "latest") -> int:
         owner = Web3.to_checksum_address(owner)
         if is_native(token):
-            return self.w3.eth.get_balance(owner)
+            return self.w3.eth.get_balance(owner, block)
         contract = self.w3.eth.contract(address=Web3.to_checksum_address(token), abi=ERC20_ABI)
-        return contract.functions.balanceOf(owner).call()
+        return contract.functions.balanceOf(owner).call(block_identifier=block)
 
     def get_receipt(self, tx_hash: str) -> Optional[TxReceipt]:
         try:

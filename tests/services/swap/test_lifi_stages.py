@@ -446,7 +446,9 @@ async def test_a_price_below_the_floor_refunds_before_anything_is_sent(world):
     assert world.paid(USER) == [(USDC, AMOUNT)]
 
 
-async def test_a_bridge_credits_what_lifi_delivered_on_the_output_chain(world):
+async def test_a_bridge_credits_what_its_delivery_tx_paid_the_lp(world):
+    # LiFi has reported the right token but less than the solver paid.
+    world.lifi.reported = {"amount": "59000"}
     swap_id = await world.schedule("lifi", to_token=ETH_WETH)
 
     swap = await world.until(swap_id, "completed")

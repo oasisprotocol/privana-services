@@ -305,11 +305,14 @@ async def _settle_bridge(swap: dict) -> None:
         receiving = _delivered(status, to_info, recipient)
         if receiving is None:
             return
-        if receiving["token"]["address"].lower() == _lifi_token(to_info.token_address).lower():
+        if is_native(to_info.token_address):
+            # A native payout leaves no log: only LiFi's report shows it.
+            if not is_native(receiving["token"]["address"]):
+                raise RuntimeError(f"delivered elsewhere: {receiving}")
             received = int(receiving["amount"])
         else:
-            # A route that swaps after the bridge reports the bridged token:
-            # what reached the LP is in the delivery tx.
+            # LiFi may report the bridged token, or an amount other than what
+            # was paid: what reached the LP is in the delivery tx.
             evm = get_evm_client(to_info.chain_id)
             receipt = await asyncio.to_thread(evm.get_receipt, receiving["txHash"])
             if receipt is None:
@@ -621,11 +624,11 @@ def _delivered(status: dict, to_info: Any, recipient: str) -> Optional[dict]:
     return None
 
 
-def _transferred(logs: list, token: Optional[str], recipient: str, receiving: dict) -> int:
+def _transferred(logs: list, token: str, recipient: str, receiving: dict) -> int:
     """What the delivery tx's `logs` transferred `recipient` in `token`. A
     solver can fill several routes in one tx, so more than one such transfer
     cannot be told apart and raises."""
-    amounts = [] if is_native(token) else [
+    amounts = [
         int.from_bytes(HexBytes(log["data"]), "big")
         for log in logs
         if log["address"].lower() == token.lower()

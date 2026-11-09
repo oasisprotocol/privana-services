@@ -601,6 +601,31 @@ async def test_a_claim_that_leaves_the_deposit_at_the_address_is_no_credit(world
     assert world.paid(USER) == []
 
 
+async def test_a_sweep_another_swap_starts_mid_check_is_not_taken_for_credited(world, monkeypatch):
+    claim = world.api.check_deposit
+    world.api.final = False
+    swap_id = await world.schedule("lifi")
+    await world.until(swap_id, "deposit:crediting")
+
+    async def then_another_swap_sweeps(request):
+        answer = await claim(request)
+        world.api.final = True
+        world.api.start_sweep(request.chain_id, request.token_address)
+        return answer
+
+    monkeypatch.setattr(world.api, "check_deposit", then_another_swap_sweeps)
+    await world.run()
+    monkeypatch.setattr(world.api, "check_deposit", claim)
+    await world.run(2)
+
+    assert world.swap(swap_id)["step"] == "deposit:crediting"
+    assert world.paid(USER) == []
+
+    world.api.finish_sweeps()
+    await world.until(swap_id, "completed")
+    assert world.paid(USER) == [(WETH, NET)]
+
+
 async def test_a_node_behind_the_deposit_never_reads_it_as_swept(monkeypatch):
     evm = SimpleNamespace(w3=SimpleNamespace(eth=SimpleNamespace(block_number=9)),
                           get_receipt=lambda tx_hash: {"blockNumber": 10},

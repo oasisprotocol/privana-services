@@ -16,7 +16,6 @@ from typing import Any, Optional
 import httpx
 from eth_abi import decode
 from hexbytes import HexBytes
-from privana.client.errors import AccountingApiError, NetworkError
 from web3 import Web3
 
 from src.clients import evm_batcher, privana_lanes
@@ -405,18 +404,20 @@ async def _check_credited(swap: dict, kind: str, token_id: str, amount: int, the
     """One claim per round. Accounting sweeps the LP's whole finalized balance
     of the token, other swaps' deposits with it, and answers "pending" while a
     sweep is unfinished. Only a sweep moves funds out of the deposit address,
-    so a "none" once it holds less than this deposit means a finished sweep
-    took it, whatever finality Accounting waits for."""
+    so once it holds less than this deposit, a "none" from a later claim means
+    the sweep that took it was credited. Read before claiming: a sweep started
+    between the claim and the read would pass for a credited one."""
     tx = find_evm_tx(owner(swap["id"], kind))
-    info = await get_accounting_client().get_token_info(token_id)
     try:
+        info = await get_accounting_client().get_token_info(token_id)
         client = await get_swap_lp_privana_client()
+        gone = await _holds_less(info, await deposit_address(client), tx["tx_hash"], amount)
         status = (await check_deposit(client, info.chain_id, info.token_address)).status
-        if status == "none" and await _holds_less(info, await deposit_address(client), tx["tx_hash"], amount):
+        if gone and status == "none":
             advance(swap, then)
             return
-    except (AccountingApiError, NetworkError) as exc:
-        status = f"not accepted: {scrub_urls(str(exc))}"
+    except Exception as exc:
+        status = f"unavailable: {scrub_urls(str(exc))}"
         logger.warning("lifi swap %s deposit %s %s", swap["id"], tx["tx_hash"], status)
     if waited(swap, CREDITING_WAIT_SEC):
         fail(swap, SwapStep.PARKED, f"deposit {tx['tx_hash']} not credited after {CREDITING_WAIT_SEC} s: {status}")

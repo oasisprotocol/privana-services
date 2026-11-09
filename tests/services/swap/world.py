@@ -198,7 +198,9 @@ class PrivanaApi(FakeApi):
     """The Privana API as the LP's client: its withdrawals reach the LP's
     wallet at once unless `relay_paused`, and a claim sweeps and credits every
     mined transfer of the token to the deposit address at once. Unless `final`,
-    a claim finds nothing yet; unless `credits`, its sweep never finishes."""
+    a claim finds nothing yet; unless `credits`, its sweep never finishes. A
+    sweep from `start_sweep` empties the address and answers "pending" until
+    `finish_sweeps` credits it."""
 
     def __init__(self, world: "World") -> None:
         super().__init__(world.ledger, world.lp_address.lower())
@@ -207,6 +209,7 @@ class PrivanaApi(FakeApi):
         self.credits = True
         self.final = True
         self.credited: set[str] = set()
+        self.sweeping: dict[tuple[int, str], dict[str, int]] = {}
 
     async def request_withdrawal(self, request):
         before = self.contracts.withdrawal_nonces[self.signer]
@@ -227,7 +230,8 @@ class PrivanaApi(FakeApi):
         for raw in chain.sent:
             tx, tx_hash = decode(raw), hash_of(raw)
             receipt = chain.receipts.get(tx_hash)
-            if receipt is None or receipt["status"] != 1 or tx_hash in self.credited \
+            swept = any(tx_hash in hashes for hashes in self.sweeping.values())
+            if receipt is None or receipt["status"] != 1 or tx_hash in self.credited or swept \
                     or Web3.to_checksum_address(tx["to"]).lower() != token_address.lower():
                 continue
             call, args = _ERC20.decode_function_input(Web3.to_hex(tx["data"]))
@@ -238,17 +242,28 @@ class PrivanaApi(FakeApi):
     def held(self, chain_id: int, token_address: str) -> int:
         return sum(self._arrived(chain_id, token_address).values())
 
+    def start_sweep(self, chain_id: int, token_address: str) -> int:
+        arrived = self._arrived(chain_id, token_address)
+        if arrived:
+            self.sweeping[(chain_id, token_address.lower())] = arrived
+        return sum(arrived.values())
+
+    def finish_sweeps(self) -> None:
+        for (chain_id, token_address), arrived in self.sweeping.items():
+            token = next(t for t, info in TOKENS.items()
+                         if info.chain_id == chain_id and info.token_address.lower() == token_address)
+            self.credited.update(arrived)
+            self.contracts.balances[(self.signer, token)] += sum(arrived.values())
+        self.sweeping = {}
+
     async def check_deposit(self, request):
-        if not self.credits:
+        if not self.credits or (request.chain_id, request.token_address.lower()) in self.sweeping:
             return SimpleNamespace(status="pending", deposit_id=SWEEP_ID, amount=None, detail=None)
-        arrived = self._arrived(request.chain_id, request.token_address) if self.final else {}
-        if not arrived:
+        swept = self.start_sweep(request.chain_id, request.token_address) if self.final else 0
+        if not swept:
             return SimpleNamespace(status="none", deposit_id=None, amount="0", detail="No finalized balance")
-        self.credited.update(arrived)
-        token = next(t for t, info in TOKENS.items() if info.chain_id == request.chain_id
-                     and info.token_address.lower() == request.token_address.lower())
-        self.contracts.balances[(self.signer, token)] += sum(arrived.values())
-        return SimpleNamespace(status="pending", deposit_id=SWEEP_ID, amount=str(sum(arrived.values())), detail=None)
+        self.finish_sweeps()
+        return SimpleNamespace(status="pending", deposit_id=SWEEP_ID, amount=str(swept), detail=None)
 
 
 class World:

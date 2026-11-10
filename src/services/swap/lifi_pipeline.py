@@ -11,6 +11,7 @@ import asyncio
 import json
 import logging
 import time
+from collections import defaultdict
 from typing import Any, Optional
 
 import httpx
@@ -43,7 +44,7 @@ from src.clients.privana import (
 )
 from src.clients.sapphire import DEFAULT_GAS_LIMIT
 from src.core.config import load_settings
-from src.core.db import get_db
+from src.core.db import db_transaction, get_db
 from src.core.fees import calculate_fee
 from src.core.validation import sanitize_error, scrub_urls
 from src.models.swap import SwapStatus, SwapStep, SwapVenue
@@ -85,8 +86,9 @@ _SENT_AT = {LIFI: SwapStep.EXECUTE_SENT, REFUND: SwapStep.REFUND_REDEPOSIT, DEPO
 # Scheduled swaps taken per round: the Sapphire sender of their input txs,
 # not this, sets the pace.
 CLAIM_LIMIT = 5
-# The withdraw lane sends one withdrawal at a time, and one that may still
-# land holds it: a withdrawal not signed within the hour is cancelled.
+# The withdraw lane sends one withdrawal at a time, so one withdrawal carries
+# the inputs of every swap of a token waiting for one. One that may still
+# land holds the lane: a withdrawal not signed within the hour is cancelled.
 WITHDRAW_QUEUE_WAIT_SEC = 3600
 # Funds already landed reach the LP's wallet in minutes: an input not there
 # after 30 min is redeposited, and an output or refund not there is parked.
@@ -96,6 +98,9 @@ BRIDGE_WAIT_SEC = 4320
 # Accounting credits a deposit once it is final on its chain and swept:
 # Ethereum finality plus the sweep can take most of an hour.
 CREDITING_WAIT_SEC = 3600
+# LiFi quotes a second apart can differ slightly: slippage is narrowed again
+# from each new quote, at most this many times.
+NARROW_ATTEMPTS = 3
 
 # Emitted by the LiFi diamond for a same-chain swap (lifinance/contracts ILiFi.sol).
 SWAP_COMPLETED_TOPIC = Web3.keccak(
@@ -117,7 +122,31 @@ async def input_round() -> None:
 
 
 async def withdraw_round() -> None:
+    _batch_withdrawals()
     await handle_each(swaps_at(SwapStep.WITHDRAW_SENT), _settle_withdraw)
+
+
+def _batch_withdrawals() -> None:
+    """Queue one withdrawal per token for every swap waiting without one. The
+    withdrawal and its swaps are written in one transaction, with nothing
+    awaited, so a swap is in exactly one withdrawal and its amount is fixed."""
+    lp = load_settings().liquidity_provider_address
+    db = get_db()
+    with db_transaction(db):
+        waiting = defaultdict(list)
+        for swap in db.execute(
+            "SELECT id, from_token_id, from_amount FROM swaps WHERE status = ? AND step = ? "
+            "AND withdraw_batch_id IS NULL ORDER BY created_at",
+            (SwapStatus.EXECUTING.value, SwapStep.WITHDRAW_SENT.value),
+        ):
+            waiting[swap["from_token_id"]].append(swap)
+        for token_id, swaps in waiting.items():
+            batch = owner(swaps[0]['id'], WITHDRAW)
+            privana_lanes.submit_withdrawal(db, lp, batch, token_id, sum(int(s["from_amount"]) for s in swaps))
+            db.executemany("UPDATE swaps SET withdraw_batch_id = ?, updated_at = ? WHERE id = ?",
+                           [(batch, int(time.time()), s["id"]) for s in swaps])
+    for token_id, swaps in waiting.items():
+        logger.info("withdrawal %s queued for %d lifi swaps of %s", owner(swaps[0]["id"], WITHDRAW), len(swaps), token_id)
 
 
 async def execute_round(chain_id: int) -> None:
@@ -186,11 +215,11 @@ async def _settle_input(swap: dict) -> None:
 
 
 async def _settle_withdraw(swap: dict) -> None:
-    row = privana_lanes.find_privana_tx(owner(swap["id"], WITHDRAW))
-    if row is None:
-        privana_lanes.submit_withdrawal(load_settings().liquidity_provider_address, owner(swap["id"], WITHDRAW),
-                                        swap["from_token_id"], int(swap["from_amount"]))
-    elif row["status"] == privana_lanes.LANDED:
+    if swap["withdraw_batch_id"] is None:
+        # Queued in a withdrawal at the start of the next round.
+        return
+    row = privana_lanes.find_privana_tx(swap["withdraw_batch_id"])
+    if row["status"] == privana_lanes.LANDED:
         advance(swap, SwapStep.EXECUTE_FUNDING)
     elif row["status"] == privana_lanes.FAILED:
         # Refused with the nonce not past it: the input is still in the LP's
@@ -200,9 +229,9 @@ async def _settle_withdraw(swap: dict) -> None:
         # It may still land, so the swap can neither go on nor be refunded.
         fail(swap, SwapStep.PARKED, f"withdrawal {row['id']} not landed after {row['attempts']} sends")
     elif (row["status"] == privana_lanes.QUEUED and waited(swap, WITHDRAW_QUEUE_WAIT_SEC)
-          and privana_lanes.cancel_queued(owner(swap["id"], WITHDRAW), "cancelled: not sent in time")):
+          and privana_lanes.cancel_queued(swap["withdraw_batch_id"], "cancelled: not sent in time")):
         # Never signed, so it can never land: the input is still in the LP's
-        # Privana balance.
+        # Privana balance. The other swaps in it see it FAILED next round.
         _start_refund(swap, f"withdrawal not sent after {WITHDRAW_QUEUE_WAIT_SEC} s", SwapStep.REFUND_PAYOUT)
 
 
@@ -483,13 +512,16 @@ async def _execution_quote(
     # The floor came from a route priced at this slippage. A different one
     # moves toAmountMin, not the price.
     exec_quote = await lifi.get_execution_quote(**request, slippage_bps=slippage_bps)
-    if _net_min(exec_quote, fee_bps) < floor:
+    for _ in range(NARROW_ATTEMPTS):
+        if _net_min(exec_quote, fee_bps) >= floor:
+            break
         # The price fell since the quote. Spend less of the tolerance so
         # the minimum LiFi enforces on chain still pays out the floor.
         narrowed_bps = _slippage_bps_to_floor(int(exec_quote["estimate"]["toAmount"]), floor, fee_bps)
-        if narrowed_bps is not None:
-            logger.info("lifi swap %s narrowing slippage to %s bps", swap_id, narrowed_bps)
-            exec_quote = await lifi.get_execution_quote(**request, slippage_bps=narrowed_bps)
+        if narrowed_bps is None:
+            break
+        logger.info("lifi swap %s narrowing slippage to %s bps", swap_id, narrowed_bps)
+        exec_quote = await lifi.get_execution_quote(**request, slippage_bps=narrowed_bps)
     net_min = _net_min(exec_quote, fee_bps)
     if net_min < floor:
         raise BelowFloor(f"execution quote below floor: net_min={net_min} floor={floor}")
@@ -562,9 +594,20 @@ def unqueued_lane_outflow(token_id: str) -> int:
         else:
             kind = WITHDRAW if swap["step"] == SwapStep.WITHDRAW_SENT.value else REFUND_PAYOUT
             token, amount = swap["from_token_id"], swap["from_amount"]
-        if token == token_id and privana_lanes.find_privana_tx(owner(swap["id"], kind)) is None:
+        if token == token_id and _not_on_lane(swap, kind):
             outflow += int(amount)
     return outflow
+
+
+def _not_on_lane(swap: dict, kind: str) -> bool:
+    """Whether the lane rows leave out the swap's `kind` of write. A failed
+    withdrawal leaves its swaps' inputs in the LP's balance until each swap
+    queues its refund payout."""
+    if kind != WITHDRAW:
+        return privana_lanes.find_privana_tx(owner(swap["id"], kind)) is None
+    if swap["withdraw_batch_id"] is None:
+        return True
+    return privana_lanes.find_privana_tx(swap["withdraw_batch_id"])["status"] == privana_lanes.FAILED
 
 
 def _swap_intent(owner: str, chain_id: int, request: dict, simulate: bool) -> TxIntent:

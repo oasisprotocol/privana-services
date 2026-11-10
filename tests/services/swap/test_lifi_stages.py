@@ -147,7 +147,8 @@ def _crash_once(monkeypatch, module, name, kind, after):
 
     def submit(*args):
         owners = [arg.owner if hasattr(arg, "owner") else arg for arg in args]
-        hit = not crashed and any(isinstance(o, str) and o.endswith(f":{kind}") for o in owners)
+        hit = not crashed and any(isinstance(o, str) and (o.endswith(f":{kind}") or o.startswith(f"{kind}:"))
+                                  for o in owners)
         if hit and not after:
             crashed.append(kind)
             raise RuntimeError("process killed")
@@ -176,7 +177,11 @@ async def test_a_restart_cutting_any_stage_short_sends_nothing_twice(world, monk
     for _ in range(30):
         if world.swap(swap_id)["status"] == "completed":
             break
-        await world.run()
+        try:
+            await world.run()
+        except RuntimeError:
+            # The withdrawal is queued in the round itself, not per swap.
+            assert crashed == ["withdraw"]
         if crashed:
             world.restart()
 
@@ -421,7 +426,7 @@ async def test_a_withdrawal_cancelled_while_the_lane_reads_the_nonce_is_never_se
     cancelled = []
 
     async def cancelled_meanwhile():
-        cancelled.append(privana_lanes.cancel_queued(f"swap:{swap_id}:withdraw", "cancelled"))
+        cancelled.append(privana_lanes.cancel_queued(stage.owner(swap_id, lifi_pipeline.WITHDRAW), "cancelled"))
         return await counter()
 
     world.withdraw_lane._counter = cancelled_meanwhile

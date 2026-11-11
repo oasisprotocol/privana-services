@@ -139,6 +139,16 @@ class Wallet:
                     quote["from_amount"], quote["to_amount"],
                 ])),
             }]
+        else:
+            # The bridge's own tx on the output chain pays the LP there.
+            delivery = Web3.to_hex(Web3.keccak(text=f"delivery {data}"))
+            logs = [] if int(quote["to_token"], 16) == 0 else [{
+                "address": quote["to_token"], "data": HexBytes(quote["to_amount"].to_bytes(32, "big")),
+                "topics": [lifi_pipeline.ERC20_TRANSFER_TOPIC, HexBytes("00" * 32),
+                           HexBytes("00" * 12) + HexBytes(self.world.lp_address)],
+            }] * self.world.lifi.payouts
+            self.world.chains[quote["to_chain"]].receipts[delivery] = {"status": 1, "blockNumber": 0, "logs": logs}
+            self.world.lifi.deliveries[data] = delivery
         return True
 
 
@@ -162,7 +172,12 @@ class Lifi:
         self.to_amount = 60_000
         self.reverts = False
         self.status = None
+        # Overrides what a DONE status reports receiving, as LiFi may misreport it.
+        self.reported: dict = {}
         self.quotes: dict[str, dict] = {}
+        self.deliveries: dict[str, str] = {}
+        # How many transfers to the LP a bridge's delivery tx makes.
+        self.payouts = 1
         self.status_calls = 0
 
     async def get_execution_quote(self, from_chain_id, to_chain_id, from_token_address, to_token_address,
@@ -190,7 +205,8 @@ class Lifi:
         quote = self.quotes[data]
         return {"status": "DONE", "substatus": "COMPLETED", "toAddress": self.world.lp_address,
                 "receiving": {"chainId": quote["to_chain"], "amount": str(quote["to_amount"]),
-                              "token": {"address": quote["to_token"]}}}
+                              "token": {"address": quote["to_token"]}, "txHash": self.deliveries[data],
+                              **self.reported}}
 
 
 class PrivanaApi(FakeApi):

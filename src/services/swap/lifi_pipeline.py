@@ -108,6 +108,7 @@ SWAP_COMPLETED_TOPIC = Web3.keccak(
 )
 # Its data: integrator, referrer, receiver, fromAssetId, toAssetId, fromAmount, toAmount.
 SWAP_COMPLETED_DATA = ["string", "string", "address", "address", "address", "uint256", "uint256"]
+ERC20_TRANSFER_TOPIC = Web3.keccak(text="Transfer(address,address,uint256)")
 
 
 class BelowFloor(RuntimeError):
@@ -328,13 +329,40 @@ async def _settle_bridge(swap: dict) -> None:
         if exc.response.status_code != 404:
             raise
         status = {}
+    recipient = load_settings().liquidity_provider_address
     try:
-        received = _delivered(status, to_info, load_settings().liquidity_provider_address)
+        receiving = _delivered(status, to_info, recipient)
+        if receiving is None:
+            return
+        if is_native(to_info.token_address):
+            # A native payout leaves no log: only LiFi's report shows it.
+            if not is_native(receiving["token"]["address"]):
+                raise RuntimeError(f"delivered elsewhere: {receiving}")
+            received = int(receiving["amount"])
+        else:
+            # LiFi may report the bridged token, or an amount other than what
+            # was paid: what reached the LP is in the delivery tx.
+            evm = get_evm_client(to_info.chain_id)
+            receipt = await asyncio.to_thread(evm.get_receipt, receiving["txHash"])
+            if receipt is None:
+                return
+            # A solver can fill several routes in one tx: more than one
+            # transfer to the LP cannot be told apart.
+            amounts = [
+                int.from_bytes(HexBytes(log["data"]), "big")
+                for log in receipt["logs"]
+                if log["address"].lower() == to_info.token_address.lower()
+                and len(log["topics"]) == 3
+                and HexBytes(log["topics"][0]) == ERC20_TRANSFER_TOPIC
+                and HexBytes(log["topics"][2])[-20:] == HexBytes(recipient)
+            ]
+            if len(amounts) != 1:
+                raise RuntimeError(f"delivered elsewhere: {receiving}")
+            received = amounts[0]
     except RuntimeError as exc:
         fail(swap, SwapStep.PARKED, f"lifi route of {tx_hash}: {exc}")
         return
-    if received is not None:
-        advance(swap, SwapStep.DEPOSIT_SENT, to_amount_received=str(received))
+    advance(swap, SwapStep.DEPOSIT_SENT, to_amount_received=str(received))
 
 
 async def _deposit(swap: dict) -> None:
@@ -635,21 +663,17 @@ def _swap_output(diamond: str, logs: list, recipient: str, token: str) -> int:
     raise RuntimeError(f"swap logs show no LiFi swap paying {recipient} in {token}")
 
 
-def _delivered(status: dict, to_info: Any, recipient: str) -> Optional[int]:
-    """What LiFi's `status` of a bridge says it delivered to `recipient`, or
+def _delivered(status: dict, to_info: Any, recipient: str) -> Optional[dict]:
+    """The `receiving` side of LiFi's `status` of a bridge to `recipient`, or
     None while it is not done. Anything but a full delivery raises."""
     state, substatus = status.get("status"), status.get("substatus")
     # Only DONE with COMPLETED is a full delivery. DONE with PARTIAL or
     # REFUNDED, FAILED and INVALID are final. Anything else is pending.
     if state == LIFI_STATUS_DONE and substatus == LIFI_SUBSTATUS_COMPLETED:
         receiving = status["receiving"]
-        if (
-            int(receiving["chainId"]) != to_info.chain_id
-            or receiving["token"]["address"].lower() != _lifi_token(to_info.token_address).lower()
-            or status["toAddress"].lower() != recipient.lower()
-        ):
+        if int(receiving["chainId"]) != to_info.chain_id or status["toAddress"].lower() != recipient.lower():
             raise RuntimeError(f"delivered elsewhere: {receiving}")
-        return int(receiving["amount"])
+        return receiving
     if state in (LIFI_STATUS_DONE, LIFI_STATUS_FAILED, LIFI_STATUS_INVALID):
         raise RuntimeError(f"ended {state} {substatus}")
     return None

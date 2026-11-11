@@ -205,7 +205,7 @@ def _done(chain_id=BASE, to=LP, token=None, substatus="COMPLETED"):
 def test_a_bridge_delivers_what_lifi_reports_once_it_is_done():
     assert _delivered({"status": "PENDING", "substatus": "WAIT_DESTINATION_TRANSACTION"}, TOKENS[WETH], LP) is None
     assert _delivered({}, TOKENS[WETH], LP) is None
-    assert _delivered(_done(), TOKENS[WETH], LP) == 60_000
+    assert _delivered(_done(), TOKENS[WETH], LP)["amount"] == "60000"
 
 
 @pytest.mark.parametrize("status", [
@@ -215,8 +215,7 @@ def test_a_bridge_delivers_what_lifi_reports_once_it_is_done():
     _done(substatus="REFUNDED"),
     _done(to="0x" + "77" * 20),
     _done(chain_id=10),
-    _done(token="0x" + "99" * 20),
-], ids=["failed", "invalid", "partial", "refunded", "another recipient", "another chain", "another token"])
+], ids=["failed", "invalid", "partial", "refunded", "another recipient", "another chain"])
 def test_anything_but_a_full_delivery_to_the_lp_is_refused(status):
     with pytest.raises(RuntimeError):
         _delivered(status, TOKENS[WETH], LP)

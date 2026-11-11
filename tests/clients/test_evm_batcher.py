@@ -256,17 +256,6 @@ def test_a_round_takes_at_most_the_batch_size(batcher, chain):
     assert len(chain.sent) == 3
 
 
-def test_a_sapphire_sender_sends_one_tx_per_round(test_db, settings):
-    chain = FakeChain(SAPPHIRE_CHAIN_ID)
-    chain.auto_mine = True
-    sender = sapphire_sender(chain, test_db, settings.liquidity_provider_secret_key)
-    submit(SAPPHIRE_CHAIN_ID, sender.evm.address, intent(owner="swap:a:lifi"), intent(owner="swap:b:lifi"))
-
-    sender.run_round()
-
-    assert len(chain.sent) == 1
-
-
 def test_an_empty_queue_asks_the_node_nothing(batcher, chain, monkeypatch):
     monkeypatch.setattr(chain, "get_transaction_count", lambda *a: (_ for _ in ()).throw(AssertionError))
 

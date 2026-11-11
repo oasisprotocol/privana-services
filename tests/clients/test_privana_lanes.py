@@ -59,14 +59,6 @@ def lp(chain, test_db, config):
     return sapphire_sender(chain, test_db, config.liquidity_provider_secret_key)
 
 
-@pytest.fixture
-def batching(lp, monkeypatch):
-    """The lane logic with a Sapphire batch of ten, as it runs once the node
-    takes several txs of one account at a time."""
-    monkeypatch.setattr(lanes, "SAPPHIRE_BATCH_SIZE", 10)
-    lp.batch_size = 10
-
-
 def transfers(config, *recipients, amount=1):
     return submit_privana(config.liquidity_provider_address, *(
         transfer_balance_intent(f"swap:{i}:credit", user.address, TOKEN, amount) for i, user in enumerate(recipients)))
@@ -89,18 +81,7 @@ def landed(chain):
     return [(to, nonce) for _, to, nonce in chain.contracts.landed]
 
 
-def test_by_default_a_sapphire_sender_signs_and_sends_one_row_per_round(lp, chain, config):
-    a, b, c = transfers(config, *USERS[:3])
-
-    lp.run_round()
-
-    assert [row(i)["status"] for i in (a, b, c)] == ["sent", "queued", "queued"]
-    assert len(chain.sent) == 1
-    rounds(lp, 4)
-    assert landed(chain) == [(u.address.lower(), n) for n, u in enumerate(USERS[:3])]
-
-
-def test_queued_transfers_are_signed_at_consecutive_nonces_and_land_once(lp, chain, config, test_db, batching):
+def test_queued_transfers_are_signed_at_consecutive_nonces_and_land_once(lp, chain, config, test_db):
     ids = transfers(config, *USERS[:3])
 
     rounds(lp, 3)
@@ -111,7 +92,7 @@ def test_queued_transfers_are_signed_at_consecutive_nonces_and_land_once(lp, cha
     assert [r["simulate"] for r in evm_rows(test_db)] == [1, 0, 0]
 
 
-def test_a_revert_queues_it_and_the_rows_after_it_again_and_none_lands_twice(lp, chain, config, batching):
+def test_a_revert_queues_it_and_the_rows_after_it_again_and_none_lands_twice(lp, chain, config):
     a, b, c, d = transfers(config, *USERS)
     chain.contracts.reverting_recipients.add(USERS[1].address.lower())
     lp.run_round()
@@ -135,7 +116,7 @@ def test_a_row_whose_simulation_fails_at_its_nonce_fails_at_once_and_frees_the_l
     assert landed(chain) == [(USERS[0].address.lower(), 0), (USERS[2].address.lower(), 1)]
 
 
-def test_rows_behind_a_failed_simulation_are_never_sent_that_round(lp, chain, config, test_db, batching):
+def test_rows_behind_a_failed_simulation_are_never_sent_that_round(lp, chain, config, test_db):
     a, b, c = transfers(config, *USERS[:3])
     chain.contracts.reverting_recipients.add(USERS[0].address.lower())
 
@@ -211,7 +192,7 @@ def test_a_lagging_counter_read_neither_lands_a_transfer_early_nor_signs_below_o
     assert [(row(i)["status"], row(i)["nonce"]) for i in (a, b)] == [("landed", 0), ("landed", 1)]
 
 
-def test_a_row_is_never_signed_without_its_evm_tx(lp, config, test_db, monkeypatch, batching):
+def test_a_row_is_never_signed_without_its_evm_tx(lp, config, test_db, monkeypatch):
     first, second = transfers(config, *USERS[:2])
     real = lanes._call
     calls = []

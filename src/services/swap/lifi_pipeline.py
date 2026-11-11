@@ -346,7 +346,19 @@ async def _settle_bridge(swap: dict) -> None:
             receipt = await asyncio.to_thread(evm.get_receipt, receiving["txHash"])
             if receipt is None:
                 return
-            received = _transferred(receipt["logs"], to_info.token_address, recipient, receiving)
+            # A solver can fill several routes in one tx: more than one
+            # transfer to the LP cannot be told apart.
+            amounts = [
+                int.from_bytes(HexBytes(log["data"]), "big")
+                for log in receipt["logs"]
+                if log["address"].lower() == to_info.token_address.lower()
+                and len(log["topics"]) == 3
+                and HexBytes(log["topics"][0]) == ERC20_TRANSFER_TOPIC
+                and HexBytes(log["topics"][2])[-20:] == HexBytes(recipient)
+            ]
+            if len(amounts) != 1:
+                raise RuntimeError(f"delivered elsewhere: {receiving}")
+            received = amounts[0]
     except RuntimeError as exc:
         fail(swap, SwapStep.PARKED, f"lifi route of {tx_hash}: {exc}")
         return
@@ -665,23 +677,6 @@ def _delivered(status: dict, to_info: Any, recipient: str) -> Optional[dict]:
     if state in (LIFI_STATUS_DONE, LIFI_STATUS_FAILED, LIFI_STATUS_INVALID):
         raise RuntimeError(f"ended {state} {substatus}")
     return None
-
-
-def _transferred(logs: list, token: str, recipient: str, receiving: dict) -> int:
-    """What the delivery tx's `logs` transferred `recipient` in `token`. A
-    solver can fill several routes in one tx, so more than one such transfer
-    cannot be told apart and raises."""
-    amounts = [
-        int.from_bytes(HexBytes(log["data"]), "big")
-        for log in logs
-        if log["address"].lower() == token.lower()
-        and len(log["topics"]) == 3
-        and HexBytes(log["topics"][0]) == ERC20_TRANSFER_TOPIC
-        and HexBytes(log["topics"][2])[-20:] == HexBytes(recipient)
-    ]
-    if len(amounts) != 1:
-        raise RuntimeError(f"delivered elsewhere: {receiving}")
-    return amounts[0]
 
 
 def _net_min(exec_quote: dict, fee_bps: int) -> int:

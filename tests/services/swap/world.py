@@ -146,7 +146,7 @@ class Wallet:
                 "address": quote["to_token"], "data": HexBytes(quote["to_amount"].to_bytes(32, "big")),
                 "topics": [lifi_pipeline.ERC20_TRANSFER_TOPIC, HexBytes("00" * 32),
                            HexBytes("00" * 12) + HexBytes(self.world.lp_address)],
-            }]
+            }] * self.world.lifi.payouts
             self.world.chains[quote["to_chain"]].receipts[delivery] = {"status": 1, "blockNumber": 0, "logs": logs}
             self.world.lifi.deliveries[data] = delivery
         return True
@@ -176,6 +176,8 @@ class Lifi:
         self.reported: dict = {}
         self.quotes: dict[str, dict] = {}
         self.deliveries: dict[str, str] = {}
+        # How many transfers to the LP a bridge's delivery tx makes.
+        self.payouts = 1
         self.status_calls = 0
 
     async def get_execution_quote(self, from_chain_id, to_chain_id, from_token_address, to_token_address,

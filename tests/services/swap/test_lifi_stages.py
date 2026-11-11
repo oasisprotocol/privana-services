@@ -482,6 +482,17 @@ async def test_a_bridge_that_did_not_deliver_parks_without_refunding(world, stat
     assert world.paid(USER) == []
 
 
+@pytest.mark.parametrize("payouts", [0, 2], ids=["none", "two a solver filled at once"])
+async def test_a_delivery_tx_without_one_clear_payout_to_the_lp_parks(world, payouts):
+    world.lifi.payouts = payouts
+    swap_id = await world.schedule("lifi", to_token=ETH_WETH)
+
+    swap = await world.until(swap_id, "failed")
+
+    assert swap["step"] == "parked"
+    assert world.paid(USER) == []
+
+
 async def test_an_input_that_never_reaches_the_wallet_is_never_paid_back(world):
     # Withdrawn from the LP's Privana balance: only a redeposit could refund it.
     world.api.relay_paused = True

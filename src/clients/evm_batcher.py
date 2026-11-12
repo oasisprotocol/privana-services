@@ -16,12 +16,8 @@ from src.models.settings import Settings
 logger = logging.getLogger(__name__)
 
 BATCH_SIZE = 10
-# Txs one Sapphire account sends per round. oasis-core 26.3's compute node
-# panics (txpool maxPriorityTxHeap.replace, index out of range [-1]) when
-# several txs from one account reach its pool together: 3 to 10 crashed a
-# localnet, 2 did not, and 10 txs from 10 accounts were fine. Raise it only
-# once the node version Sapphire runs is known to be fixed.
-SAPPHIRE_BATCH_SIZE = 1
+# Max txs one Sapphire account sends per block.
+SAPPHIRE_BATCH_SIZE = 20
 TRANSFER_GAS_LIMIT = 100_000
 NATIVE_TRANSFER_GAS_LIMIT = 21_000
 APPROVE_GAS_LIMIT = 80_000

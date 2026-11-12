@@ -70,6 +70,10 @@ class FakeChain:
             return max([self.mined_count, *[n + 1 for n in self.pool]])
         return self.mined_count
 
+    @property
+    def block_number(self) -> int:
+        return self.mined_count
+
     def get_block(self, block):
         number = self.mined_count if block == "latest" else block
         return {"baseFeePerGas": self.base_fee, "timestamp": BLOCK_TIME_ZERO + number}

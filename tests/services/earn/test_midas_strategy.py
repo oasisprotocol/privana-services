@@ -670,22 +670,17 @@ async def test_withdraw_from_earn_redeems_forwards_and_polls(
         ASSET_ADDRESS, DEPOSIT_ADDRESS_BASE, 1_002_300,
     )
     privana.check_deposit.assert_awaited_once()
-    assert privana.check_deposit.await_args.args[0].amount == 1_002_300
+    assert privana.check_deposit.await_args.args[0].token_address == ASSET_ADDRESS
     assert privana.get_balance.await_count >= 2
 
 
 @pytest.mark.asyncio
-async def test_withdraw_from_earn_renudges_check_deposit_until_accepted(
-    strategy, midas_client, privana,
+async def test_withdraw_from_earn_claims_until_the_balance_shows_the_credit(
+    strategy, midas_client, privana, monkeypatch,
 ) -> None:
-    from privana.client.errors import AccountingApiError
-
+    monkeypatch.setattr("src.services.earn.strategies.midas.CLAIM_EVERY_POLLS", 1)
     privana.check_deposit.side_effect = [
-        AccountingApiError(
-            "API request failed",
-            status_code=400,
-            detail="Insufficient finality: -1/15 confirmations on chain 8453",
-        ),
+        _DepositCheckResponse(status="none", detail="No finalized balance to credit"),
         _DepositCheckResponse(status="pending", deposit_id="dep-1"),
     ]
     privana.get_balance.side_effect = [
@@ -943,8 +938,6 @@ async def test_min_deploy_amount_never_rounds_to_below_the_floor(strategy, midas
 
 @pytest.mark.asyncio
 async def test_withdraw_reports_its_stages_in_order(strategy, midas_client, privana) -> None:
-    from privana.client.errors import NetworkError
-
     midas_client.get_erc20_balance.side_effect = [0, 1_000_000]
     privana.get_balance = AsyncMock(
         side_effect=[
@@ -954,17 +947,13 @@ async def test_withdraw_reports_its_stages_in_order(strategy, midas_client, priv
         ]
     )
     privana.check_deposit = AsyncMock(
-        side_effect=[
-            NetworkError("400 Bad Request: Insufficient finality: 9/32 confirmations"),
-            _DepositCheckResponse(status="accepted", deposit_id="dep-1"),
-        ]
+        return_value=_DepositCheckResponse(status="none", detail="No finalized balance to credit"),
     )
     with patch("src.services.earn.strategies.midas.progress") as progress:
         await strategy.withdraw_from_earn(1_000_000)
 
     calls = [c.args[0] for c in progress.update.call_args_list]
-    assert calls == [progress.RECLAIMING, progress.RETURNING]
-    progress.update_finality.assert_called_once()
+    assert calls == [progress.RECLAIMING, progress.RETURNING, progress.FINALITY]
 
 
 @pytest.mark.asyncio

@@ -7,6 +7,7 @@ from eth_account import Account
 from eth_account.messages import encode_defunct
 from privana import DepositAddressRequest, DepositCheckRequest, PrivanaClient
 
+from src.clients.base_evm import NATIVE_TOKEN, is_native
 from src.core.config import load_settings
 
 # rofl-proxy cuts each connection 45 s after it opens, even mid-request, so
@@ -15,8 +16,6 @@ _HEADERS = {"Connection": "close"}
 
 # Replies to a submitted write that mean the API took it.
 ACCEPTED_SUBMISSION_STATUSES = {"submitted", "pending", "accepted"}
-# A deposit check's reply once the deposit is credited.
-DEPOSIT_CREDITED = "credited"
 
 _client: Optional[PrivanaClient] = None
 _swap_lp_client: Optional[PrivanaClient] = None
@@ -140,10 +139,12 @@ async def deposit_address(client: PrivanaClient) -> str:
     return (await client.get_deposit_address(DepositAddressRequest(chain_type="evm"))).deposit_address
 
 
-async def check_deposit(client: PrivanaClient, chain_id: int, tx_hash: str, amount: int):
-    """Report a deposit to Accounting, which has no deposit watcher. Reports
-    are idempotent, and refused until the deposit is final on its chain."""
-    return await client.check_deposit(DepositCheckRequest(chain_id=chain_id, tx_hash=tx_hash, amount=amount))
+async def check_deposit(client: PrivanaClient, chain_id: int, token_address: Optional[str]):
+    """Ask Accounting, which has no deposit watcher, to sweep and credit the
+    whole finalized balance of a token at `client`'s deposit address. Claims
+    are idempotent: one made while a sweep is in flight reports that sweep."""
+    token = NATIVE_TOKEN if is_native(token_address) else token_address
+    return await client.check_deposit(DepositCheckRequest(chain_id=chain_id, token_address=token))
 
 
 __all__ = [

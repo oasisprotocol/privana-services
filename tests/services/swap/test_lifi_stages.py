@@ -3,6 +3,7 @@
 import asyncio
 import threading
 from dataclasses import replace
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -19,6 +20,7 @@ from tests.clients.fake_chain import SAPPHIRE_CHAIN_ID, decode, nonce_of
 from tests.services.swap.world import (
     AMOUNT,
     BASE,
+    DEPOSIT_ADDRESS,
     DIAMOND,
     ETH_WETH,
     ETHEREUM,
@@ -588,6 +590,92 @@ async def test_only_external_waits_park_at_their_deadline(world, step, deadline,
     else:
         assert (swap["status"], swap["step"]) == ("executing", step)
     assert world.paid(USER) == []
+
+
+async def test_a_claim_that_finds_nothing_before_the_deposit_is_final_is_no_credit(world):
+    world.api.final = False
+    swap_id = await world.schedule("lifi")
+    await world.until(swap_id, "deposit:crediting")
+    await world.run(3)
+
+    assert world.swap(swap_id)["step"] == "deposit:crediting"
+    assert world.paid(USER) == []
+
+    world.api.final = True
+    await world.until(swap_id, "completed")
+    assert world.paid(USER) == [(WETH, NET)]
+
+
+async def test_a_claim_that_leaves_the_deposit_at_the_address_is_no_credit(world, monkeypatch):
+    swap_id = await world.schedule("lifi")
+    await world.until(swap_id, "deposit:crediting")
+    # As Accounting answers for a balance below its minimum deposit.
+    left = world.swap(swap_id)["to_amount_received"]
+    monkeypatch.setattr(world.api, "check_deposit", AsyncMock(return_value=SimpleNamespace(
+        status="none", deposit_id=None, amount=left, detail="Below minimum deposit")))
+    await world.run(3)
+
+    assert world.swap(swap_id)["step"] == "deposit:crediting"
+    assert world.paid(USER) == []
+
+
+async def test_a_sweep_another_swap_starts_mid_check_is_not_taken_for_credited(world, monkeypatch):
+    claim = world.api.check_deposit
+    world.api.final = False
+    swap_id = await world.schedule("lifi")
+    await world.until(swap_id, "deposit:crediting")
+
+    async def then_another_swap_sweeps(request):
+        answer = await claim(request)
+        world.api.final = True
+        world.api.start_sweep(request.chain_id, request.token_address)
+        return answer
+
+    monkeypatch.setattr(world.api, "check_deposit", then_another_swap_sweeps)
+    await world.run()
+    monkeypatch.setattr(world.api, "check_deposit", claim)
+    await world.run(2)
+
+    assert world.swap(swap_id)["step"] == "deposit:crediting"
+    assert world.paid(USER) == []
+
+    world.api.finish_sweeps()
+    await world.until(swap_id, "completed")
+    assert world.paid(USER) == [(WETH, NET)]
+
+
+async def test_a_node_behind_the_deposit_never_reads_it_as_swept(monkeypatch):
+    evm = SimpleNamespace(w3=SimpleNamespace(eth=SimpleNamespace(block_number=9)),
+                          get_receipt=lambda tx_hash: {"blockNumber": 10},
+                          balance_of=lambda token, holder, block: 0)
+    monkeypatch.setattr(lifi_pipeline, "get_evm_client", lambda chain_id: evm)
+
+    assert not await lifi_pipeline._holds_less(TOKENS[WETH], DEPOSIT_ADDRESS, "0xdeposit", 100)
+
+
+async def test_one_sweep_credits_every_deposit_it_takes(world, monkeypatch):
+    claim, swept = world.api.check_deposit, []
+
+    async def recording(request):
+        answer = await claim(request)
+        if answer.status == "pending":
+            swept.append(int(answer.amount))
+        return answer
+
+    monkeypatch.setattr(world.api, "check_deposit", recording)
+    world.api.credits = False
+    first = await world.schedule("lifi")
+    second = await world.schedule("lifi", user=USERS[1])
+    await world.until(first, "deposit:crediting")
+    await world.until(second, "deposit:crediting")
+    world.api.credits = True
+
+    await world.until(first, "completed")
+    await world.until(second, "completed")
+
+    assert swept == [2 * int(world.swap(first)["to_amount_received"])]
+    assert world.paid(USER) == [(WETH, NET)]
+    assert world.paid(USERS[1]) == [(WETH, NET)]
 
 
 def _taken_after_an_attempt(world, owner):

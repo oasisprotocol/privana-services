@@ -416,8 +416,7 @@ async def test_withdraw_from_earn_redeems_transfers_and_polls_until_credited(
     privana.check_deposit.assert_awaited_once()
     check_request = privana.check_deposit.await_args.args[0]
     assert check_request.chain_id == aave_client.w3.eth.chain_id
-    assert check_request.tx_hash == "0xtransfer"
-    assert check_request.amount == 1_000_000
+    assert check_request.token_address == ASSET_ADDRESS
 
     assert privana.get_balance.await_count >= 3
 
@@ -577,21 +576,18 @@ async def test_retry_on_network_error_raises_accounting_4xx(strategy) -> None:
 
 
 @pytest.mark.asyncio
-async def test_withdraw_from_earn_renudges_check_deposit_until_accepted(
-    strategy, aave_client, privana
+async def test_withdraw_from_earn_claims_until_the_balance_shows_the_credit(
+    strategy, aave_client, privana, monkeypatch
 ) -> None:
-    from privana.client.errors import AccountingApiError
+    from privana.client.errors import NetworkError
 
+    monkeypatch.setattr("src.services.earn.strategies.aave.CLAIM_EVERY_POLLS", 1)
     aave_client.withdraw.return_value = "0xredeem"
     aave_client.transfer_erc20.return_value = "0xtransfer"
     privana.check_deposit.side_effect = [
-        AccountingApiError(
-            "API request failed",
-            status_code=400,
-            detail="Insufficient finality: -1/15 confirmations on chain 8453",
-        ),
-        _DepositCheckResponse(status="error", detail="Insufficient finality"),
-        _DepositCheckResponse(status="pending", deposit_id="dep-1"),
+        _DepositCheckResponse(status="pending", deposit_id="dep-0"),
+        NetworkError("Request timeout after 30s"),
+        _DepositCheckResponse(status="none", detail="No finalized balance to credit"),
     ]
     privana.get_balance.side_effect = [
         _Balance(user_address=POOL_ADDRESS, token_id=TOKEN_ID, balance=0),
@@ -604,25 +600,24 @@ async def test_withdraw_from_earn_renudges_check_deposit_until_accepted(
 
     assert privana.check_deposit.await_count == 3
     for await_call in privana.check_deposit.await_args_list:
-        assert await_call.args[0].tx_hash == "0xtransfer"
+        assert await_call.args[0].token_address == ASSET_ADDRESS
 
 
 @pytest.mark.asyncio
-async def test_withdraw_from_earn_stops_nudging_once_accepted(
+async def test_withdraw_from_earn_claims_on_the_first_poll_and_every_tenth(
     strategy, aave_client, privana
 ) -> None:
     aave_client.withdraw.return_value = "0xredeem"
     aave_client.transfer_erc20.return_value = "0xtransfer"
     privana.get_balance.side_effect = [
         _Balance(user_address=POOL_ADDRESS, token_id=TOKEN_ID, balance=0),
-        _Balance(user_address=POOL_ADDRESS, token_id=TOKEN_ID, balance=0),
-        _Balance(user_address=POOL_ADDRESS, token_id=TOKEN_ID, balance=0),
+        *[_Balance(user_address=POOL_ADDRESS, token_id=TOKEN_ID, balance=0)] * 10,
         _Balance(user_address=POOL_ADDRESS, token_id=TOKEN_ID, balance=1_000_000),
     ]
 
     await strategy.withdraw_from_earn(1_000_000)
 
-    privana.check_deposit.assert_awaited_once()
+    assert privana.check_deposit.await_count == 2
 
 
 @pytest.mark.asyncio
@@ -645,7 +640,7 @@ async def test_withdraw_from_earn_clamps_dust_short_position(
     aave_client.transfer_erc20.assert_called_once_with(
         ASSET_ADDRESS, DEPOSIT_ADDRESS_BASE, 999_999,
     )
-    assert privana.check_deposit.await_args.args[0].amount == 999_999
+    assert privana.check_deposit.await_args.args[0].token_address == ASSET_ADDRESS
 
 
 @pytest.mark.asyncio

@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 import time
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -35,8 +34,6 @@ PAYING_OUT = "paying_out"
 AWAITING_LIQUIDITY = "awaiting_liquidity"
 
 _current: ContextVar[Optional[str]] = ContextVar("earn_operation", default=None)
-
-_FINALITY = re.compile(r"finality:\s*(\d+)\s*/\s*(\d+)", re.IGNORECASE)
 
 
 @contextmanager
@@ -93,15 +90,3 @@ def _append(tx_id: str, stage: str, detail: Optional[dict]) -> bool:
     except Exception:
         logger.warning("Could not record %s for %s", stage, tx_id, exc_info=True)
         return False
-
-
-def update_finality(error: object) -> None:
-    """Accounting refuses to credit a transfer until it has enough
-    confirmations and says how many it has in the refusal. Surface that count
-    as the finality stage's progress."""
-    match = _FINALITY.search(str(error))
-    if match:
-        update(
-            FINALITY,
-            {"confirmations": int(match.group(1)), "required": int(match.group(2))},
-        )

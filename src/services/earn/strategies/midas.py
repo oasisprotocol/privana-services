@@ -39,6 +39,7 @@ _NETWORK_BY_CHAIN_ID: dict[int, Network] = {
 }
 
 DEFAULT_POLL_INTERVAL_SEC = 3.0
+CLAIM_EVERY_POLLS = 10
 DEFAULT_MAX_BRIDGE_POLL_ATTEMPTS = 200
 
 # A confirmed redeem receipt does not guarantee the next balanceOf sees it:
@@ -375,10 +376,10 @@ class MidasStrategy(BaseStrategy):
              MidasInstantUnavailableError; the API layer surfaces this as
              a 409.
           4. ERC20.transfer USDC to the pool's per-account deposit address.
-          5. Poll get_balance until the credit is observed, re-sending the
-             check_deposit nudge until accounting accepts it (the first
-             attempts fail Base finality). State-based, no wall-clock
-             timeout — matches the AaveStrategy contract.
+          5. Poll get_balance until the credit is observed, claiming the
+             deposit address's balance with check_deposit along the way
+             (nothing is claimable before finality). State-based, no
+             wall-clock timeout — matches the AaveStrategy contract.
         """
         if amount <= 0:
             raise ValueError(f"withdraw_from_earn requires a positive amount, got {amount}")
@@ -423,7 +424,7 @@ class MidasStrategy(BaseStrategy):
         )
 
         target_balance = pre_balance + realized_usdc
-        await self._poll_until_credited(target_balance, transfer_tx, realized_usdc)
+        await self._poll_until_credited(target_balance)
         logger.info(
             "MidasStrategy.withdraw_from_earn: pool balance credited pool=%s token=%s amount=%d",
             self._pool_address, self._token_id, realized_usdc,
@@ -782,45 +783,41 @@ class MidasStrategy(BaseStrategy):
         balance = await self._retry_on_network_error("get_balance", _get_balance)
         return int(balance.balance)
 
-    async def _nudge_check_deposit(self, tx_hash: str, amount: int) -> bool:
-        """One check_deposit attempt for the forwarded transfer, True once
-        accounting accepts the report (credited or pending). Mirrors
-        AaveStrategy._nudge_check_deposit: the relay has no watcher on pool
-        deposit addresses, so the caller retries until accepted.
+    async def _claim_deposit(self) -> None:
+        """Ask accounting to sweep and credit the asset at the pool's deposit
+        address. The relay has no watcher on it, and a claim answers "none"
+        until the transfer is final, or reports a sweep already in flight that
+        may predate it, so the caller claims until its balance shows the credit.
         """
         try:
             client = await self._get_authed_privana()
-            check = await client.check_deposit(
+            claim = await client.check_deposit(
                 DepositCheckRequest(
                     chain_id=self._client.w3.eth.chain_id,
-                    tx_hash=tx_hash,
-                    amount=amount,
+                    token_address=self._asset_address,
                 )
             )
         except Exception as exc:
-            progress.update_finality(exc)
             logger.warning(
-                "MidasStrategy.withdraw_from_earn: check_deposit not accepted yet "
-                "(%s); will retry",
+                "MidasStrategy.withdraw_from_earn: deposit claim failed (%s); will retry",
                 exc,
             )
-            return False
-        if check.status == "error":
+            return
+        if claim.status == "none":
+            progress.update(progress.FINALITY)
+        elif claim.status == "error":
             logger.warning(
-                "MidasStrategy.withdraw_from_earn: check_deposit reported error: %s; "
+                "MidasStrategy.withdraw_from_earn: deposit claim reported error: %s; "
                 "will retry",
-                check.detail,
+                claim.detail,
             )
-            return False
-        return True
 
-    async def _poll_until_credited(
-        self, target_balance: int, tx_hash: str, amount: int
-    ) -> None:
-        nudged = False
+    async def _poll_until_credited(self, target_balance: int) -> None:
+        polls = 0
         while True:
-            if not nudged:
-                nudged = await self._nudge_check_deposit(tx_hash, amount)
+            if polls % CLAIM_EVERY_POLLS == 0:
+                await self._claim_deposit()
+            polls += 1
             current = await self._read_pool_balance()
             if current >= target_balance:
                 return

@@ -16,9 +16,7 @@ from src.models.settings import Settings
 logger = logging.getLogger(__name__)
 
 BATCH_SIZE = 10
-# Txs one Sapphire account sends per round: about 100 a minute at 20.
-# oasis-core 26.2 and 26.3 panic when several txs from one account reach the
-# pool together (fixed in 26.4); mainnet runs 26.1, testnet 26.4.
+# Max txs one Sapphire account sends per block.
 SAPPHIRE_BATCH_SIZE = 20
 TRANSFER_GAS_LIMIT = 100_000
 NATIVE_TRANSFER_GAS_LIMIT = 21_000

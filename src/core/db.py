@@ -1,8 +1,9 @@
 import logging
 import sqlite3
 import threading
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Optional
+from typing import Iterator, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -147,13 +148,10 @@ MIGRATIONS = [
     # LiFi for the same one. NULL on quotes stored before it, which were
     # priced at LiFi's default.
     "ALTER TABLE quotes ADD COLUMN slippage_bps INTEGER;",
-    # A LiFi swap's signed txs, saved before broadcast so a restart awaits or
-    # rebroadcasts them instead of signing new ones.
+    # A LiFi swap's signed txs and, below, the hashes of their other versions,
+    # saved by the send path the EVM batcher replaced. No longer written.
     "ALTER TABLE swaps ADD COLUMN lifi_tx_raw TEXT;",
     "ALTER TABLE swaps ADD COLUMN deposit_tx_raw TEXT;",
-    # The hashes of a tx's versions other than `*_tx_hash`, space-separated. A
-    # re-sign at a higher fee keeps the nonce, so whichever version is mined
-    # settles the tx.
     "ALTER TABLE swaps ADD COLUMN lifi_tx_replaced TEXT;",
     "ALTER TABLE swaps ADD COLUMN deposit_tx_replaced TEXT;",
     # The LiFi output, for a restart at deposit.
@@ -164,7 +162,77 @@ MIGRATIONS = [
     # The output an internal swap was signed for. It is priced at execution
     # and can differ from to_amount_estimate.
     "ALTER TABLE swaps ADD COLUMN to_amount_executed TEXT;",
+    # The owner of the withdrawal a LiFi swap's input goes out in: one
+    # withdrawal carries the inputs of every swap of a token waiting for one.
+    "ALTER TABLE swaps ADD COLUMN withdraw_batch_id TEXT;",
+    # Txs queued for the EVM batcher of an account. `attempts` lists every
+    # signed version as `nonce:hash`, space-separated, each saved before its
+    # broadcast: a later round finds a mined one before signing again. `nonce`
+    # and `tx_hash` are the attempt that was mined.
+    """
+    CREATE TABLE IF NOT EXISTS evm_transactions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        chain_id INTEGER NOT NULL,
+        address TEXT NOT NULL,
+        owner TEXT NOT NULL,
+        to_address TEXT NOT NULL,
+        data TEXT NOT NULL,
+        value TEXT NOT NULL,
+        gas INTEGER NOT NULL,
+        simulate INTEGER NOT NULL DEFAULT 1,
+        status TEXT NOT NULL DEFAULT 'queued',
+        attempts TEXT,
+        nonce INTEGER,
+        tx_hash TEXT,
+        logs TEXT,
+        error TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+    );
+    """,
+    # One tx per owner, so a caller resubmitting after a restart finds its tx
+    # instead of queuing a second one.
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_evm_tx_owner ON evm_transactions(owner);",
+    # Privana writes, one row per transfer or withdrawal. `signer` is the
+    # account whose nonce it spends. `payload` is the JSON the call is built
+    # from. `nonce` and `signature` are saved before anything is sent, and
+    # `attempts` counts signings of a transfer and sends of a withdrawal.
+    """
+    CREATE TABLE IF NOT EXISTS privana_transactions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        signer TEXT NOT NULL,
+        owner TEXT NOT NULL UNIQUE,
+        kind TEXT NOT NULL,
+        payload TEXT NOT NULL,
+        nonce INTEGER,
+        signature TEXT,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'queued',
+        error TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+    );
+    """,
+    # A swap queued its own withdrawal before withdrawals were batched: point
+    # it at that row so the next batch never withdraws its input again.
+    """
+    UPDATE swaps SET withdraw_batch_id = 'swap:' || id || ':withdraw'
+    WHERE withdraw_batch_id IS NULL
+    AND EXISTS (SELECT 1 FROM privana_transactions WHERE owner = 'swap:' || swaps.id || ':withdraw');
+    """,
 ]
+
+
+def connect(db_path: Optional[Path] = None) -> sqlite3.Connection:
+    """A new connection. A thread with work of its own opens its own: a
+    connection's transactions are shared by every thread that uses it."""
+    path = db_path or _DB_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(path), check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA foreign_keys=ON")
+    return conn
 
 
 def get_db(db_path: Optional[Path] = None) -> sqlite3.Connection:
@@ -172,33 +240,31 @@ def get_db(db_path: Optional[Path] = None) -> sqlite3.Connection:
     if _connection is not None:
         return _connection
 
-    path = db_path or _DB_PATH
-    path.parent.mkdir(parents=True, exist_ok=True)
-
-    _connection = sqlite3.connect(str(path), check_same_thread=False)
-    _connection.row_factory = sqlite3.Row
-    _connection.execute("PRAGMA journal_mode=WAL")
-    _connection.execute("PRAGMA foreign_keys=ON")
-
+    _connection = connect(db_path)
     _run_migrations(_connection)
-    logger.info(f"Database initialized at {path}")
+    logger.info(f"Database initialized at {db_path or _DB_PATH}")
     return _connection
 
 
+# A failed write rolls back, so it never leaves a transaction holding the
+# database lock against another thread's connection.
 def db_write(conn: sqlite3.Connection, sql: str, params: tuple = ()) -> sqlite3.Cursor:
-    with _write_lock:
-        cursor = conn.execute(sql, params)
-        conn.commit()
-        return cursor
+    with _write_lock, conn:
+        return conn.execute(sql, params)
 
 
 def db_write_many(conn: sqlite3.Connection, sql: str, params: list[tuple]) -> int:
     if not params:
         return 0
-    with _write_lock:
-        cursor = conn.executemany(sql, params)
-        conn.commit()
-        return cursor.rowcount
+    with _write_lock, conn:
+        return conn.executemany(sql, params).rowcount
+
+
+@contextmanager
+def db_transaction(conn: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
+    """Several writes that commit together or not at all."""
+    with _write_lock, conn:
+        yield conn
 
 
 def close_db() -> None:
@@ -238,4 +304,27 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
                 "|| 'interrupted by upgrade; manual recovery required', "
                 "updated_at = CAST(strftime('%s', 'now') AS INTEGER) "
                 "WHERE venue = 'lifi' AND status IN ('executing', 'refunding')"
+            )
+        # The EVM batcher has no record of txs the old send path sent, and the
+        # old refund paid out with no marker: resuming either could repeat it.
+        if conn.execute(
+            "INSERT OR IGNORE INTO data_migrations (name) VALUES ('lifi_park_unbatched_v1')"
+        ).rowcount:
+            conn.execute(
+                "UPDATE swaps SET status = 'failed', error = COALESCE(error || '; ', '') "
+                "|| 'in flight at the batcher upgrade; manual recovery required', "
+                "updated_at = CAST(strftime('%s', 'now') AS INTEGER) "
+                "WHERE venue = 'lifi' AND status IN ('executing', 'refunding')"
+            )
+        # Failed swaps keep what the old pipelines told the user: a lifi swap
+        # failed at a step that held its funds needs support, any other did
+        # not move funds.
+        if conn.execute(
+            "INSERT OR IGNORE INTO data_migrations (name) VALUES ('swap_stages_v1')"
+        ).rowcount:
+            conn.execute(
+                "UPDATE swaps SET step = CASE WHEN venue = 'lifi' AND step IN "
+                "('input_transfer', 'withdraw', 'lifi_execute', 'deposit', 'credit') "
+                "THEN 'parked' ELSE 'no_funds_moved' END "
+                "WHERE status = 'failed' AND (step IS NULL OR step NOT IN ('parked', 'no_funds_moved'))"
             )

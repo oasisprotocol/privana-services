@@ -46,6 +46,15 @@ WITHDRAW_TYPES = {
 }
 
 
+ACCOUNTING_WITHDRAW_TYPES = {
+    "Withdraw": [
+        {"name": "tokenId", "type": "bytes32"},
+        {"name": "amount", "type": "uint256"},
+        {"name": "nonce", "type": "uint256"},
+    ]
+}
+
+
 def _to_bytes32(hex_str: str) -> bytes:
     raw = bytes.fromhex(hex_str.removeprefix("0x"))
     if len(raw) > 32:
@@ -85,6 +94,24 @@ def sign_transfer(
         message_data=message_data,
     )
 
+    return "0x" + signed.signature.hex()
+
+
+def sign_withdrawal(
+    private_key: str,
+    chain_id: int,
+    verifying_contract: str,
+    token_id: str,
+    amount: int,
+    nonce: int,
+) -> str:
+    """Sign an EIP-712 ``Withdraw`` for ``Accounting.requestWithdrawal``."""
+    signed = Account.sign_typed_data(
+        private_key,
+        domain_data=_salted_domain("AccountingModule", chain_id, verifying_contract),
+        message_types=ACCOUNTING_WITHDRAW_TYPES,
+        message_data={"tokenId": _to_bytes32(token_id), "amount": amount, "nonce": nonce},
+    )
     return "0x" + signed.signature.hex()
 
 

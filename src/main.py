@@ -12,6 +12,7 @@ from src.api.swap import router as swap_router
 from src.core.config import load_settings
 from src.core.db import close_db, get_db
 from src.core.validation import validate_token_id
+from src.services.earn.worker import earn_signs_as_lp
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +38,11 @@ def _validate_settings() -> None:
         errors.append("PRIVANA_API_BASE_URL is not set")
     if not settings.base_rpc_url:
         errors.append("BASE_RPC_URL is not set")
+    # Pool payouts and moves sign as the earn account: never the LP's float.
+    if settings.earn_pool_address.lower() == settings.liquidity_provider_address.lower() != "":
+        errors.append("EARN_POOL_SECRET_KEY is the LP's key; earn needs its own account")
+    elif not settings.earn_pool_address and (settings.aave_pool_assets or settings.midas_pool_assets):
+        errors.append("EARN_POOL_SECRET_KEY is not set but earn pools are configured")
     if not settings.internal_swap_token_ids:
         errors.append("INTERNAL_SWAP_TOKEN_IDS is not set")
     for token_id in sorted(settings.internal_swap_token_ids):
@@ -106,6 +112,16 @@ async def lifespan(_app: FastAPI):
     swap_worker = get_swap_worker()
     await swap_worker.start()
 
+    from src.clients.evm_batcher import start_evm_batchers, stop_evm_batchers
+    from src.clients.privana_lanes import (
+        run_transfer_lanes,
+        start_withdraw_lanes,
+        stop_withdraw_lanes,
+    )
+
+    start_evm_batchers(run_transfer_lanes)
+    start_withdraw_lanes()
+
     try:
         await get_price_sampler().start()
     except Exception:
@@ -121,15 +137,19 @@ async def lifespan(_app: FastAPI):
     except Exception:
         logger.exception("Earn pool listing cache failed to start")
 
-    try:
-        await get_earn_worker().start()
-    except Exception:
-        logger.exception("Earn worker failed to start; queued earn operations will not run")
+    if earn_signs_as_lp():
+        logger.error("Earn worker and idle deployer not started: the pool admin is the LP, whose Sapphire "
+                     "nonce its sender owns; earn requests are refused")
+    else:
+        try:
+            await get_earn_worker().start()
+        except Exception:
+            logger.exception("Earn worker failed to start; queued earn operations will not run")
 
-    try:
-        await get_idle_deployer().start()
-    except Exception:
-        logger.exception("Idle deployer failed to start; seeded funds will sit undeployed")
+        try:
+            await get_idle_deployer().start()
+        except Exception:
+            logger.exception("Idle deployer failed to start; seeded funds will sit undeployed")
 
     try:
         yield
@@ -157,6 +177,7 @@ async def lifespan(_app: FastAPI):
         await get_earn_worker().stop()
     except Exception:
         logger.warning("Error stopping earn worker")
+    await stop_withdraw_lanes()
     try:
         await get_accounting_client().close()
     except Exception:
@@ -166,6 +187,7 @@ async def lifespan(_app: FastAPI):
     except Exception:
         logger.warning("Error closing Li.Fi client")
 
+    stop_evm_batchers()
     close_db()
     logger.info("Privana services shut down")
 
@@ -203,8 +225,17 @@ async def health():
     except Exception:
         checks["sapphire"] = "unavailable"
 
+    from src.clients.evm_batcher import STUCK_AFTER_SEC, sender_health
+    from src.clients.privana_lanes import lane_health
+
+    senders, lanes = sender_health(), lane_health()
+    # A dead sender thread or a write waiting past the stuck window needs a person.
+    waits = [*senders["oldest_queued_sec"].values(), *lanes.values()]
+    checks["senders"] = "ok" if senders["threads_alive"] == senders["threads"] else "thread stopped"
+    checks["queues"] = "ok" if all(w < STUCK_AFTER_SEC for w in waits) else "stalled"
+
     overall = "ok" if all(v == "ok" for v in checks.values()) else "degraded"
-    return {"status": overall, "checks": checks}
+    return {"status": overall, "checks": checks, "senders": senders, "lanes": lanes}
 
 
 def main():
@@ -216,6 +247,7 @@ def main():
         port=settings.api_port,
         reload=settings.environment.lower() == "development",
         log_level=settings.log_level.lower(),
+        use_colors=False,
     )
 
 

@@ -92,13 +92,6 @@ class SwapExecutor:
             raise ValueError(f"Swap {swap_id} not found")
         return SwapRecord(**dict(row))
 
-    def _update_swap(self, swap_id: str, **fields) -> None:
-        db = get_db()
-        fields["updated_at"] = int(time.time())
-        set_clause = ", ".join(f"{k} = ?" for k in fields)
-        values = list(fields.values()) + [swap_id]
-        db_write(db, f"UPDATE swaps SET {set_clause} WHERE id = ?", tuple(values))
-
 
 _executor_instance: Optional[SwapExecutor] = None
 

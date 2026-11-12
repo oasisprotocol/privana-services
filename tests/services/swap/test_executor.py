@@ -42,7 +42,8 @@ async def test_schedule_persists_authorization_without_chain_calls(
     args = request_data(venue=venue)
     with patch("src.clients.sapphire.get_sapphire_client", side_effect=AssertionError("RPC")), \
          patch("src.clients.accounting.get_accounting_client", side_effect=AssertionError("RPC")), \
-         patch("src.services.swap.lifi_pipeline.get_lifi_pipeline", side_effect=AssertionError("pipeline")):
+         patch("src.clients.evm_batcher.submit", side_effect=AssertionError("sender")), \
+         patch("src.clients.privana_lanes.submit_privana", side_effect=AssertionError("lane")):
         result = await executor.schedule_swap(*args)
     row = dict(test_db.execute("SELECT * FROM swaps").fetchone())
     assert result.status == "scheduled"

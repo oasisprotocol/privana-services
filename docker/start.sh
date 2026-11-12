@@ -2,6 +2,9 @@
 
 set -a
 
+# Plain logs: color escapes end up as \u001b noise in the ROFL log stream.
+NO_COLOR=1
+
 # Preserve variables already in the environment e.g. injected via ROFL secrets.
 preexisting_env=$(export -p)
 source .env
@@ -31,4 +34,4 @@ curl -X PUT --unix-socket /run/rofl-appd.sock http://localhost/rofl/v1/metadata 
 EOF
 echo "done."
 
-uv run uvicorn src.main:app --host ${API_HOST} --port ${API_PORT}
+exec uv run uvicorn src.main:app --host ${API_HOST} --port ${API_PORT} --no-use-colors

@@ -8,12 +8,13 @@ from web3 import Web3
 
 pytestmark = pytest.mark.integration
 
-BASE_MAINNET_RPC_URL = "https://mainnet.base.org"
+# The Ethereum deployment the service uses (MIDAS_* in .env.mainnet).
+ETHEREUM_RPC_URL = "https://ethereum-rpc.publicnode.com"
 
-ISSUANCE_VAULT = Web3.to_checksum_address("0x8978e327FE7C72Fa4eaF4649C23147E279ae1470")
-REDEMPTION_VAULT = Web3.to_checksum_address("0x2a8c22E3b10036f3AEF5875d04f8441d4188b656")
+ISSUANCE_VAULT = Web3.to_checksum_address("0x99361435420711723aF805F08187c9E6bF796683")
+REDEMPTION_VAULT = Web3.to_checksum_address("0x569D7dccBF6923350521ecBC28A555A500c4f0Ec")
 MTBILL_TOKEN = Web3.to_checksum_address("0xDD629E5241CbC5919847783e6C96B2De4754e438")
-ORACLE = Web3.to_checksum_address("0x70E58b7A1c884fFFE7dbce5249337603a28b8422")
+ORACLE = Web3.to_checksum_address("0x056339C044055819E8Db84E71f5f2E1F536b2E5b")
 
 ABI_DIR = Path(__file__).resolve().parents[2] / "src" / "abis"
 
@@ -28,7 +29,7 @@ def _abi(name: str) -> list:
 def _call(fn):
     """Wrap a web3 contract function call with retry on 429 rate-limits.
 
-    Public Base RPCs throttle bursts of eth_calls, which is exactly the
+    Public RPCs throttle bursts of eth_calls, which is exactly the
     pattern this probe produces. Real ops would configure a private RPC
     via BASE_RPC_URL, but we want CI to be green against the
     public endpoint too.
@@ -50,9 +51,9 @@ def _call(fn):
 
 @pytest.fixture(scope="module")
 def w3() -> Web3:
-    client = Web3(Web3.HTTPProvider(BASE_MAINNET_RPC_URL))
+    client = Web3(Web3.HTTPProvider(ETHEREUM_RPC_URL))
     if not client.is_connected():
-        pytest.skip(f"Cannot reach Base mainnet RPC at {BASE_MAINNET_RPC_URL}")
+        pytest.skip(f"Cannot reach Ethereum RPC at {ETHEREUM_RPC_URL}")
     return client
 
 
@@ -76,19 +77,15 @@ def mtbill(w3: Web3):
     return w3.eth.contract(address=MTBILL_TOKEN, abi=_abi("ERC20"))
 
 
-def test_oracle_decimals_is_18(oracle) -> None:
-    """Pin oracle decimals at 18. The conversion math in MidasStrategy
-    assumes this; if Chronicle ever ships a feed with different precision
-    the conversion is silently wrong by 10^delta.
+def test_oracle_answer_is_a_sane_mtbill_price(oracle) -> None:
+    """MidasStrategy normalizes by the feed's own decimals, so pin the
+    normalized price rather than the precision. `latestRoundData` because the
+    Ethereum feed reverts on `latestAnswer`.
     """
-    assert _call(oracle.functions.decimals()) == 18
-
-
-def test_oracle_returns_positive_answer(oracle) -> None:
-    answer = _call(oracle.functions.latestAnswer())
-    assert answer > 0, "oracle returned non-positive price"
-    assert 0.95 * 10**18 < answer < 2.0 * 10**18, (
-        f"oracle answer {answer} outside sane bounds for MTBILL/USD"
+    decimals = _call(oracle.functions.decimals())
+    _, answer, _, _, _ = _call(oracle.functions.latestRoundData())
+    assert 0.95 < answer / 10**decimals < 2.0, (
+        f"oracle answer {answer} ({decimals} decimals) outside sane bounds for MTBILL/USD"
     )
 
 

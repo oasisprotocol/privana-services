@@ -33,6 +33,14 @@ def test_load_settings_without_lp_key_does_not_crash(monkeypatch):
     config_module.load_settings(refresh=True)
 
 
+def test_earn_account_does_not_fall_back_to_the_lp_key(monkeypatch):
+    monkeypatch.setenv("LIQUIDITY_PROVIDER_SECRET_KEY", "0x" + "11" * 32)
+    monkeypatch.delenv("EARN_POOL_SECRET_KEY", raising=False)
+    settings = config_module.load_settings(refresh=True)
+    assert (settings.earn_pool_secret_key, settings.earn_pool_address) == ("", "")
+    config_module.load_settings(refresh=True)
+
+
 def test_sapphire_rpc_headers_unset_returns_empty(monkeypatch):
     monkeypatch.delenv("SAPPHIRE_RPC_HEADERS", raising=False)
     assert config_module._build_sapphire_rpc_headers() == {}
@@ -158,3 +166,33 @@ def test_internal_swap_token_ids_parses_a_multiline_list(monkeypatch):
     monkeypatch.setenv("INTERNAL_SWAP_TOKEN_IDS", "\n    0xAA,\n    0xbb,\n")
     settings = config_module.load_settings(refresh=True)
     assert settings.internal_swap_token_ids == {"0xaa", "0xbb"}
+
+
+POOLS = '{"0x' + "e" * 64 + '": "0x' + "f" * 64 + '"}'
+
+
+@pytest.mark.parametrize("earn_pool_address,pools,error", [
+    ("", POOLS, "EARN_POOL_SECRET_KEY is not set but earn pools are configured"),
+    ("LP", POOLS, "EARN_POOL_SECRET_KEY is the LP's key"),
+    ("LP", "", "EARN_POOL_SECRET_KEY is the LP's key"),
+    ("0x" + "c" * 40, POOLS, None),
+])
+def test_validate_settings_requires_earn_its_own_account(monkeypatch, earn_pool_address, pools, error):
+    lp = "0x" + "d" * 40
+    crafted = _settings_with(
+        liquidity_provider_address=lp,
+        earn_pool_address=lp if earn_pool_address == "LP" else earn_pool_address,
+        aave_pool_assets=pools,
+        midas_pool_assets="",
+        environment="production",
+    )
+    monkeypatch.setattr(main_module, "settings", crafted)
+    try:
+        main_module._validate_settings()
+        raised = ""
+    except RuntimeError as exc:
+        raised = str(exc)
+    if error:
+        assert error in raised
+    else:
+        assert "EARN_POOL_SECRET_KEY" not in raised

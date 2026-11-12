@@ -24,6 +24,13 @@ def evm_clients(monkeypatch):
     monkeypatch.setattr("src.services.swap.quote_service.get_evm_client", get_evm_client)
     return missing
 
+
+@pytest.fixture(autouse=True)
+def localnet_settings(settings, monkeypatch):
+    """The prices here are at .env.localnet's fee, also when the integration
+    tests' conftest has loaded another network's settings."""
+    monkeypatch.setattr("src.core.config._settings", settings)
+
 # Accounting token ids are bytes32; validation rejects anything shorter.
 TOKEN_A = "0x" + "aa" * 32
 TOKEN_B = "0x" + "bb" * 32

@@ -5,8 +5,10 @@ import logging
 import time
 from typing import Optional
 
+from eth_account import Account
 from web3.exceptions import TransactionNotFound
 
+from src.core.config import load_settings
 from src.core.db import db_write, get_db
 from src.core.validation import sanitize_error
 from src.services.earn import progress
@@ -50,6 +52,15 @@ POLL_INTERVAL = 1.0
 LIQUIDITY_RECHECK_SEC = 30
 
 
+def earn_signs_as_lp() -> bool:
+    """EarnManager calls sign as the pool admin, or the LP when it has no key
+    of its own. The LP's Sapphire nonce belongs to its sender, so earn must
+    not write as the LP next to it."""
+    settings = load_settings()
+    key = settings.pool_admin_secret_key or settings.liquidity_provider_secret_key
+    return bool(key) and Account.from_key(key).address.lower() == settings.liquidity_provider_address.lower()
+
+
 class EarnWorker:
     def __init__(self) -> None:
         self._stop = asyncio.Event()
@@ -57,7 +68,16 @@ class EarnWorker:
         self._liquidity_checked_at: Optional[float] = None
 
     async def start(self) -> None:
+        """Start the loop, unless the earn account is unset or is the LP's:
+        pool payouts and moves would then spend swap float."""
         if self._task is not None:
+            return
+        settings = load_settings()
+        if not settings.earn_pool_address:
+            logger.error("Earn worker not started: EARN_POOL_SECRET_KEY is not set")
+            return
+        if settings.earn_pool_address.lower() == settings.liquidity_provider_address.lower():
+            logger.error("Earn worker not started: the earn account %s is the LP's", settings.earn_pool_address)
             return
         self._stop.clear()
         self._task = asyncio.create_task(self._loop())

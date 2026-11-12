@@ -9,8 +9,9 @@ import httpx
 from eth_account import Account
 from eth_account.messages import encode_defunct
 from web3 import Web3
+from web3.contract import Contract
 
-from src.clients.sapphire import sapphire_http_provider
+from src.clients.sapphire import call_with_transient_retry, sapphire_http_provider
 from src.core.abi import load_abi
 from src.core.config import load_settings
 from src.models.common import (
@@ -73,6 +74,8 @@ class AccountingClient:
         self._chain_id = settings.accounting_chain_id
         self._siwe_token: Optional[str] = None
         self._jwt_token: Optional[str] = None
+        # Cached values for token info.
+        self._token_infos: dict[str, TokenInfo] = {}
         self._auth_timestamp: Optional[float] = None
         self._jwt_siwe_cache: dict[str, _JwtSiweAuth] = {}
         self._jwt_siwe_lock = asyncio.Lock()
@@ -146,11 +149,13 @@ class AccountingClient:
         return Balance(**response.json())
 
     async def get_token_info(self, token_id: str) -> TokenInfo:
-        response = await _request_with_retry(
-            self.client, "GET",
-            f"{self.base_url}/v1/accounting/tokens/{token_id}",
-        )
-        return TokenInfo(**response.json())
+        if token_id not in self._token_infos:
+            response = await _request_with_retry(
+                self.client, "GET",
+                f"{self.base_url}/v1/accounting/tokens/{token_id}",
+            )
+            self._token_infos[token_id] = TokenInfo(**response.json())
+        return self._token_infos[token_id]
 
     async def list_all_tokens(self) -> list[TokenInfo]:
         response = await _request_with_retry(
@@ -249,7 +254,9 @@ class AccountingClient:
         return entries
 
     async def get_transfer_nonce(self, user_address: str) -> int:
-        return await asyncio.to_thread(self.transfer_nonce, user_address)
+        return await call_with_transient_retry(
+            lambda: asyncio.to_thread(self.transfer_nonce, user_address), "transfer nonce"
+        )
 
     def transfer_nonce(self, user_address: str) -> int:
         """Read ``transferNonces[user]`` directly from the Accounting contract.
@@ -260,6 +267,17 @@ class AccountingClient:
         Transfer with the wrong nonce reverts as ``InvalidNonce``, so we read
         from where the verifier reads.
         """
+        return self._accounting().functions.transferNonces(
+            Web3.to_checksum_address(user_address)
+        ).call()
+
+    def withdrawal_nonce(self, user_address: str) -> int:
+        """``withdrawalNonces[user]`` on the Accounting contract."""
+        return self._accounting().functions.withdrawalNonces(
+            Web3.to_checksum_address(user_address)
+        ).call()
+
+    def _accounting(self) -> Contract:
         if self._accounting_contract is None:
             settings = load_settings()
             w3 = Web3(sapphire_http_provider(settings.sapphire_rpc_url, settings.sapphire_rpc_headers))
@@ -267,10 +285,7 @@ class AccountingClient:
                 address=Web3.to_checksum_address(settings.accounting_contract_address),
                 abi=load_abi("Accounting"),
             )
-
-        return self._accounting_contract.functions.transferNonces(
-            Web3.to_checksum_address(user_address)
-        ).call()
+        return self._accounting_contract
 
     async def close(self) -> None:
         await self.client.aclose()

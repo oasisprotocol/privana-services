@@ -9,7 +9,8 @@ RUN curl -fsSL https://bun.sh/install | bash && \
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
-# Python.
+# Python. Pinned: uv otherwise takes the newest release, which ckzg has no wheel for.
+ENV UV_PYTHON=3.14
 COPY pyproject.toml uv.lock README.md /app/
 COPY ${ENV_FILE} /app/.env
 COPY src /app/src

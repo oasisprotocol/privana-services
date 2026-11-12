@@ -1,47 +1,106 @@
+"""The stages of a swap filled through LiFi. The user's signed input moves to
+the LP on Sapphire (input), the LP withdraws it to its wallet on the input's
+chain (withdraw), LiFi swaps or bridges it (execute), the output goes back
+into the LP's Privana balance (deposit) and the LP pays the user (credit).
+A swap that cannot go on while its input provably never left the LP's
+balance or wallet is paid back (refund); anything else parks it for a person.
+
+Each stage only submits to a batcher or lane and checks it on a later round."""
+
 import asyncio
+import json
 import logging
 import time
-from typing import Any, Awaitable, Callable, Optional
+from collections import defaultdict
+from typing import Any, Optional
 
 import httpx
 from eth_abi import decode
 from hexbytes import HexBytes
-from privana.types import TransferFundsRequest
+from privana.client.errors import AccountingApiError, NetworkError
 from web3 import Web3
 
+from src.clients import evm_batcher, privana_lanes
 from src.clients.accounting import get_accounting_client
-from src.clients.base_evm import NATIVE_TOKEN, TransactionPendingError, get_evm_client, is_native
+from src.clients.base_evm import NATIVE_TOKEN, get_evm_client, is_native
+from src.clients.evm_batcher import (
+    FAILED,
+    GAS_RETRY_SEC,
+    MINED,
+    NATIVE_TRANSFER_GAS_LIMIT,
+    QUEUED,
+    REVERTED,
+    TxIntent,
+    approve_intent,
+    find_evm_tx,
+    transfer_intent,
+)
 from src.clients.lifi import LIFI_DEFAULT_SLIPPAGE_BPS, get_lifi_client
-from src.clients.privana import get_swap_lp_privana_client
+from src.clients.privana import (
+    DEPOSIT_CREDITED,
+    check_deposit,
+    deposit_address,
+    get_swap_lp_privana_client,
+)
+from src.clients.sapphire import DEFAULT_GAS_LIMIT
 from src.core.config import load_settings
-from src.core.db import db_write, get_db
-from src.core.eip712 import sign_transfer
+from src.core.db import db_transaction, get_db
 from src.core.fees import calculate_fee
-from src.core.validation import sanitize_error
-from src.models.swap import LifiSwapStep, SwapRecord, SwapStatus, SwapVenue
-from src.services.swap.bridge import AccountingBridge
-from src.services.swap.failure import log_swap_failure
-from src.services.swap.worker import lp_transfer_lock
+from src.core.validation import sanitize_error, scrub_urls
+from src.models.swap import SwapStatus, SwapStep, SwapVenue
+from src.services.swap.stage import (
+    ROUND_LIMIT,
+    advance,
+    claim,
+    fail,
+    finish,
+    handle_each,
+    input_transfer_call,
+    note,
+    owner,
+    still_at,
+    swaps_at,
+    waited,
+)
 
 logger = logging.getLogger(__name__)
 
-ACCEPTED_SUBMISSION_STATUSES = {"submitted", "pending", "accepted"}
 LIFI_STATUS_DONE = "DONE"
 LIFI_STATUS_FAILED = "FAILED"
 LIFI_STATUS_INVALID = "INVALID"
 LIFI_SUBSTATUS_COMPLETED = "COMPLETED"
-STATUS_POLL_INTERVAL_SEC = 6.0
-MAX_STATUS_POLLS = 720
-MAX_INPUT_CONFIRM_POLLS = 60
-CREDIT_MAX_RETRIES = 20
-DEPOSIT_MAX_RETRIES = 10
-REFUND_BALANCE_POLLS = 30
-# About 30 min for a withdrawal to reach the swap pool wallet.
-FUNDING_POLLS = 300
-# About 15 min for a sent tx to be mined.
-TX_RECEIPT_POLLS = 150
-# About 1 min for an approval with an unknown outcome to land.
-APPROVAL_POLLS = 10
+
+# What each of a swap's writes is for, in its owner.
+INPUT = "input"
+WITHDRAW = "withdraw"
+APPROVE = "approve"
+LIFI = "lifi"
+DEPOSIT = "deposit"
+# The input deposited back into the LP's Privana balance.
+REFUND = "refund"
+CREDIT = "credit"
+REFUND_PAYOUT = "refund_payout"
+# The step a swap waits at while its wallet tx of each kind is out.
+_SENT_AT = {LIFI: SwapStep.EXECUTE_SENT, REFUND: SwapStep.REFUND_REDEPOSIT, DEPOSIT: SwapStep.DEPOSIT_SENT}
+
+# Scheduled swaps taken per round: the Sapphire sender of their input txs,
+# not this, sets the pace.
+CLAIM_LIMIT = 5
+# The withdraw lane sends one withdrawal at a time, so one withdrawal carries
+# the inputs of every swap of a token waiting for one. One that may still
+# land holds the lane: a withdrawal not signed within the hour is cancelled.
+WITHDRAW_QUEUE_WAIT_SEC = 3600
+# Funds already landed reach the LP's wallet in minutes: an input not there
+# after 30 min is redeposited, and an output or refund not there is parked.
+FUNDING_WAIT_SEC = 1800
+# LiFi's bridges finish in minutes; a route not done in 72 min needs a person.
+BRIDGE_WAIT_SEC = 4320
+# Accounting credits a deposit once it is final on its chain and swept:
+# Ethereum finality plus the sweep can take most of an hour.
+CREDITING_WAIT_SEC = 3600
+# LiFi quotes a second apart can differ slightly: slippage is narrowed again
+# from each new quote, at most this many times.
+NARROW_ATTEMPTS = 3
 
 # Emitted by the LiFi diamond for a same-chain swap (lifinance/contracts ILiFi.sol).
 SWAP_COMPLETED_TOPIC = Web3.keccak(
@@ -49,545 +108,546 @@ SWAP_COMPLETED_TOPIC = Web3.keccak(
 )
 # Its data: integrator, referrer, receiver, fromAssetId, toAssetId, fromAmount, toAmount.
 SWAP_COMPLETED_DATA = ["string", "string", "address", "address", "address", "uint256", "uint256"]
+ERC20_TRANSFER_TOPIC = Web3.keccak(text="Transfer(address,address,uint256)")
 
 
-class TxReverted(RuntimeError):
-    """The tx was mined and reverted: it moved nothing."""
+class BelowFloor(RuntimeError):
+    """The price fell beyond the quote's slippage: the swap cannot pay its floor."""
 
 
-class LifiSwapPipeline:
-    def __init__(
-        self,
-        accounting: Optional[Any] = None,
-        lifi: Optional[Any] = None,
-        bridge: Optional[Any] = None,
-        evm: Optional[Any] = None,
-        privana_factory: Optional[Callable[[], Awaitable[Any]]] = None,
-        poll_interval_sec: float = STATUS_POLL_INTERVAL_SEC,
-    ) -> None:
-        self.settings = load_settings()
-        self.accounting = accounting or get_accounting_client()
-        self.lifi = lifi or get_lifi_client()
-        self.bridge = bridge or AccountingBridge()
-        # One client for every chain in tests; per chain otherwise.
-        self.evm = evm
-        self._privana_factory = privana_factory or get_swap_lp_privana_client
-        self._poll_interval_sec = poll_interval_sec
-        self._credit_max_retries = CREDIT_MAX_RETRIES
-        self._deposit_max_retries = DEPOSIT_MAX_RETRIES
-        self._tasks: dict[str, asyncio.Task] = {}
+async def input_round() -> None:
+    if load_settings().lifi_execution_enabled:
+        claim(SwapVenue.LIFI, SwapStep.INPUT_SENT, CLAIM_LIMIT)
+    await handle_each(swaps_at(SwapStep.INPUT_SENT), _settle_input)
 
-    async def launch(
-        self, quote: dict, user_address: str, input_nonce: int, input_signature: str,
-        swap_id: str,
-    ) -> SwapRecord:
+
+async def withdraw_round() -> None:
+    _batch_withdrawals()
+    await handle_each(swaps_at(SwapStep.WITHDRAW_SENT), _settle_withdraw)
+
+
+def _batch_withdrawals() -> None:
+    """Queue one withdrawal per token for every swap waiting without one. The
+    withdrawal and its swaps are written in one transaction, with nothing
+    awaited, so a swap is in exactly one withdrawal and its amount is fixed."""
+    lp = load_settings().liquidity_provider_address
+    db = get_db()
+    with db_transaction(db):
+        waiting = defaultdict(list)
+        for swap in db.execute(
+            "SELECT id, from_token_id, from_amount FROM swaps WHERE status = ? AND step = ? "
+            "AND withdraw_batch_id IS NULL ORDER BY created_at",
+            (SwapStatus.EXECUTING.value, SwapStep.WITHDRAW_SENT.value),
+        ):
+            waiting[swap["from_token_id"]].append(swap)
+        for token_id, swaps in waiting.items():
+            batch = owner(swaps[0]['id'], WITHDRAW)
+            privana_lanes.submit_withdrawal(db, lp, batch, token_id, sum(int(s["from_amount"]) for s in swaps))
+            db.executemany("UPDATE swaps SET withdraw_batch_id = ?, updated_at = ? WHERE id = ?",
+                           [(batch, int(time.time()), s["id"]) for s in swaps])
+    for token_id, swaps in waiting.items():
+        logger.info("withdrawal %s queued for %d lifi swaps of %s", owner(swaps[0]["id"], WITHDRAW), len(swaps), token_id)
+
+
+async def execute_round(chain_id: int) -> None:
+    """The swaps whose input is on `chain_id`."""
+    swaps = swaps_at(SwapStep.EXECUTE_FUNDING, SwapStep.EXECUTE_SENT, SwapStep.EXECUTE_BRIDGING, limit=-1)
+    await handle_each(await _on_chain(swaps, "from_token_id", chain_id), _execute)
+
+
+async def deposit_round(chain_id: int) -> None:
+    """The swaps whose output is on `chain_id`."""
+    swaps = swaps_at(SwapStep.DEPOSIT_SENT, SwapStep.DEPOSIT_CREDITING, limit=-1)
+    await handle_each(await _on_chain(swaps, "to_token_id", chain_id), _deposit)
+
+
+async def _on_chain(swaps: list[dict], token_field: str, chain_id: int) -> list[dict]:
+    """The oldest ROUND_LIMIT of `swaps` on `chain_id`, filtered before the
+    limit so swaps waiting on one chain never crowd out another's."""
+    accounting = get_accounting_client()
+    on_chain = []
+    for swap in swaps:
         try:
-            await self._submit_input(quote, input_nonce, input_signature)
+            info = await accounting.get_token_info(swap[token_field])
         except Exception as exc:
-            self._update_swap(
-                swap_id, status=SwapStatus.FAILED.value, error=sanitize_error(str(exc))
-            )
-            log_swap_failure(swap_id, "input transfer rejected", exc)
-            return self._get_swap(swap_id)
+            logger.warning("swap %s skipped this round, token lookup failed: %s", swap["id"], scrub_urls(repr(exc)))
+            continue
+        if info.chain_id == chain_id:
+            on_chain.append(swap)
+    return on_chain[:ROUND_LIMIT]
 
-        self._update_swap(
-            swap_id,
-            status=SwapStatus.EXECUTING.value,
-            step=LifiSwapStep.INPUT_TRANSFER.value,
-        )
-        self.spawn_background(swap_id, quote, input_nonce)
-        return self._get_swap(swap_id)
 
-    def spawn_background(self, swap_id: str, quote: dict, input_nonce: int) -> None:
-        # One runner per swap: a second would pay it twice.
-        if swap_id in self._tasks:
-            logger.warning("lifi swap %s already has a runner", swap_id)
-            return
-        task = asyncio.create_task(self._run(swap_id, quote, input_nonce))
-        self._tasks[swap_id] = task
+async def credit_round() -> None:
+    await handle_each(swaps_at(SwapStep.CREDIT_SENT), _credit)
 
-        def release(done: asyncio.Task) -> None:
-            if self._tasks.get(swap_id) is done:
-                del self._tasks[swap_id]
 
-        task.add_done_callback(release)
+async def refund_round() -> None:
+    await handle_each(
+        swaps_at(SwapStep.REFUND_REDEPOSIT, SwapStep.REFUND_CREDITING, SwapStep.REFUND_PAYOUT), _refund)
 
-    def _evm_for(self, chain_id: int):
-        return self.evm if self.evm is not None else get_evm_client(chain_id)
 
-    async def _run(self, swap_id: str, quote: dict, input_nonce: int) -> None:
-        try:
-            # Launch starts at input_transfer; recovery resumes at lifi_execute or deposit.
-            row = self._row(swap_id)
-            if row["step"] == LifiSwapStep.DEPOSIT.value:
-                received = int(row["to_amount_received"])
-                to_info = await self.accounting.get_token_info(quote["to_token_id"])
-            else:
-                if row["step"] == LifiSwapStep.INPUT_TRANSFER.value:
-                    await self._confirm_input(quote, input_nonce)
-                    await self._withdraw(swap_id, quote)
-                received, to_info = await self._lifi_execute(swap_id, quote)
-                self._update_swap(
-                    swap_id, step=LifiSwapStep.DEPOSIT.value, to_amount_received=str(received)
-                )
-            await self._deposit(swap_id, to_info, received)
-            self._update_swap(swap_id, step=LifiSwapStep.CREDIT.value)
-            credited = await self._credit(quote, received)
-            self._update_swap(
-                swap_id,
-                status=SwapStatus.COMPLETED.value,
-                to_amount_actual=str(credited),
-            )
-        except Exception as exc:
-            log_swap_failure(swap_id, "lifi swap failed", exc)
-            row = self._row(swap_id)
-            reason = sanitize_error(str(exc))
-            if row["step"] in (LifiSwapStep.DEPOSIT.value, LifiSwapStep.CREDIT.value) or (
-                row["step"] == LifiSwapStep.LIFI_EXECUTE.value
-                and row["lifi_tx_hash"] is not None
-                and not isinstance(exc, TxReverted)
-            ):
-                # Refund only on proof the input is unspent: past a sent LiFi tx,
-                # that is its reverted receipt.
-                self._park(swap_id, reason)
-                return
-            await self._refund(swap_id, quote, row["step"], reason)
+async def _settle_input(swap: dict) -> None:
+    tx = find_evm_tx(owner(swap["id"], INPUT))
+    if tx is None:
+        # The user's signed transfer, sent by the LP: its receipt says whether it moved.
+        settings = load_settings()
+        call = input_transfer_call(swap)
+        evm_batcher.submit(settings.accounting_chain_id, settings.liquidity_provider_address, TxIntent(
+            owner=owner(swap["id"], INPUT), to=call["to"], gas=DEFAULT_GAS_LIMIT, data=call["data"]))
+        return
+    if tx["status"] == MINED:
+        advance(swap, SwapStep.WITHDRAW_SENT)
+        return
+    if tx["status"] == QUEUED or _retry_for_gas(swap, tx):
+        return
+    outcome = sanitize_error(tx["error"] or f"reverted as {tx['tx_hash']}")
+    if not _unsent_or_reverted(tx):
+        fail(swap, SwapStep.PARKED, f"input tx failed after a signed attempt: {outcome}")
+        return
+    # Our tx moved nothing, and a transfer signed at the input's nonce runs
+    # only once the user's nonce reaches it. Past it, anyone may have sent
+    # the user's signed transfer: the nonce alone never confirms the input.
+    nonce = await get_accounting_client().get_transfer_nonce(swap["user_address"])
+    if nonce <= int(swap["input_nonce"]):
+        fail(swap, SwapStep.NO_FUNDS_MOVED, f"input transfer {outcome}")
+    else:
+        fail(swap, SwapStep.PARKED, f"input transfer {outcome}, but the user's nonce is past it at {nonce}")
 
-    def _row(self, swap_id: str) -> dict:
-        return dict(get_db().execute("SELECT * FROM swaps WHERE id = ?", (swap_id,)).fetchone())
 
-    def _park(self, swap_id: str, reason: str) -> None:
-        """Mark the swap for manual recovery. Moves nothing."""
-        log_swap_failure(swap_id, f"parked for manual recovery: {reason}")
-        self._update_swap(
-            swap_id,
-            status=SwapStatus.FAILED.value,
-            error=f"{reason}; manual recovery required",
-        )
+async def _settle_withdraw(swap: dict) -> None:
+    if swap["withdraw_batch_id"] is None:
+        # Queued in a withdrawal at the start of the next round.
+        return
+    row = privana_lanes.find_privana_tx(swap["withdraw_batch_id"])
+    if row["status"] == privana_lanes.LANDED:
+        advance(swap, SwapStep.EXECUTE_FUNDING)
+    elif row["status"] == privana_lanes.FAILED:
+        # Refused with the nonce not past it: the input is still in the LP's
+        # Privana balance.
+        _start_refund(swap, f"withdrawal failed: {row['error']}", SwapStep.REFUND_PAYOUT)
+    elif row["error"] == privana_lanes.WITHDRAW_GIVEN_UP:
+        # It may still land, so the swap can neither go on nor be refunded.
+        fail(swap, SwapStep.PARKED, f"withdrawal {row['id']} not landed after {row['attempts']} sends")
+    elif (row["status"] == privana_lanes.QUEUED and waited(swap, WITHDRAW_QUEUE_WAIT_SEC)
+          and privana_lanes.cancel_queued(swap["withdraw_batch_id"], "cancelled: not sent in time")):
+        # Never signed, so it can never land: the input is still in the LP's
+        # Privana balance. The other swaps in it see it FAILED next round.
+        _start_refund(swap, f"withdrawal not sent after {WITHDRAW_QUEUE_WAIT_SEC} s", SwapStep.REFUND_PAYOUT)
 
-    async def _refund(
-        self, swap_id: str, quote: dict, step: Optional[str], reason: str
-    ) -> None:
-        refundable = {LifiSwapStep.WITHDRAW.value, LifiSwapStep.LIFI_EXECUTE.value}
-        if step not in refundable:
-            logger.info("lifi swap %s failed at step %s, nothing to refund: %s", swap_id, step, reason)
-            self._update_swap(swap_id, status=SwapStatus.FAILED.value, error=reason)
-            return
 
-        logger.info("lifi swap %s refunding from step %s: %s", swap_id, step, reason)
-        self._update_swap(swap_id, status=SwapStatus.REFUNDING.value, error=reason)
-        try:
-            if step == LifiSwapStep.LIFI_EXECUTE.value:
-                logger.info("lifi swap %s re-depositing input tokens", swap_id)
-                from_info = await self.accounting.get_token_info(quote["from_token_id"])
-                amount = int(quote["from_amount"])
-                # A saved redeposit is settled by its receipt, not by the balance it spends.
-                if self._row(swap_id)["deposit_tx_hash"] is None:
-                    evm = self._evm_for(from_info.chain_id)
-                    for _ in range(REFUND_BALANCE_POLLS):
-                        if await self._holds(evm, from_info.token_address, amount):
-                            break
-                        await asyncio.sleep(self._poll_interval_sec)
-                    else:
-                        raise RuntimeError("input tokens not returned on-chain")
-                await self._deposit(swap_id, from_info, amount)
-            await self._lp_transfer(quote["user_address"], quote["from_token_id"], int(quote["from_amount"]))
-            self._update_swap(swap_id, status=SwapStatus.REFUNDED.value)
-            logger.info("lifi swap %s refunded", swap_id)
-        except Exception as exc:
-            self._update_swap(
-                swap_id,
-                status=SwapStatus.FAILED.value,
-                error=f"{reason}; refund failed, manual recovery required: {sanitize_error(str(exc))}",
-            )
-            log_swap_failure(swap_id, "refund failed", exc)
+async def _execute(swap: dict) -> None:
+    if swap["step"] == SwapStep.EXECUTE_FUNDING.value:
+        await _send_lifi_tx(swap)
+    elif swap["step"] == SwapStep.EXECUTE_SENT.value:
+        await _settle_lifi_tx(swap)
+    else:
+        await _settle_bridge(swap)
 
-    async def _submit_input(
-        self, quote: dict, input_nonce: int, input_signature: str
-    ) -> None:
-        client = await self._privana_factory()
-        submission = await client.transfer_funds(
-            TransferFundsRequest(
-                to_address=self.settings.liquidity_provider_address,
-                token_id=quote["from_token_id"],
-                amount=int(quote["from_amount"]),
-                nonce=input_nonce,
-                signature=input_signature,
-            )
-        )
-        if submission.status not in ACCEPTED_SUBMISSION_STATUSES:
-            raise ValueError(
-                f"input transfer rejected: status={submission.status} detail={submission.detail}"
-            )
 
-    async def _confirm_input(self, quote: dict, input_nonce: int) -> None:
-        for _ in range(MAX_INPUT_CONFIRM_POLLS):
-            nonce = await self.accounting.get_transfer_nonce(quote["user_address"])
-            if nonce > input_nonce:
-                return
-            await asyncio.sleep(self._poll_interval_sec)
-        raise RuntimeError("input transfer not confirmed on ledger")
+async def _send_lifi_tx(swap: dict) -> None:
+    """Queue the swap once the wallet holds its input, and gas for a native
+    input. Sent earlier, it reverts. The wallet is shared, so its balance
+    does not prove this swap's withdrawal arrived."""
+    if find_evm_tx(owner(swap["id"], LIFI)) is not None:
+        # Queued before a restart could record it.
+        advance(swap, SwapStep.EXECUTE_SENT)
+        return
+    if waited(swap, FUNDING_WAIT_SEC):
+        _start_refund(swap, f"input not funded after {FUNDING_WAIT_SEC} s", SwapStep.REFUND_REDEPOSIT)
+        return
+    # Cleanup keeps the quote of a swap in flight.
+    quote = dict(get_db().execute("SELECT * FROM quotes WHERE id = ?", (swap["quote_id"],)).fetchone())
+    from_info, to_info = await _token_infos(swap)
+    evm = get_evm_client(from_info.chain_id)
+    amount, token = int(swap["from_amount"]), from_info.token_address
+    if not await _holds(evm, token, swap["from_token_id"], amount):
+        return
+    try:
+        exec_quote = await _execution_quote(swap["id"], quote, from_info, to_info, evm.address)
+    except BelowFloor as exc:
+        _start_refund(swap, str(exc), SwapStep.REFUND_REDEPOSIT)
+        return
+    try:
+        lifi_tx = _swap_intent(owner(swap["id"], LIFI), from_info.chain_id, exec_quote["transactionRequest"],
+                               is_native(token))
+    except ValueError as exc:
+        _start_refund(swap, str(exc), SwapStep.REFUND_REDEPOSIT)
+        return
+    # Nothing awaits between this check's read of the queued spends and the
+    # submit, so another swap's spend is either counted or not queued yet.
+    if not await _holds(evm, token, swap["from_token_id"], amount, lifi_tx.gas) or not still_at(swap):
+        return
+    # The approval and the swap are queued together, so no other swap's
+    # approval for the same spender lands between them.
+    intents = [lifi_tx] if is_native(token) else [
+        approve_intent(owner(swap["id"], APPROVE), token, exec_quote["estimate"]["approvalAddress"], amount),
+        lifi_tx,
+    ]
+    evm_batcher.submit(from_info.chain_id, load_settings().liquidity_provider_address, *intents)
+    advance(swap, SwapStep.EXECUTE_SENT)
 
-    async def _withdraw(self, swap_id: str, quote: dict) -> None:
-        self._update_swap(swap_id, step=LifiSwapStep.WITHDRAW.value)
-        index = await self.bridge.withdraw_to_chain(
-            quote["from_token_id"], int(quote["from_amount"])
-        )
-        self._update_swap(swap_id, withdrawal_index=index)
 
-    async def _lifi_execute(self, swap_id: str, quote: dict) -> tuple[int, Any]:
-        self._update_swap(swap_id, step=LifiSwapStep.LIFI_EXECUTE.value)
-        from_info = await self.accounting.get_token_info(quote["from_token_id"])
-        to_info = await self.accounting.get_token_info(quote["to_token_id"])
-        evm = self._evm_for(from_info.chain_id)
-        if self._row(swap_id)["lifi_tx_hash"] is None:
-            await self._send_lifi_tx(swap_id, quote, from_info, to_info, evm)
-        receipt = await self._await_tx(swap_id, "lifi", evm)
-        # The swap's reported output, not the wallet balance, which other swaps and gas move.
-        if from_info.chain_id == to_info.chain_id:
-            received = _swap_output(receipt, evm.address, _lifi_token(to_info.token_address))
+async def _settle_lifi_tx(swap: dict) -> None:
+    tx = find_evm_tx(owner(swap["id"], LIFI))
+    if tx["status"] == QUEUED:
+        return
+    # An approval refused for gas fails the swap tx after it unsent too.
+    if tx["status"] != MINED and _retry_for_gas(swap, find_evm_tx(owner(swap["id"], APPROVE)), tx):
+        return
+    if tx["status"] != MINED:
+        outcome = sanitize_error(tx["error"] or f"reverted as {tx['tx_hash']}")
+        if _unsent_or_reverted(tx):
+            _start_refund(swap, f"lifi tx {outcome}", SwapStep.REFUND_REDEPOSIT)
         else:
-            received = await self._bridge_output(
-                self._row(swap_id)["lifi_tx_hash"], from_info, to_info, evm.address
-            )
-        return received, to_info
+            fail(swap, SwapStep.PARKED, f"lifi tx failed after a signed attempt: {outcome}")
+        return
+    from_info, to_info = await _token_infos(swap)
+    if from_info.chain_id != to_info.chain_id:
+        advance(swap, SwapStep.EXECUTE_BRIDGING, lifi_tx_hash=tx["tx_hash"])
+        return
+    # The swap's reported output, not the wallet balance, which other swaps and gas move.
+    try:
+        received = _swap_output(tx["to_address"], json.loads(tx["logs"]), load_settings().liquidity_provider_address,
+                                _lifi_token(to_info.token_address))
+    except RuntimeError as exc:
+        fail(swap, SwapStep.PARKED, str(exc))
+        return
+    advance(swap, SwapStep.DEPOSIT_SENT, lifi_tx_hash=tx["tx_hash"], to_amount_received=str(received))
 
-    async def _send_lifi_tx(
-        self, swap_id: str, quote: dict, from_info: Any, to_info: Any, evm: Any
-    ) -> None:
-        """Send the swap once the wallet holds its input, and gas for a native
-        input. Sent earlier, it reverts. The wallet is shared, so its balance
-        does not prove this swap's withdrawal arrived."""
-        amount = int(quote["from_amount"])
-        for _ in range(FUNDING_POLLS):
-            if await self._holds(evm, from_info.token_address, amount):
-                exec_quote = await self._execution_quote(
-                    swap_id, quote, from_info, to_info, evm.address
-                )
-                async with evm.tx_lock:
-                    gas = int(exec_quote["transactionRequest"]["gasLimit"], 16)
-                    # Swaps share the wallet, so its balance is checked again under the lock.
-                    if await self._holds(evm, from_info.token_address, amount, gas):
-                        await self._approve(
-                            evm, from_info.token_address,
-                            exec_quote["estimate"]["approvalAddress"], amount,
-                        )
-                        await self._send_tx(
-                            swap_id, "lifi", evm.send_transaction_request,
-                            exec_quote["transactionRequest"],
-                        )
-                        return
-            await asyncio.sleep(self._poll_interval_sec)
-        raise RuntimeError(f"swap funding unconfirmed after {FUNDING_POLLS} polls")
 
-    async def _execution_quote(
-        self, swap_id: str, quote: dict, from_info: Any, to_info: Any, from_address: str
-    ) -> dict:
-        request = dict(
-            from_chain_id=from_info.chain_id,
-            to_chain_id=to_info.chain_id,
-            from_token_address=_lifi_token(from_info.token_address),
-            to_token_address=_lifi_token(to_info.token_address),
-            from_amount=quote["from_amount"],
-            from_address=from_address,
-        )
-        fee_bps = self.settings.fee_bps
-        floor = int(quote["to_amount_min"])
-        # Quotes stored before the slippage_bps column existed were priced at LiFi's default.
-        slippage_bps = quote.get("slippage_bps")
-        if slippage_bps is None:
-            slippage_bps = LIFI_DEFAULT_SLIPPAGE_BPS
-        # The floor came from a route priced at this slippage. A different one
-        # moves toAmountMin, not the price.
-        exec_quote = await self.lifi.get_execution_quote(**request, slippage_bps=slippage_bps)
-        if _net_min(exec_quote, fee_bps) < floor:
-            # The price fell since the quote. Spend less of the tolerance so
-            # the minimum LiFi enforces on chain still pays out the floor.
-            narrowed_bps = _slippage_bps_to_floor(
-                int(exec_quote["estimate"]["toAmount"]), floor, fee_bps
-            )
-            if narrowed_bps is not None:
-                logger.info("lifi swap %s narrowing slippage to %s bps", swap_id, narrowed_bps)
-                exec_quote = await self.lifi.get_execution_quote(
-                    **request, slippage_bps=narrowed_bps
-                )
-        net_min = _net_min(exec_quote, fee_bps)
-        if net_min < floor:
-            raise RuntimeError(
-                f"execution quote below floor: net_min={net_min} floor={floor}"
-            )
-        return exec_quote
-
-    async def _holds(self, evm: Any, token: Optional[str], amount: int, gas: int = 0) -> bool:
-        """Whether the wallet holds `amount`, plus `gas` at the fee cap when
-        `token` is the native coin that pays for it."""
-        try:
-            if gas and is_native(token):
-                amount += await asyncio.to_thread(evm.max_gas_cost, gas)
-            return await asyncio.to_thread(evm.balance_of, token, evm.address) >= amount
-        except Exception as exc:
-            logger.warning("balance or fees for %s unavailable: %s", token, exc)
-            return False
-
-    async def _approve(self, evm: Any, token: Optional[str], spender: str, amount: int) -> None:
-        """An approval whose receipt timed out can still be mined, so its allowance
-        decides. Priced out, it holds up every later tx of the wallet, so it is
-        rebroadcast like the swap's txs. Its versions stay in memory: its allowance
-        settles it, not a receipt. The wait stays short: it holds the chain's tx
-        lock, and a refund is safe until the LiFi tx is sent."""
-        signed: list[str] = []
-
-        def keep(tx_hash: str, nonce: int, raw: str) -> None:
-            signed.append(raw)
-
-        try:
-            await asyncio.to_thread(evm.ensure_allowance, token, spender, amount, on_signed=keep)
+async def _settle_bridge(swap: dict) -> None:
+    """One LiFi status call per round: credits what LiFi delivered to the LP."""
+    tx_hash = swap["lifi_tx_hash"]
+    if waited(swap, BRIDGE_WAIT_SEC):
+        fail(swap, SwapStep.PARKED, f"lifi route of {tx_hash} not done after {BRIDGE_WAIT_SEC} s")
+        return
+    from_info, to_info = await _token_infos(swap)
+    try:
+        status = await get_lifi_client().get_status(tx_hash, from_info.chain_id, to_info.chain_id)
+    except httpx.HTTPStatusError as exc:
+        # LiFi answers 404 until it indexes the tx.
+        if exc.response.status_code != 404:
+            raise
+        status = {}
+    recipient = load_settings().liquidity_provider_address
+    try:
+        receiving = _delivered(status, to_info, recipient)
+        if receiving is None:
             return
-        except TransactionPendingError as exc:
-            logger.warning("approval %s outcome unknown: %s", exc.tx_hash, exc)
-        for _ in range(APPROVAL_POLLS):
-            await asyncio.sleep(self._poll_interval_sec)
-            try:
-                if await asyncio.to_thread(evm.allowance, token, spender) >= amount:
-                    return
-                await asyncio.to_thread(evm.rebroadcast, signed[-1], keep)
-            except Exception as exc:
-                logger.warning("approval of %s for %s still pending: %s", token, spender, exc)
-        raise RuntimeError(
-            f"allowance of {token} for {spender} unconfirmed after {APPROVAL_POLLS} polls"
-        )
-
-    async def _send_tx(
-        self, swap_id: str, kind: str, send: Callable[..., str], *args: Any
-    ) -> None:
-        """Send a tx, saved to the `{kind}_tx_*` columns before broadcast. Once
-        saved, a send error proves nothing: only the receipt settles it."""
-        hash_column = f"{kind}_tx_hash"
-
-        def record(tx_hash: str, nonce: int, raw: str) -> None:
-            self._update_swap(swap_id, **{hash_column: tx_hash, f"{kind}_tx_raw": raw})
-            logger.info("lifi swap %s submitting %s tx %s at nonce %d", swap_id, kind, tx_hash, nonce)
-
-        try:
-            await asyncio.to_thread(send, *args, on_signed=record)
-        except Exception as exc:
-            tx_hash = self._row(swap_id)[hash_column]
-            if tx_hash is None:
-                raise
-            logger.warning(
-                "lifi swap %s %s tx %s outcome unknown: %s", swap_id, kind, tx_hash, exc
-            )
-
-    async def _await_tx(self, swap_id: str, kind: str, evm: Any) -> Any:
-        """The receipt of the `{kind}_tx_*` tx, rebroadcast until a version of it is
-        mined. That version becomes `{kind}_tx_hash` and the others stay in
-        `{kind}_tx_replaced`, since a receipt is not final. Nodes lag, so a missing
-        receipt proves nothing, even once the nonce is used."""
-        hash_column, raw_column = f"{kind}_tx_hash", f"{kind}_tx_raw"
-        replaced_column = f"{kind}_tx_replaced"
-
-        def replace(tx_hash: str, nonce: int, raw: str) -> None:
-            row = self._row(swap_id)
-            self._update_swap(swap_id, **{
-                hash_column: tx_hash, raw_column: raw,
-                replaced_column: " ".join(filter(None, (row[replaced_column], row[hash_column]))),
-            })
-            logger.info("lifi swap %s submitting %s tx %s at nonce %d", swap_id, kind, tx_hash, nonce)
-
-        for _ in range(TX_RECEIPT_POLLS):
-            row = self._row(swap_id)
-            versions = [row[hash_column], *(row[replaced_column] or "").split()]
-            try:
-                mined = await self._mined(evm, versions)
-                if mined is None:
-                    await asyncio.to_thread(evm.rebroadcast, row[raw_column], replace)
-            except Exception as exc:
-                # A failed lookup says nothing about the tx.
-                logger.warning("transaction %s lookup failed: %s", row[hash_column], exc)
-            else:
-                if mined is not None:
-                    tx_hash, receipt = mined
-                    if tx_hash != row[hash_column]:
-                        self._update_swap(swap_id, **{
-                            hash_column: tx_hash,
-                            replaced_column: " ".join(h for h in versions if h != tx_hash),
-                        })
-                    if receipt["status"] != 1:
-                        raise TxReverted(f"transaction reverted: {tx_hash}")
-                    return receipt
-            await asyncio.sleep(self._poll_interval_sec)
-        raise RuntimeError(
-            f"receipt of {self._row(swap_id)[hash_column]} unavailable after {TX_RECEIPT_POLLS} polls"
-        )
-
-    async def _mined(self, evm: Any, hashes: list[str]) -> Optional[tuple[str, Any]]:
-        """The first of `hashes` with a receipt, and the receipt."""
-        for tx_hash in hashes:
-            receipt = await asyncio.to_thread(evm.get_receipt, tx_hash)
-            if receipt is not None:
-                return tx_hash, receipt
-        return None
-
-    async def _bridge_output(
-        self, tx_hash: str, from_info: Any, to_info: Any, recipient: str
-    ) -> int:
-        """What LiFi delivered to `recipient`. Anything but a full delivery raises."""
-        token = _lifi_token(to_info.token_address)
-        for _ in range(MAX_STATUS_POLLS):
-            try:
-                status = await self.lifi.get_status(tx_hash, from_info.chain_id, to_info.chain_id)
-            except Exception as exc:
-                # LiFi answers 404 until it indexes the tx.
-                if not (isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 404):
-                    logger.warning("lifi status of %s unavailable: %s", tx_hash, exc)
-                status = {}
-            state, substatus = status.get("status"), status.get("substatus")
-            # Only DONE with COMPLETED is a full delivery. DONE with PARTIAL or
-            # REFUNDED, FAILED and INVALID are final. Anything else keeps polling.
-            if state == LIFI_STATUS_DONE and substatus == LIFI_SUBSTATUS_COMPLETED:
-                receiving = status["receiving"]
-                if (
-                    int(receiving["chainId"]) != to_info.chain_id
-                    or receiving["token"]["address"].lower() != token.lower()
-                    or status["toAddress"].lower() != recipient.lower()
-                ):
-                    raise RuntimeError(f"lifi delivered {tx_hash} elsewhere: {receiving}")
-                return int(receiving["amount"])
-            if state in (LIFI_STATUS_DONE, LIFI_STATUS_FAILED, LIFI_STATUS_INVALID):
-                raise RuntimeError(f"lifi route of {tx_hash} ended {state} {substatus}")
-            await asyncio.sleep(self._poll_interval_sec)
-        raise RuntimeError(f"lifi execution status polling exhausted for {tx_hash}")
-
-    async def _deposit(self, swap_id: str, info: Any, amount: int) -> None:
-        """Transfer `amount` from the swap pool wallet to its Accounting deposit
-        address, then wait for Accounting to credit the swap pool account's
-        private balance. A new transfer is signed only after the last one reverts."""
-        evm = self._evm_for(info.chain_id)
-        last_error: Optional[Exception] = None
-        for attempt in range(self._deposit_max_retries):
-            logger.info(
-                "lifi swap %s deposit attempt %d/%d", swap_id, attempt + 1, self._deposit_max_retries
-            )
-            try:
-                if self._row(swap_id)["deposit_tx_hash"] is None:
-                    await self._transfer_to_deposit_address(
-                        swap_id, evm, info.token_address, amount
-                    )
-                try:
-                    await self._await_tx(swap_id, "deposit", evm)
-                except TxReverted:
-                    self._update_swap(
-                        swap_id, deposit_tx_hash=None, deposit_tx_raw=None,
-                        deposit_tx_replaced=None,
-                    )
-                    raise
-                await self.bridge.await_deposit_credit(
-                    info.chain_id, self._row(swap_id)["deposit_tx_hash"], amount
-                )
-                logger.info("lifi swap %s deposit attempt %d succeeded", swap_id, attempt + 1)
+        if is_native(to_info.token_address):
+            # A native payout leaves no log: only LiFi's report shows it.
+            if not is_native(receiving["token"]["address"]):
+                raise RuntimeError(f"delivered elsewhere: {receiving}")
+            received = int(receiving["amount"])
+        else:
+            # LiFi may report the bridged token, or an amount other than what
+            # was paid: what reached the LP is in the delivery tx.
+            evm = get_evm_client(to_info.chain_id)
+            receipt = await asyncio.to_thread(evm.get_receipt, receiving["txHash"])
+            if receipt is None:
                 return
-            except Exception as exc:
-                last_error = exc
-                logger.warning(
-                    "lifi swap %s deposit attempt %d failed: %s", swap_id, attempt + 1, exc
-                )
-                await asyncio.sleep(self._poll_interval_sec)
-        raise RuntimeError(f"deposit retries exhausted: {last_error}")
+            # A solver can fill several routes in one tx: more than one
+            # transfer to the LP cannot be told apart.
+            amounts = [
+                int.from_bytes(HexBytes(log["data"]), "big")
+                for log in receipt["logs"]
+                if log["address"].lower() == to_info.token_address.lower()
+                and len(log["topics"]) == 3
+                and HexBytes(log["topics"][0]) == ERC20_TRANSFER_TOPIC
+                and HexBytes(log["topics"][2])[-20:] == HexBytes(recipient)
+            ]
+            if len(amounts) != 1:
+                raise RuntimeError(f"delivered elsewhere: {receiving}")
+            received = amounts[0]
+    except RuntimeError as exc:
+        fail(swap, SwapStep.PARKED, f"lifi route of {tx_hash}: {exc}")
+        return
+    advance(swap, SwapStep.DEPOSIT_SENT, to_amount_received=str(received))
 
-    async def _transfer_to_deposit_address(
-        self, swap_id: str, evm: Any, token_address: Optional[str], amount: int
-    ) -> None:
-        deposit_address = await self.bridge.get_deposit_address()
-        async with evm.tx_lock:
-            await self._send_tx(
-                swap_id, "deposit", evm.transfer, token_address, deposit_address, amount
-            )
 
-    async def _credit(self, quote: dict, received: int) -> int:
-        credited, _ = calculate_fee(received, self.settings.fee_bps)
-        await self._lp_transfer(quote["user_address"], quote["to_token_id"], credited)
-        return credited
+async def _deposit(swap: dict) -> None:
+    amount = int(swap["to_amount_received"])
+    if swap["step"] == SwapStep.DEPOSIT_CREDITING.value:
+        await _check_credited(swap, DEPOSIT, amount, SwapStep.CREDIT_SENT)
+        return
+    tx = find_evm_tx(owner(swap["id"], DEPOSIT))
+    if tx is None:
+        info = await get_accounting_client().get_token_info(swap["to_token_id"])
+        to = await deposit_address(await get_swap_lp_privana_client())
+        # Another swap may have spent this output while it waited for its own
+        # withdrawal, which refills the wallet once it arrives. This output is
+        # among the queued spends, so the wallet must cover them all.
+        if await _holds(get_evm_client(info.chain_id), info.token_address, swap["to_token_id"], 0,
+                        NATIVE_TRANSFER_GAS_LIMIT):
+            if still_at(swap):
+                _submit_deposit(swap, DEPOSIT, info, amount, to)
+        elif waited(swap, FUNDING_WAIT_SEC):
+            fail(swap, SwapStep.PARKED, f"output not in the LP's wallet to deposit after {FUNDING_WAIT_SEC} s")
+        return
+    _settle_deposit(swap, tx, SwapStep.DEPOSIT_CREDITING)
 
-    async def _lp_transfer(self, to_address: str, token_id: str, amount: int) -> None:
-        logger.info("lifi swap _lp_transfer %s of token %s to %s", amount, token_id, to_address)
-        client = await self._privana_factory()
-        # Waiting for internal settlement does not consume payout retries.
-        while True:
-            async with lp_transfer_lock:
-                # A receipt timeout leaves internal transactions executing.
-                # Do not reuse their reserved ledger nonces after their worker
-                # has released the lock to retry receipt lookup later.
-                unresolved = get_db().execute(
-                    "SELECT 1 FROM swaps WHERE venue = 'internal' "
-                    "AND status = 'executing' AND output_signature IS NOT NULL LIMIT 1"
-                ).fetchone()
-                if not unresolved:
-                    return await self._submit_lp_transfer(client, to_address, token_id, amount)
-            await asyncio.sleep(self._poll_interval_sec)
 
-    async def _submit_lp_transfer(self, client, to_address: str, token_id: str, amount: int) -> None:
-        logger.info("lifi swap _submit_lp_transfer %s of token %s to %s", amount, token_id, to_address)
-        # Caller owns lp_transfer_lock through acceptance AND confirmation.
-        last_detail = None
-        for _ in range(self._credit_max_retries):
-            lp_nonce = await self.accounting.get_transfer_nonce(
-                self.settings.liquidity_provider_address
-            )
-            signature = sign_transfer(
-                private_key=self.settings.liquidity_provider_secret_key,
-                chain_id=self.settings.accounting_chain_id,
-                verifying_contract=self.settings.accounting_contract_address,
-                to_address=to_address,
-                token_id=token_id,
-                amount=amount,
-                nonce=lp_nonce,
-            )
-            submission = await client.transfer_funds(
-                TransferFundsRequest(
-                    to_address=to_address,
-                    token_id=token_id,
-                    amount=amount,
-                    nonce=lp_nonce,
-                    signature=signature,
-                )
-            )
-            if submission.status in ACCEPTED_SUBMISSION_STATUSES:
-                for _ in range(MAX_INPUT_CONFIRM_POLLS):
-                    current = await self.accounting.get_transfer_nonce(
-                        self.settings.liquidity_provider_address
-                    )
-                    if current > lp_nonce:
-                        return
-                    await asyncio.sleep(self._poll_interval_sec)
-                raise RuntimeError("LP transfer not confirmed on ledger")
-            last_detail = submission.detail
-            await asyncio.sleep(self._poll_interval_sec)
-        raise RuntimeError(f"credit retries exhausted: {last_detail}")
+async def _credit(swap: dict) -> None:
+    row = privana_lanes.find_privana_tx(owner(swap["id"], CREDIT))
+    if row is None:
+        credited, _ = calculate_fee(int(swap["to_amount_received"]), load_settings().fee_bps)
+        _pay(swap, CREDIT, swap["to_token_id"], credited)
+    elif row["status"] == privana_lanes.LANDED:
+        finish(swap, SwapStatus.COMPLETED, to_amount_actual=str(json.loads(row["payload"])["amount"]))
+    elif row["status"] == privana_lanes.FAILED:
+        fail(swap, SwapStep.PARKED, f"credit failed: {row['error']}")
 
-    def _update_swap(self, swap_id: str, **fields) -> None:
-        db = get_db()
-        fields["updated_at"] = int(time.time())
-        set_clause = ", ".join(f"{k} = ?" for k in fields)
-        values = list(fields.values()) + [swap_id]
-        db_write(db, f"UPDATE swaps SET {set_clause} WHERE id = ?", tuple(values))
 
-    def _get_swap(self, swap_id: str) -> SwapRecord:
-        db = get_db()
-        row = db.execute("SELECT * FROM swaps WHERE id = ?", (swap_id,)).fetchone()
-        if row is None:
-            raise ValueError(f"Swap {swap_id} not found")
-        return SwapRecord(**dict(row))
+def _start_refund(swap: dict, reason: str, step: SwapStep) -> None:
+    """Only where the input provably never left: a withdrawal that failed
+    (REFUND_PAYOUT), or a LiFi tx never queued or settled unspent
+    (REFUND_REDEPOSIT, the input back from the wallet first)."""
+    if advance(swap, step, SwapStatus.REFUNDING, error=reason):
+        logger.info("lifi swap %s refunding: %s", swap["id"], reason)
+
+
+async def _refund(swap: dict) -> None:
+    amount = int(swap["from_amount"])
+    if swap["step"] == SwapStep.REFUND_CREDITING.value:
+        await _check_credited(swap, REFUND, amount, SwapStep.REFUND_PAYOUT)
+        return
+    if swap["step"] == SwapStep.REFUND_PAYOUT.value:
+        _settle_refund_payout(swap, amount)
+        return
+    tx = find_evm_tx(owner(swap["id"], REFUND))
+    if tx is not None:
+        _settle_deposit(swap, tx, SwapStep.REFUND_CREDITING)
+        return
+    if waited(swap, FUNDING_WAIT_SEC):
+        fail(swap, SwapStep.PARKED, f"input not in the LP's wallet to return after {FUNDING_WAIT_SEC} s")
+        return
+    info = await get_accounting_client().get_token_info(swap["from_token_id"])
+    to = await deposit_address(await get_swap_lp_privana_client())
+    # As at execute, nothing awaits between the queued spends read and the submit.
+    if await _holds(get_evm_client(info.chain_id), info.token_address, swap["from_token_id"], amount) \
+            and still_at(swap):
+        _submit_deposit(swap, REFUND, info, amount, to)
+
+
+def _settle_refund_payout(swap: dict, amount: int) -> None:
+    row = privana_lanes.find_privana_tx(owner(swap["id"], REFUND_PAYOUT))
+    if row is None:
+        _pay(swap, REFUND_PAYOUT, swap["from_token_id"], amount)
+    elif row["status"] == privana_lanes.LANDED:
+        finish(swap, SwapStatus.REFUNDED)
+    elif row["status"] == privana_lanes.FAILED:
+        fail(swap, SwapStep.PARKED, f"refund failed: {row['error']}")
+
+
+def _pay(swap: dict, kind: str, token_id: str, amount: int) -> None:
+    """The LP's transfer of `amount` to the user, on its lane."""
+    lp = load_settings().liquidity_provider_address
+    privana_lanes.submit_privana(lp, privana_lanes.transfer_balance_intent(
+        owner(swap["id"], kind), swap["user_address"], token_id, amount))
+
+
+def _submit_deposit(swap: dict, kind: str, info: Any, amount: int, deposit_address: str) -> None:
+    evm_batcher.submit(info.chain_id, load_settings().liquidity_provider_address,
+                       transfer_intent(owner(swap["id"], kind), info.token_address, deposit_address, amount))
+
+
+def _settle_deposit(swap: dict, tx: dict, crediting: SwapStep) -> None:
+    if tx["status"] == MINED:
+        advance(swap, crediting, deposit_tx_hash=tx["tx_hash"])
+    elif tx["status"] != QUEUED and not _retry_for_gas(swap, tx):
+        # The funds are in the LP's wallet, or may be.
+        fail(swap, SwapStep.PARKED, f"deposit tx {tx['status']}: {sanitize_error(tx['error'] or tx['tx_hash'])}")
+
+
+async def _check_credited(swap: dict, kind: str, amount: int, then: SwapStep) -> None:
+    """One deposit check per round."""
+    tx = find_evm_tx(owner(swap["id"], kind))
+    try:
+        status = (await check_deposit(await get_swap_lp_privana_client(), tx["chain_id"], tx["tx_hash"], amount)).status
+    except (AccountingApiError, NetworkError) as exc:
+        # Refused until the deposit is final on its chain.
+        status = f"not accepted: {scrub_urls(str(exc))}"
+        logger.warning("lifi swap %s deposit %s %s", swap["id"], tx["tx_hash"], status)
+    if status == DEPOSIT_CREDITED:
+        advance(swap, then)
+    elif waited(swap, CREDITING_WAIT_SEC):
+        fail(swap, SwapStep.PARKED, f"deposit {tx['tx_hash']} not credited after {CREDITING_WAIT_SEC} s: {status}")
+
+
+def _retry_for_gas(swap: dict, *txs: Optional[dict]) -> bool:
+    """Whether one of the swap's `txs` was refused because the LP could not
+    pay its gas. The swap then stays where it is, and the txs that failed
+    unsent are queued again once the LP has had a while to be topped up."""
+    unsent = [tx for tx in txs if tx is not None and tx["status"] == FAILED and not tx["attempts"]]
+    refused = [tx for tx in unsent if evm_batcher.refused_for_gas(tx)]
+    if not refused:
+        return False
+    if int(time.time()) - max(tx["updated_at"] for tx in refused) < GAS_RETRY_SEC:
+        if note(swap, f"refused for gas on chain {refused[0]['chain_id']}; retrying"):
+            logger.error("lifi swap %s: %s refused for gas on chain %s; retrying in %d s", swap["id"],
+                         refused[0]["owner"], refused[0]["chain_id"], GAS_RETRY_SEC)
+        return True
+    evm_batcher.requeue(*(tx["owner"] for tx in unsent))
+    return True
+
+
+def _unsent_or_reverted(tx: dict) -> bool:
+    """Whether a settled tx provably spent nothing: it reverted, or failed
+    before any attempt was signed. A signed attempt may have reached a node."""
+    return tx["status"] == REVERTED or (tx["status"] == FAILED and not tx["attempts"])
+
+
+async def _token_infos(swap: dict) -> tuple[Any, Any]:
+    accounting = get_accounting_client()
+    return (await accounting.get_token_info(swap["from_token_id"]),
+            await accounting.get_token_info(swap["to_token_id"]))
+
+
+async def _execution_quote(
+    swap_id: str, quote: dict, from_info: Any, to_info: Any, from_address: str
+) -> dict:
+    lifi = get_lifi_client()
+    request = dict(
+        from_chain_id=from_info.chain_id,
+        to_chain_id=to_info.chain_id,
+        from_token_address=_lifi_token(from_info.token_address),
+        to_token_address=_lifi_token(to_info.token_address),
+        from_amount=quote["from_amount"],
+        from_address=from_address,
+    )
+    fee_bps = load_settings().fee_bps
+    floor = int(quote["to_amount_min"])
+    # Quotes stored before the slippage_bps column existed were priced at LiFi's default.
+    slippage_bps = quote.get("slippage_bps")
+    if slippage_bps is None:
+        slippage_bps = LIFI_DEFAULT_SLIPPAGE_BPS
+    # The floor came from a route priced at this slippage. A different one
+    # moves toAmountMin, not the price.
+    exec_quote = await lifi.get_execution_quote(**request, slippage_bps=slippage_bps)
+    for _ in range(NARROW_ATTEMPTS):
+        if _net_min(exec_quote, fee_bps) >= floor:
+            break
+        # The price fell since the quote. Spend less of the tolerance so
+        # the minimum LiFi enforces on chain still pays out the floor.
+        narrowed_bps = _slippage_bps_to_floor(int(exec_quote["estimate"]["toAmount"]), floor, fee_bps)
+        if narrowed_bps is None:
+            break
+        logger.info("lifi swap %s narrowing slippage to %s bps", swap_id, narrowed_bps)
+        exec_quote = await lifi.get_execution_quote(**request, slippage_bps=narrowed_bps)
+    net_min = _net_min(exec_quote, fee_bps)
+    if net_min < floor:
+        raise BelowFloor(f"execution quote below floor: net_min={net_min} floor={floor}")
+    return exec_quote
+
+
+async def _holds(evm: Any, token: Optional[str], token_id: str, amount: int, gas: int = 0) -> bool:
+    """Whether the wallet holds `amount`, plus `gas` at the fee cap when
+    `token` is the native coin that pays for it, beyond what txs already
+    queued will take out of it."""
+    # Read before the balance too: a tx mined during the balance read has left
+    # both the balance and the queue by the second read.
+    spend = _queued_spend(token_id)
+    try:
+        if gas and is_native(token):
+            amount += await asyncio.to_thread(evm.max_gas_cost, gas)
+        balance = await asyncio.to_thread(evm.balance_of, token, evm.address)
+    except Exception as exc:
+        logger.warning("balance or fees for %s unavailable: %s", token, scrub_urls(str(exc)))
+        return False
+    return balance >= amount + max(spend, _queued_spend(token_id))
+
+
+def _queued_spend(token_id: str) -> int:
+    """What the swaps will take out of the wallet in `token_id`: the inputs of
+    queued swap txs and redeposits, and the outputs to deposit, queued or not
+    yet, since they are in the wallet from the moment the swap delivers them."""
+    rows = get_db().execute(
+        "SELECT e.owner, e.status, e.attempts, s.step, s.from_token_id, s.to_token_id, s.from_amount, "
+        "s.to_amount_received FROM evm_transactions e "
+        "JOIN swaps s ON e.owner IN ('swap:' || s.id || ':' || ?, 'swap:' || s.id || ':' || ?, "
+        "'swap:' || s.id || ':' || ?) WHERE e.status IN (?, ?) AND (s.from_token_id = ? OR s.to_token_id = ?)",
+        (LIFI, REFUND, DEPOSIT, QUEUED, FAILED, token_id, token_id),
+    ).fetchall()
+    spend = 0
+    for row in rows:
+        # A tx that failed unsent still spends while its swap waits at the
+        # step that sends it: refused for gas, it is queued again.
+        if row["status"] == FAILED and (
+            row["attempts"] or row["step"] != _SENT_AT[row["owner"].rsplit(":", 1)[1]].value
+        ):
+            continue
+        if row["owner"].endswith(f":{DEPOSIT}"):
+            if row["to_token_id"] == token_id:
+                spend += int(row["to_amount_received"])
+        elif row["from_token_id"] == token_id:
+            spend += int(row["from_amount"])
+    awaiting_deposit = get_db().execute(
+        "SELECT s.to_amount_received FROM swaps s WHERE s.step = ? AND s.to_token_id = ? AND NOT EXISTS "
+        "(SELECT 1 FROM evm_transactions e WHERE e.owner = 'swap:' || s.id || ':' || ?)",
+        (SwapStep.DEPOSIT_SENT.value, token_id, DEPOSIT),
+    ).fetchall()
+    return spend + sum(int(row["to_amount_received"]) for row in awaiting_deposit)
+
+
+def unqueued_lane_outflow(token_id: str) -> int:
+    """What the swaps here have moved to a step that writes on the LP's
+    lanes, the round before they queue it: a withdrawal or refund of the
+    input, or a credit of the output (counted before its fee)."""
+    rows = get_db().execute(
+        "SELECT * FROM swaps WHERE venue = ? AND status IN (?, ?) AND step IN (?, ?, ?) "
+        "AND (from_token_id = ? OR to_token_id = ?)",
+        (SwapVenue.LIFI.value, SwapStatus.EXECUTING.value, SwapStatus.REFUNDING.value, SwapStep.WITHDRAW_SENT.value,
+         SwapStep.REFUND_PAYOUT.value, SwapStep.CREDIT_SENT.value, token_id, token_id),
+    ).fetchall()
+    outflow = 0
+    for swap in rows:
+        if swap["step"] == SwapStep.CREDIT_SENT.value:
+            kind, token, amount = CREDIT, swap["to_token_id"], swap["to_amount_received"]
+        else:
+            kind = WITHDRAW if swap["step"] == SwapStep.WITHDRAW_SENT.value else REFUND_PAYOUT
+            token, amount = swap["from_token_id"], swap["from_amount"]
+        if token == token_id and _not_on_lane(swap, kind):
+            outflow += int(amount)
+    return outflow
+
+
+def _not_on_lane(swap: dict, kind: str) -> bool:
+    """Whether the lane rows leave out the swap's `kind` of write. A failed
+    withdrawal leaves its swaps' inputs in the LP's balance until each swap
+    queues its refund payout."""
+    if kind != WITHDRAW:
+        return privana_lanes.find_privana_tx(owner(swap["id"], kind)) is None
+    if swap["withdraw_batch_id"] is None:
+        return True
+    return privana_lanes.find_privana_tx(swap["withdraw_batch_id"])["status"] == privana_lanes.FAILED
+
+
+def _swap_intent(owner: str, chain_id: int, request: dict, simulate: bool) -> TxIntent:
+    # LiFi builds the calldata for one chain. Signed for another, it would go to
+    # the same address there with the same value attached.
+    requested = request.get("chainId")
+    if requested is not None and int(requested) != chain_id:
+        raise ValueError(f"transaction built for chain {requested} cannot be sent on chain {chain_id}")
+    return TxIntent(
+        owner=owner,
+        to=request["to"],
+        gas=int(request["gasLimit"], 16),
+        data=request["data"],
+        value=int(request.get("value", "0x0"), 16),
+        simulate=simulate,
+    )
 
 
 def _lifi_token(token_address: Optional[str]) -> str:
     return NATIVE_TOKEN if is_native(token_address) else token_address
 
 
-def _swap_output(receipt: Any, recipient: str, token: str) -> int:
-    """What the swap in `receipt` paid `recipient` in `token`. Only the called
-    contract's log counts: anything the swap touches can emit the topic."""
-    diamond = receipt["to"].lower()
-    for log in receipt["logs"]:
+def _swap_output(diamond: str, logs: list, recipient: str, token: str) -> int:
+    """What the swap sent to `diamond` paid `recipient` in `token`, from its
+    logs. Only the called contract's log counts: anything the swap touches can
+    emit the topic."""
+    diamond = diamond.lower()
+    for log in logs:
         topics = log["topics"]
         if (
             log["address"].lower() != diamond
@@ -600,7 +660,23 @@ def _swap_output(receipt: Any, recipient: str, token: str) -> int:
         )
         if receiver.lower() == recipient.lower() and to_asset.lower() == token.lower():
             return to_amount
-    raise RuntimeError(f"receipt shows no LiFi swap paying {recipient} in {token}")
+    raise RuntimeError(f"swap logs show no LiFi swap paying {recipient} in {token}")
+
+
+def _delivered(status: dict, to_info: Any, recipient: str) -> Optional[dict]:
+    """The `receiving` side of LiFi's `status` of a bridge to `recipient`, or
+    None while it is not done. Anything but a full delivery raises."""
+    state, substatus = status.get("status"), status.get("substatus")
+    # Only DONE with COMPLETED is a full delivery. DONE with PARTIAL or
+    # REFUNDED, FAILED and INVALID are final. Anything else is pending.
+    if state == LIFI_STATUS_DONE and substatus == LIFI_SUBSTATUS_COMPLETED:
+        receiving = status["receiving"]
+        if int(receiving["chainId"]) != to_info.chain_id or status["toAddress"].lower() != recipient.lower():
+            raise RuntimeError(f"delivered elsewhere: {receiving}")
+        return receiving
+    if state in (LIFI_STATUS_DONE, LIFI_STATUS_FAILED, LIFI_STATUS_INVALID):
+        raise RuntimeError(f"ended {state} {substatus}")
+    return None
 
 
 def _net_min(exec_quote: dict, fee_bps: int) -> int:
@@ -621,56 +697,3 @@ def _slippage_bps_to_floor(to_amount: int, floor: int, fee_bps: int) -> Optional
         return None
     # Rounded down: a smaller slippage only raises the minimum.
     return (to_amount - gross_min) * 10_000 // to_amount
-
-
-async def recover_inflight_lifi_swaps(pipeline: Optional[LifiSwapPipeline] = None) -> None:
-    db = get_db()
-    rows = db.execute(
-        """SELECT * FROM swaps
-           WHERE venue = ? AND status IN (?, ?)""",
-        (
-            SwapVenue.LIFI.value,
-            SwapStatus.EXECUTING.value,
-            SwapStatus.REFUNDING.value,
-        ),
-    ).fetchall()
-    if not rows:
-        return
-
-    pipeline = pipeline or get_lifi_pipeline()
-    for row in rows:
-        # A retried pass leaves a swap to its live runner, and reads each row at
-        # its turn: runners move swaps on while an earlier row's refund is awaited.
-        if row["id"] in pipeline._tasks:
-            continue
-        swap = pipeline._row(row["id"])
-        if swap["status"] not in (SwapStatus.EXECUTING.value, SwapStatus.REFUNDING.value):
-            continue
-        # Cleanup keeps the quote of a swap in flight.
-        quote = dict(
-            db.execute("SELECT * FROM quotes WHERE id = ?", (swap["quote_id"],)).fetchone()
-        )
-        step = swap.get("step")
-        if swap["status"] == SwapStatus.EXECUTING.value and step in (
-            LifiSwapStep.LIFI_EXECUTE.value, LifiSwapStep.DEPOSIT.value
-        ):
-            logger.info("lifi swap %s resuming at step %s", swap["id"], step)
-            pipeline.spawn_background(swap["id"], quote, int(swap["input_nonce"]))
-            continue
-        if step == LifiSwapStep.CREDIT.value:
-            pipeline._park(swap["id"], f"interrupted at step {step}")
-            continue
-        logger.info("lifi swap %s recovered into refund path (step=%s)", swap["id"], step)
-        await pipeline._refund(
-            swap["id"], quote, step, "service restarted mid-execution"
-        )
-
-
-_pipeline_instance: Optional[LifiSwapPipeline] = None
-
-
-def get_lifi_pipeline() -> LifiSwapPipeline:
-    global _pipeline_instance
-    if _pipeline_instance is None:
-        _pipeline_instance = LifiSwapPipeline()
-    return _pipeline_instance

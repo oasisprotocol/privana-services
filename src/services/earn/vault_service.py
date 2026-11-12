@@ -10,7 +10,7 @@ from web3 import Web3
 from web3.exceptions import ContractLogicError, Web3RPCError
 
 from src.clients.accounting import get_accounting_client
-from src.clients.sapphire import get_pool_admin_sapphire_client
+from src.clients.sapphire import call_with_transient_retry, get_pool_admin_sapphire_client
 from src.core.abi import load_abi
 from src.core.config import load_settings
 from src.core.db import db_write, get_db
@@ -1176,7 +1176,9 @@ class VaultService:
             return on_chain_total
         pool_id = bytes.fromhex(pool_id_hex.removeprefix("0x"))
         try:
-            seeded = await asyncio.to_thread(self.get_seeded_assets, pool_id)
+            seeded = await call_with_transient_retry(
+                lambda: asyncio.to_thread(self.get_seeded_assets, pool_id), "seed"
+            )
             shares = self.get_pool(pool_id)["total_shares"]
         except Exception:
             logger.exception(
@@ -1226,7 +1228,9 @@ class VaultService:
             return on_chain_total
         pool_id = bytes.fromhex(pool_id_hex.removeprefix("0x"))
         try:
-            seeded = await asyncio.to_thread(self.get_seeded_assets, pool_id)
+            seeded = await call_with_transient_retry(
+                lambda: asyncio.to_thread(self.get_seeded_assets, pool_id), "seed"
+            )
             shares = (
                 total_shares
                 if total_shares is not None

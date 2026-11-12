@@ -11,16 +11,13 @@ import traceback
 from typing import Optional
 
 from src.core.db import get_db
+from src.models.swap import SwapStep
 
 logger = logging.getLogger(__name__)
 
 REFUNDED = "refunded"
 NO_FUNDS_MOVED = "no_funds_moved"
 NEEDS_SUPPORT = "needs_support"
-
-# Steps after which the user's input has reached the LP: a LiFi swap that
-# fails from here on holds their funds until a refund or a person returns them.
-_FUNDS_HELD_STEPS = {"input_transfer", "withdraw", "lifi_execute", "deposit", "credit"}
 
 _STATE_FIELDS = (
     "status", "venue", "step", "quote_id", "user_address", "from_token_id", "to_token_id",
@@ -31,18 +28,20 @@ _STATE_FIELDS = (
 _URL = re.compile(r"(https?://[^/\s?#]+)[^\s\"']*")
 
 
-def swap_failure(swap_id: str, status: str, venue: Optional[str], step: Optional[str]) -> tuple[Optional[str], Optional[str]]:
-    """The reason code and user message for a swap that did not complete."""
+def swap_failure(swap_id: str, status: str, step: Optional[str]) -> tuple[Optional[str], Optional[str]]:
+    """The reason code and user message for a swap that did not complete. A
+    failed swap's step says whether its funds moved; only one that provably
+    moved nothing says so."""
     if status == "refunded":
         return REFUNDED, "This swap did not go through, and your funds were returned."
     if status != "failed":
         return None, None
-    if venue == "lifi" and step in _FUNDS_HELD_STEPS:
-        return NEEDS_SUPPORT, (
-            "This swap could not be completed and your funds were not returned automatically. "
-            f"Contact Privana support with swap ID {swap_id} to get them back."
-        )
-    return NO_FUNDS_MOVED, "This swap did not go through. No funds were moved."
+    if step == SwapStep.NO_FUNDS_MOVED.value:
+        return NO_FUNDS_MOVED, "This swap did not go through. No funds were moved."
+    return NEEDS_SUPPORT, (
+        "This swap could not be completed and your funds were not returned automatically. "
+        f"Contact Privana support with swap ID {swap_id} to get them back."
+    )
 
 
 def log_swap_failure(swap_id: str, event: str, exc: Optional[BaseException] = None) -> None:

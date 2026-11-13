@@ -234,8 +234,11 @@ class QuoteService:
         )
         if not real_routes.get("routes"):
             raise ValueError("Insufficient liquidity for this swap")
-        cap = self.settings.lifi_max_swap_amount_usd
         from_amount_usd = real_routes["routes"][0].get("fromAmountUSD")
+        min_usd = self.settings.lifi_min_swap_amount_usd
+        if from_amount_usd is None or float(from_amount_usd) < min_usd:
+            raise ValueError(f"Swap size is below the minimum of {min_usd} USD")
+        cap = self.settings.lifi_max_swap_amount_usd
         if cap > 0 and from_amount_usd is not None and float(from_amount_usd) > cap:
             raise ValueError("Swap size exceeds LiFi routing limit")
         return SwapVenue.LIFI.value

@@ -55,6 +55,7 @@ cp .env.localnet .env
 | `FEE_BPS`                        | Swap fee in basis points (e.g. `150` = 1.5%)                                                              |
 | `QUOTE_TTL`                      | Quote validity window in seconds                                                                          |
 | `MAX_SWAP_AMOUNT_USD`            | Per-swap cap                                                                                              |
+| `LIFI_MIN_SWAP_AMOUNT_USD`       | Minimum USD size of a LiFi routed swap                                                                    |
 | `API_HOST` / `API_PORT`          | Server bind (defaults `0.0.0.0:8000`)                                                                     |
 | `LOG_LEVEL`                      | Log level (default `INFO`)                                                                                |
 | `ENVIRONMENT`                    | `development` / `staging` / `production`                                                                  |

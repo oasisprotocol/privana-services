@@ -94,6 +94,7 @@ def load_settings(refresh: bool = False) -> Settings:
             fee_bps=_get_int("FEE_BPS"),
             fee_policies_json=os.getenv("FEE_POLICIES_JSON", ""),
             max_swap_amount_usd=_get_int("MAX_SWAP_AMOUNT_USD"),
+            lifi_min_swap_amount_usd=_get_int("LIFI_MIN_SWAP_AMOUNT_USD"),
             lifi_token_map=os.getenv("LIFI_TOKEN_MAP"),
             base_rpc_url=os.getenv("BASE_RPC_URL"),
             ethereum_rpc_url=os.getenv("ETHEREUM_RPC_URL"),

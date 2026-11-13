@@ -11,7 +11,7 @@ from tests.services.swap.world import AMOUNT, TOKENS, USDC, USERS, WETH, World
 USER = USERS[0]
 LOW_BALANCE = Balance(user_address="0xlp", token_id=WETH, balance="1")
 PRICING_ROUTES = {
-    "routes": [{"toAmount": "58000", "toAmountMin": "56000", "steps": [{"tool": "fly"}]}]
+    "routes": [{"toAmount": "58000", "toAmountMin": "56000", "fromAmountUSD": "10.00", "steps": [{"tool": "fly"}]}]
 }
 
 

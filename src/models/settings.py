@@ -29,6 +29,7 @@ class Settings:
     fee_bps: int
     fee_policies_json: str
     max_swap_amount_usd: int
+    lifi_min_swap_amount_usd: int
     lifi_token_map: str
 
     base_rpc_url: str

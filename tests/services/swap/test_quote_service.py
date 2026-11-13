@@ -264,6 +264,7 @@ class TestGetQuote:
                 {
                     "toAmount": "2000000000000000000",
                     "toAmountMin": "1950000000000000000",
+                    "fromAmountUSD": "10.00",
                     "steps": [{"tool": "uniswap"}],
                 }
             ]
@@ -550,6 +551,28 @@ class TestVenueSelection(TestGetQuote):
         }
         service.lifi.get_routes = AsyncMock(return_value=routes_with_usd)
         with pytest.raises(ValueError, match="exceeds LiFi routing limit"):
+            await service.get_quote(
+                from_token_id=TOKEN_A,
+                to_token_id=TOKEN_B,
+                from_amount="1000000",
+                user_address="0x" + "a" * 40,
+                slippage_bps=300,
+            )
+
+    async def test_lifi_swap_under_min_usd_raises(self, test_db):
+        service = self._make_service()
+        service.settings = replace(
+            service.settings, lifi_execution_enabled=True, lifi_min_swap_amount_usd=5
+        )
+        service.accounting.get_lp_balance = AsyncMock(return_value=self.LOW_BALANCE)
+        routes_with_usd = {
+            "routes": [{"toAmount": "2000000000000000000",
+                        "toAmountMin": "1950000000000000000",
+                        "fromAmountUSD": "4.99",
+                        "steps": [{"tool": "uniswap"}]}]
+        }
+        service.lifi.get_routes = AsyncMock(return_value=routes_with_usd)
+        with pytest.raises(ValueError, match="below the minimum of 5 USD"):
             await service.get_quote(
                 from_token_id=TOKEN_A,
                 to_token_id=TOKEN_B,

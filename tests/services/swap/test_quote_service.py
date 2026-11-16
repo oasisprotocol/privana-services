@@ -1,6 +1,7 @@
 import json
 import time
 from dataclasses import replace
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -23,6 +24,18 @@ def evm_clients(monkeypatch):
 
     monkeypatch.setattr("src.services.swap.quote_service.get_evm_client", get_evm_client)
     return missing
+
+
+@pytest.fixture(autouse=True)
+def deposit_minimums(monkeypatch):
+    """Accounting's minimum deposit per chain, none unless a test sets one."""
+    minimums: dict = {}
+    client = MagicMock()
+    client.get_deposit_address = AsyncMock(
+        side_effect=lambda request: SimpleNamespace(min_deposit=minimums))
+    monkeypatch.setattr("src.services.swap.quote_service.get_swap_lp_privana_client",
+                        AsyncMock(return_value=client))
+    return minimums
 
 
 @pytest.fixture(autouse=True)
@@ -573,6 +586,34 @@ class TestVenueSelection(TestGetQuote):
         }
         service.lifi.get_routes = AsyncMock(return_value=routes_with_usd)
         with pytest.raises(ValueError, match="below the minimum of 5 USD"):
+            await service.get_quote(
+                from_token_id=TOKEN_A,
+                to_token_id=TOKEN_B,
+                from_amount="1000000",
+                user_address="0x" + "a" * 40,
+                slippage_bps=300,
+            )
+
+    @pytest.mark.parametrize("minimum, refused", [
+        ("1000001", "input"),
+        ("1950000000000000001", "output"),
+    ])
+    async def test_lifi_swap_under_deposit_minimum_raises(
+        self, test_db, deposit_minimums, minimum, refused
+    ):
+        # Both tokens are ERC-20s on 84532: the input is 1000000, the worst
+        # output 1950000000000000000. Either one below the minimum is refused.
+        deposit_minimums["84532"] = {"erc20": minimum}
+        service = self._make_service()
+        service.settings = replace(service.settings, lifi_execution_enabled=True)
+        service.accounting.get_lp_balance = AsyncMock(return_value=self.LOW_BALANCE)
+        service.lifi.get_routes = AsyncMock(return_value={
+            "routes": [{"toAmount": "2000000000000000000",
+                        "toAmountMin": "1950000000000000000",
+                        "fromAmountUSD": "10.00",
+                        "steps": [{"tool": "uniswap"}]}]
+        })
+        with pytest.raises(ValueError, match="below the minimum deposit"):
             await service.get_quote(
                 from_token_id=TOKEN_A,
                 to_token_id=TOKEN_B,

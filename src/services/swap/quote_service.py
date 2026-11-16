@@ -5,9 +5,12 @@ import time
 import uuid
 from typing import Optional
 
+from privana import DepositAddressRequest
+
 from src.clients.accounting import get_accounting_client
-from src.clients.base_evm import get_evm_client
+from src.clients.base_evm import get_evm_client, is_native
 from src.clients.lifi import get_lifi_client
+from src.clients.privana import get_swap_lp_privana_client
 from src.core.config import load_settings
 from src.core.db import db_write, get_db
 from src.core.fee_policy import FeeDecision, resolve_internal_fee
@@ -241,6 +244,17 @@ class QuoteService:
         cap = self.settings.lifi_max_swap_amount_usd
         if cap > 0 and from_amount_usd is not None and float(from_amount_usd) > cap:
             raise ValueError("Swap size exceeds LiFi routing limit")
+        # The LP deposits the output into Accounting, or the input when the swap
+        # refunds, and Accounting never credits a deposit below its minimum.
+        minimums = (await (await get_swap_lp_privana_client()).get_deposit_address(
+            DepositAddressRequest(chain_type="evm"))).min_deposit
+        for chain_id, token_address, amount in (
+            (from_chain_id, from_token_address, from_amount),
+            (to_chain_id, to_token_address, real_routes["routes"][0]["toAmountMin"]),
+        ):
+            kind = "native" if is_native(token_address) else "erc20"
+            if int(amount) < int(minimums.get(str(chain_id), {}).get(kind, 0)):
+                raise ValueError("Swap size is below the minimum deposit")
         return SwapVenue.LIFI.value
 
     async def _find_existing_quote(

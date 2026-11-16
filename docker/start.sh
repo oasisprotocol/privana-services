@@ -34,4 +34,4 @@ curl -X PUT --unix-socket /run/rofl-appd.sock http://localhost/rofl/v1/metadata 
 EOF
 echo "done."
 
-exec uv run uvicorn src.main:app --host ${API_HOST} --port ${API_PORT} --no-use-colors
+exec uv run uvicorn src.main:app --host ${API_HOST} --port ${API_PORT} --no-use-colors --no-access-log

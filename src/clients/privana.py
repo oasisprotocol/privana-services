@@ -17,6 +17,8 @@ _HEADERS = {"Connection": "close"}
 ACCEPTED_SUBMISSION_STATUSES = {"submitted", "pending", "accepted"}
 # A deposit check's reply once the deposit is credited.
 DEPOSIT_CREDITED = "credited"
+# Accounting's refusal of a deposit below its minimum, final for that deposit.
+DEPOSIT_BELOW_MINIMUM = "Deposit does not meet minimum requirements"
 
 _client: Optional[PrivanaClient] = None
 _swap_lp_client: Optional[PrivanaClient] = None

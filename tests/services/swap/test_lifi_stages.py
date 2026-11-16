@@ -590,6 +590,20 @@ async def test_only_external_waits_park_at_their_deadline(world, step, deadline,
     assert world.paid(USER) == []
 
 
+async def test_a_deposit_refused_as_below_the_minimum_parks_without_waiting(world):
+    swap_id = await world.schedule("lifi")
+    await world.until(swap_id, "deposit:crediting")
+    world.api.check_deposit = AsyncMock(side_effect=AccountingApiError(
+        "API request failed: 400 Bad Request", 400, "Deposit does not meet minimum requirements"))
+
+    await world.run(2)
+
+    swap = world.swap(swap_id)
+    assert (swap["status"], swap["step"]) == ("failed", "parked")
+    assert "Deposit does not meet minimum requirements" in swap["error"]
+    assert world.paid(USER) == []
+
+
 def _taken_after_an_attempt(world, owner):
     """The sender gave up on a signed attempt: it may still have been mined."""
     db_write(world.db, "UPDATE evm_transactions SET status = 'failed', attempts = '0:0xab', "

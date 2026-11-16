@@ -37,6 +37,7 @@ from src.clients.evm_batcher import (
 )
 from src.clients.lifi import LIFI_DEFAULT_SLIPPAGE_BPS, get_lifi_client
 from src.clients.privana import (
+    DEPOSIT_BELOW_MINIMUM,
     DEPOSIT_CREDITED,
     check_deposit,
     deposit_address,
@@ -465,6 +466,9 @@ async def _check_credited(swap: dict, kind: str, amount: int, then: SwapStep) ->
     try:
         status = (await check_deposit(await get_swap_lp_privana_client(), tx["chain_id"], tx["tx_hash"], amount)).status
     except (AccountingApiError, NetworkError) as exc:
+        if isinstance(exc, AccountingApiError) and exc.detail == DEPOSIT_BELOW_MINIMUM:
+            fail(swap, SwapStep.PARKED, f"deposit {tx['tx_hash']} refused: {exc.detail}")
+            return
         # Refused until the deposit is final on its chain.
         status = f"not accepted: {scrub_urls(str(exc))}"
         logger.warning("lifi swap %s deposit %s %s", swap["id"], tx["tx_hash"], status)

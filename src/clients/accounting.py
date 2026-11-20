@@ -26,6 +26,7 @@ MAX_RETRIES = 3
 RETRY_DELAY = 1.0
 JWT_SIWE_CACHE_SKEW_SECONDS = 30
 HISTORY_PAGE_LIMIT = 100
+TRANSIENT_HTTP_ERRORS = (httpx.ConnectError, httpx.ReadError, httpx.RemoteProtocolError, httpx.TimeoutException)
 
 
 @dataclass(frozen=True)
@@ -49,7 +50,7 @@ async def _request_with_retry(client: httpx.AsyncClient, method: str, url: str, 
             response = await client.request(method, url, **kwargs)
             response.raise_for_status()
             return response
-        except (httpx.ConnectError, httpx.ReadError, httpx.RemoteProtocolError, httpx.TimeoutException) as exc:
+        except TRANSIENT_HTTP_ERRORS as exc:
             if attempt == MAX_RETRIES - 1:
                 raise
             logger.warning(f"Accounting API request failed (attempt {attempt + 1}), retrying: {exc}")
@@ -121,7 +122,14 @@ class AccountingClient:
     async def _authenticated_request(self, method: str, url: str) -> httpx.Response:
         await self._ensure_authenticated()
         for attempt in range(MAX_RETRIES):
-            response = await self.client.request(method, url, headers=self._auth_headers())
+            try:
+                response = await self.client.request(method, url, headers=self._auth_headers())
+            except TRANSIENT_HTTP_ERRORS as exc:
+                if attempt == MAX_RETRIES - 1:
+                    raise
+                logger.warning(f"Accounting API request failed (attempt {attempt + 1}), retrying: {exc}")
+                await asyncio.sleep(RETRY_DELAY * (attempt + 1))
+                continue
             is_auth_error = response.status_code == 401 or (
                 response.status_code == 400 and "SIWE" in response.text
             )

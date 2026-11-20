@@ -1,5 +1,5 @@
 name: privana-services
-version: 0.1.28
+version: 0.1.29
 tee: tdx
 kind: container
 resources:
@@ -10,11 +10,12 @@ resources:
     size: 10000
 artifacts:
   builder: ghcr.io/oasisprotocol/rofl-container-builder:0.0.1@sha256:913ef97ab07dde31f08ce873f825bf3d4f32ad4102ff5797d7c3050c121c4dce
-  firmware: https://github.com/oasisprotocol/oasis-boot/releases/download/v0.6.3/ovmf.tdx.fd#db47100a7d6a0c1f6983be224137c3f8d7cb09b63bb1c7a5ee7829d8e994a42f
-  kernel: https://github.com/oasisprotocol/oasis-boot/releases/download/v0.6.3/stage1.bin#2a39f1e317f217e3e46e036383d6716c199d89e58d14901251e54c195e5261f0
-  stage2: https://github.com/oasisprotocol/oasis-boot/releases/download/v0.6.3/stage2-podman.tar.bz2#e102a39395363cf178f9e5c2cc2f4d78623dba955647a6073c9298bf09c9c1ff
+  firmware: https://github.com/oasisprotocol/oasis-boot/releases/download/v0.7.0/ovmf.tdx.fd#cb3675d68f450dcc95861c6360181a63dc1e7fa176cc23bfca26fd689663d6bc
+  platform: https://github.com/oasisprotocol/oasis-boot/releases/download/v0.7.0/ovmf.tdx.platform.json.gz#0c61429b8cd69566cb32abda134a4e4501941a625423a6801078ebff47325ad0
+  kernel: https://github.com/oasisprotocol/oasis-boot/releases/download/v0.7.0/stage1.bin#0658d197ddbac905c07c1e90b47b51efef54c72d27ba5589bb05ae59446fa6cc
+  stage2: https://github.com/oasisprotocol/oasis-boot/releases/download/v0.7.0/stage2-podman.tar.bz2#e102a39395363cf178f9e5c2cc2f4d78623dba955647a6073c9298bf09c9c1ff
   container:
-    runtime: https://github.com/oasisprotocol/oasis-sdk/releases/download/rofl-containers%2Fv0.10.0/rofl-containers#cbbe8d6cef4a1db9d0390d902389abe89f86185915cf9388825c7082be845412
+    runtime: https://github.com/oasisprotocol/oasis-sdk/releases/download/rofl-containers%2Fv0.11.0/rofl-containers#e39dd80f6ec02e2b579a12571cd7b5e460a29b6b119377c1e529e8e909a8db72
 deployments:
   localnet:
     app_id: rofl1qp0lpqlwfswpj5r3ugjwd0yjukyxerd0mv75erqr
@@ -32,7 +33,7 @@ deployments:
       quotes:
         pcs:
           tcb_validity_period: 30
-          min_tcb_evaluation_data_number: 18
+          min_tcb_evaluation_data_number: 22
           tdx: {}
       enclaves: []
       endorsements:
@@ -55,11 +56,11 @@ deployments:
       quotes:
         pcs:
           tcb_validity_period: 30
-          min_tcb_evaluation_data_number: 18
+          min_tcb_evaluation_data_number: 22
           tdx: {}
       enclaves:
-        - id: ksUzhwtZ4stcf9FKoLJc6BV74/7F0/EZKWIfE2OXSLYAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
-        - id: 6ZAOH6jgkywiKeu84ZQd70FnkvZUD/Ww/OArqTeMaewAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
+        - id: mnldHsAennmL4eYwaeer7Q90ET/aUEcOXbQlkjfucbcAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
+        - id: 7eaNtkIiimxkU7Ut8S2ncSHPCwhF6l/tAl/tJgBmKp4AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
       endorsements:
         - provider_instance_admin: oasis1qrljut7rndrl74cnnatlxnadnnazjxdy6yleagwu
       fees: endorsing_node
@@ -103,36 +104,36 @@ deployments:
       quotes:
         pcs:
           tcb_validity_period: 30
-          min_tcb_evaluation_data_number: 18
+          min_tcb_evaluation_data_number: 22
           tdx: {}
       enclaves:
-        - id: xbw1rmX5phAB5CQFenVSPMACDPPO0GH3GCmPk4vJcNoAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
-        - id: ItivWfQm/+HXWysrz4otCAtb09S5sg3BVBB3rTvTiq0AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
+        - id: cwyuwkTxRJd314ce84p4g2utao9Sug/up1aDUi+VtLcAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
+        - id: sxgE9XxlAFRnTxNzr2wE1VJjNndx9rMz75Hnrm7WH2QAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
       endorsements:
         - provider_instance_admin: oasis1qzql9cw9ly746jren7j66jscd36h5c3mfq6d6mct
       fees: endorsing_node
       max_expiration: 3
     secrets:
       - name: LIQUIDITY_PROVIDER_SECRET_KEY
-        value: pGJwa1ggqLjfe3gdWZzOB4+NvX/lpucr9TUGRqf24dmkAsT9lVpkbmFtZVgtxWWODQnNvVdNs515l7II110g/vDauv7ebbwuVeoNaoctZy5PNq6jT2Q+tXGSZW5vbmNlT0DroOCAxZ4txUZp9/D0ZGV2YWx1ZVhTeIsNESdGe0kqHYC+PhCBhKOFkUd0+YFTYNso30osqRM/pClMWmQAZSRuRlZdFnhHuEz9ujEq6Q27xiAdyYn3agGJULXkhYQz4dgMT1EjJkV8QJE=
+        value: pGJwa1gg0oioz3lJ4b2gZggTyz2CHOIYOC033vtrEeYvTH8WxglkbmFtZVgtnXkqv1dbSbqqGgvYYCaJi/Ztc5IldrfVvenrT9pfj5omQ+IzzX696VqKwPjMZW5vbmNlT2wYHnCw4+SSxLEn9ka3aGV2YWx1ZVhSBmbvVHjrtkSNgkD2j8f+SefStpMjTL/bYoJAFq/rXt0e6PO/lu0MUl3zobP0yypTLa9EH3WIMgF5Gi1y5hkCLQjFQE9FQzsJ76+3WUTerqksmw==
       - name: LIFI_API_KEY
-        value: pGJwa1ggUTvXlptQs4+lrdBe9H3U4kCfyI5aQaA42oTc1b0jEUFkbmFtZVgcIjCfx+ONliAI8dwscW1Ih9MYsNApgB/zpN9nkGVub25jZU/gFHgamZcDbDT6ZMzfZPJldmFsdWVYWmz7VXlZ04KHkx54i7oAKedauQvsZGGRxkG1LeVIO2MO0C1QgGXb/TMwPoAjF9lAi/vyCb6+Z1iLF+VdVJPOnVwA43zrPecnWxlQDoj+PSt3Id2R82EI+T4KTA==
+        value: pGJwa1gg19GElKktqXdV+2jxcFqkXLPWxWKCRuCrQaBGlSfLiiRkbmFtZVgcO8wNVSOfY8XIZHulRimZRqMMgGiJegg++G/sVWVub25jZU/A5kavtfzht3z0rNsPYgxldmFsdWVYWRkTeI/ZQWlYzLTOavAp9wDTG4Db/wQmISjBMFeaIb+ieKI1gCwksfEoVsqQwaZLl8W20bHRiCcrNF2npIaE/31AetC75r8/j1y1V5shKI2u+XFQfhxOPfc4
       - name: EARN_POOL_SECRET_KEY
-        value: pGJwa1ggAcdzI3S/mHdkc04NImIHLoR+IMZhUZgXtR6rvuEIx1FkbmFtZVgkw33qbeqV8ueTctv7pE7nf3X0rRxhMSnBbCgwB80m6JM7sEsDZW5vbmNlTxkpXHdWSVXo0WEETKfPXGV2YWx1ZVhS8AOholOaNgxPAptUPLBqYnbWiA4F4HTOrWpKswI0HQQr5/XEZXX+TSgFUILma5XaczdEtm0OpBAYq70CDNnX+hN813KFUGiUsxaRJ3PApV0hTw==
+        value: pGJwa1ggeJkbdlRnJEsg+/HXAY1q1G3XRK2RH/5qpnnvYXsSawtkbmFtZVgk0CE/nbmNLkVsuyMJhvA7TdZaCEBPHpgzcpAShovoy/aqdcK7ZW5vbmNlT0BhhoXsHXxX0NgQSDAd+WV2YWx1ZVhS5ow9N55QpsyLYG8xhJcBsWCrUQKIMv6jfzGS2dky0ZQnCi+IKWrL/mC1C4LaoX06xRHfzo9wXQyG8tYogXs90HJa/KfynZpVtbVTuSDbdkex7A==
       - name: BASE_RPC_URL
-        value: pGJwa1ggAU6q9N+tIRp4mVDQ4imPCuys/CwCFBilRUpvNwO7vEBkbmFtZVgc74cYKciKjQW8/gOW3lZ5D7QcAVCF0IMbByJZT2Vub25jZU9AK4mfSkaoNuUnZ0HKVBlldmFsdWVYS0jXSj6lha6NsAyRz5CZKJmn2Mk27Eg4/cDK44oLyUdKbM11DLMj1bweWswhNXlHI+LGqOLsbi5q7CgPjYpV1a6196aOQrwIB5o1VQ==
+        value: pGJwa1gg07KwKrU7CBf8S/Grvj7J/yG2y7afUWWBIw7tpxCa5z1kbmFtZVgcSsSNeTDXB0CriIAysqxYSjUfVaTqhIEsY7JDUWVub25jZU9CJV2TiQf6uMZZ5FWVqSVldmFsdWVYS/liHShjKcneMRxSUOQxlnDFjF4IGodM0Mu+KtPvdq6pvTSCVUP28PEatwwgjMJLUoLfTSjP4IPisNG5pSeEUE2uHHofTE9AtfmqoQ==
       - name: SAPPHIRE_RPC_HEADERS
-        value: pGJwa1gg9kgMQkQGRE6enS9fw1ZXKiyI+t7WHpxKJiuBgQV0ozVkbmFtZVgk8Bt73abYEbKt5aMF6NgSU6nIHVosHrNYPZIwg34mJ+G3eHx8ZW5vbmNlT8R0LYnEI+deu9ws5221zGV2YWx1ZVhec5SQvae9DwzujqWjNh6Usq3zYwEU1qmk3D/oUNivK1dyhJ2RuLkWAkxKlTL/gxKROTKzZ5gRNCSwhXs4relZYqwx7RWgnaRVcXWYaT3JzSiB3G2HYcRSbtYigYnHGQ==
+        value: pGJwa1ggTfCw2RJllehiszBYdnVgHhYzdLArZ6jFotwbHI33KEdkbmFtZVgk3wkqVqADDDrpgHZS7ZyJjVk2Y/9rbBz1tSYcP2qTOMGGGw27ZW5vbmNlT6aQkUaSovlWYC4JIkXup2V2YWx1ZVhen7FVLLpZZbio6Ng86gjtYOF026nrzPqixOYRsLVIYF4s0BIWUD8IuebXAzeAUqXkZP52pf2Fxeat/6qWG5wzQHJnTWTW6Xauz/U10hAu5cpQw9A1b+he57ong8FZ3w==
       - name: HYPEREVM_RPC_URL
-        value: pGJwa1ggLlx2gzAzMKhEG8YMp8ssWEpQOsRkB+Yr5bmBcV2KVhpkbmFtZVggZbl5q0suPAoXxZF5NDwsdiO6QuUWr9tgBws+VjcNKwJlbm9uY2VPNQB6a2+AF3gBQd8hRzYkZXZhbHVlWFKF2ubvYEqehIytcK341p7HBlEVwOWP2uBenEKoWzU6xngTMpGFltlHt9MGZKdf82lv/EYbJfILffQXelfg7+4BTmM6lqF0x74uBkTXhHrf9yaH
+        value: pGJwa1ggzdZWjWrE3mGvACPR8rLGWx0OVbzp1uycADdP/Q/r+gdkbmFtZVgg1cITzByZVE9uCfEjn7HnaE2VVOiWPO/K7ut04ejR1Ydlbm9uY2VPdFnYwC8oGTtTC+qLChvbZXZhbHVlWFL/rkoUoIQIDe2ieCfoVucuQmyoPjzfKPjDpbKHHDiSK/q8Od10wMmf48oDYYGPPuDHTh+0GojnDkcGO2r4lk2l1ihwx1liQpOiHbP6h8A7urPr
       - name: COINGECKO_API_KEY
         value: pGJwa1ggentKIXGBryAbqxYycDVyXuNkm1QtSmnETrWAPDiPk21kbmFtZVghiXhkbRZjzBX8oHN5lvOYq+VPS744+TsONC8H9PKmM+eXZW5vbmNlT9ocKbm7ppH+2wdZ7pCxf2V2YWx1ZVgruYSZMxtLo3/Nmn5bndCxLb/2DMtJyOPt0rLh2D3+36gCE1BqFQLy/SLCKA==
       - name: ETHEREUM_RPC_URL
-        value: pGJwa1gg6/48oTke+yzregRS0BiOlbrWKfXyIBBeIvEG1Qk2nThkbmFtZVggO5RrvjFlvEujP8FlO3qRqFM47lyFNwu0UCKiWdaMQAxlbm9uY2VPldFp4P0J5CYDW4JwlQXgZXZhbHVlWEp20UB3L1cvldnVhYH6IZgZMapI/uhL2KB2YcEm8LQCfgcstDzZQEBG59h6p8ZO7W0d+hrdCKdZZsHRs+nFGicgLTqBkFFFEdki4Q==
+        value: pGJwa1gg/YeOdMCyX0uuFcVeWd2PAntqg9EqttFh8Y/XIPqD/WdkbmFtZVggJofF85f61B1V4sSzWGzzYgMgPKMiLhtrGRnRSxir17Vlbm9uY2VPaDtGqJIQqSomVXPawfN7ZXZhbHVlWEq3SwaE0xaHU+BwMtpfSaOA/nbwitHMx51qRPAm/Nqqz1C+znrvJ0H/ygf72uwBa2PqVXU/PT0xQobExPAMmwJsePdSQwW8ukMaMg==
     machines:
       default:
         provider: oasis1qp2ens0hsp7gh23wajxa4hpetkdek3swyyulyrmz
         offer: playground_internal_m
         id: 000000000000062d
 tooling:
-  version: 0.22.1
+  version: 0.24.0

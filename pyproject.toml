@@ -7,10 +7,10 @@ requires-python = ">=3.11"
 license = { text = "Apache-2.0" }
 
 dependencies = [
-    "fastapi>=0.135,<0.137",
-    "uvicorn[standard]>=0.42,<0.44",
+    "fastapi>=0.165,<0.167",
+    "uvicorn[standard]>=0.54,<0.56",
     "python-dotenv>=1.0,<2",
-    "pydantic>=2.12,<3",
+    "pydantic>=2.14,<3",
     "httpx>=0.28,<0.30",
     "web3>=7.14,<8",
     "eth-account>=0.13,<0.14",

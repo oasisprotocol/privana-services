@@ -5,6 +5,8 @@ from typing import Optional
 
 import httpx
 
+from src.clients.http import send_with_retry
+
 logger = logging.getLogger(__name__)
 
 COINGECKO_API_URL = "https://api.coingecko.com/api/v3"
@@ -43,9 +45,9 @@ class CoinGeckoClient:
         if not coin_ids:
             return {}
 
-        response = await self.client.get(
-            f"{self.base_url}/simple/price",
-            params={"ids": ",".join(sorted(set(coin_ids))), "vs_currencies": "usd"},
+        params = {"ids": ",".join(sorted(set(coin_ids))), "vs_currencies": "usd"}
+        response = await send_with_retry(
+            lambda: self.client.get(f"{self.base_url}/simple/price", params=params)
         )
         response.raise_for_status()
 
@@ -62,13 +64,9 @@ class CoinGeckoClient:
         # per day, so anything finer would be fetched only to be dropped when the
         # points collapse onto their day. (At days=365 the API picks daily on its
         # own; asking makes the coupling explicit.)
-        response = await self.client.get(
-            f"{self.base_url}/coins/{coin_id}/market_chart",
-            params={
-                "vs_currency": "usd",
-                "days": min(days, MAX_BACKFILL_DAYS),
-                "interval": "daily",
-            },
+        params = {"vs_currency": "usd", "days": min(days, MAX_BACKFILL_DAYS), "interval": "daily"}
+        response = await send_with_retry(
+            lambda: self.client.get(f"{self.base_url}/coins/{coin_id}/market_chart", params=params)
         )
         response.raise_for_status()
 

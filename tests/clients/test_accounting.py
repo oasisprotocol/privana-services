@@ -121,7 +121,7 @@ class TestAccountingClient:
         )
 
     async def test_get_token_info_retries_on_5xx(self, client, mock_http_client, monkeypatch):
-        monkeypatch.setattr("src.clients.accounting.RETRY_DELAY", 0.0)
+        monkeypatch.setattr("src.clients.http.RETRY_DELAY", 0.0)
         err = self._mock_response({}, status_code=503)
         err.raise_for_status.side_effect = httpx.HTTPStatusError(
             "server error", request=MagicMock(), response=err

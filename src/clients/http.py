@@ -1,13 +1,10 @@
 import asyncio
 import logging
-from typing import Awaitable, Callable
 
 import httpx
 
 logger = logging.getLogger(__name__)
 
-MAX_RETRIES = 3
-RETRY_DELAY = 1.0
 TRANSIENT_HTTP_ERRORS = (
     httpx.ConnectError,
     httpx.ReadError,
@@ -15,23 +12,32 @@ TRANSIENT_HTTP_ERRORS = (
     httpx.TimeoutException,
 )
 
+_TRANSIENT_HTTP_ATTEMPTS = 3
+_TRANSIENT_HTTP_BACKOFF_SEC = 1.0
 
-async def send_with_retry(send: Callable[[], Awaitable[httpx.Response]]) -> httpx.Response:
-    """Send a read request, retrying dropped connections, timeouts and 5xx responses.
 
-    Only for reads: a write could land and still look dropped, so retrying it could
-    repeat it. Returns the last response; callers check its status as before.
+async def request_with_transient_retry(factory, op: str):
+    """Run an idempotent HTTP read, retrying dropped connections, timeouts and 5xx.
+
+    A write could land and still look dropped, so only reads go through here.
+    Returns the last response; callers check its status as before.
     """
-    for attempt in range(1, MAX_RETRIES):
+    for attempt in range(1, _TRANSIENT_HTTP_ATTEMPTS + 1):
         try:
-            response = await send()
+            response = await factory()
         except TRANSIENT_HTTP_ERRORS as exc:
-            logger.warning(f"HTTP request failed (attempt {attempt}), retrying: {exc!r}")
+            if attempt == _TRANSIENT_HTTP_ATTEMPTS:
+                raise
+            failure = exc
         else:
-            if response.status_code < 500:
+            if response.status_code < 500 or attempt == _TRANSIENT_HTTP_ATTEMPTS:
                 return response
-            logger.warning(
-                f"HTTP request returned {response.status_code} (attempt {attempt}), retrying"
-            )
-        await asyncio.sleep(RETRY_DELAY * attempt)
-    return await send()
+            failure = f"HTTP {response.status_code}"
+        logger.warning(
+            "Transient %s request failure (attempt %d/%d), retrying: %s",
+            op,
+            attempt,
+            _TRANSIENT_HTTP_ATTEMPTS,
+            failure,
+        )
+        await asyncio.sleep(_TRANSIENT_HTTP_BACKOFF_SEC * attempt)

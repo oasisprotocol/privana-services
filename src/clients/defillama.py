@@ -6,7 +6,7 @@ from typing import Any, Optional
 
 import httpx
 
-from src.clients.http import send_with_retry
+from src.clients.http import request_with_transient_retry
 
 logger = logging.getLogger(__name__)
 
@@ -85,8 +85,8 @@ class DefiLlamaClient:
         if cached is not None:
             return cached
 
-        response = await send_with_retry(
-            lambda: self.client.get(f"{self.base_url}/chart/{pool_uuid}")
+        response = await request_with_transient_retry(
+            lambda: self.client.get(f"{self.base_url}/chart/{pool_uuid}"), "defillama chart"
         )
         response.raise_for_status()
         body = response.json()
@@ -116,8 +116,9 @@ class DefiLlamaClient:
         if cached is not None:
             return cached
 
-        response = await send_with_retry(
-            lambda: self.client.get(f"{self.base_url}/poolsEnriched", params={"pool": pool_uuid})
+        response = await request_with_transient_retry(
+            lambda: self.client.get(f"{self.base_url}/poolsEnriched", params={"pool": pool_uuid}),
+            "defillama pool",
         )
         response.raise_for_status()
         rows = response.json().get("data") or []

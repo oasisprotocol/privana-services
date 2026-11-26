@@ -11,7 +11,7 @@ from eth_account.messages import encode_defunct
 from web3 import Web3
 from web3.contract import Contract
 
-from src.clients.http import MAX_RETRIES, RETRY_DELAY, TRANSIENT_HTTP_ERRORS, send_with_retry
+from src.clients.http import TRANSIENT_HTTP_ERRORS, request_with_transient_retry
 from src.clients.sapphire import call_with_transient_retry, sapphire_http_provider
 from src.core.abi import load_abi
 from src.core.config import load_settings
@@ -23,6 +23,8 @@ from src.models.common import (
 
 logger = logging.getLogger(__name__)
 
+MAX_RETRIES = 3
+RETRY_DELAY = 1.0
 JWT_SIWE_CACHE_SKEW_SECONDS = 30
 HISTORY_PAGE_LIMIT = 100
 
@@ -135,16 +137,18 @@ class AccountingClient:
 
     async def get_token_info(self, token_id: str) -> TokenInfo:
         if token_id not in self._token_infos:
-            response = await send_with_retry(
-                lambda: self.client.request("GET", f"{self.base_url}/v1/accounting/tokens/{token_id}")
+            response = await request_with_transient_retry(
+                lambda: self.client.request("GET", f"{self.base_url}/v1/accounting/tokens/{token_id}"),
+                "accounting token info",
             )
             response.raise_for_status()
             self._token_infos[token_id] = TokenInfo(**response.json())
         return self._token_infos[token_id]
 
     async def list_all_tokens(self) -> list[TokenInfo]:
-        response = await send_with_retry(
-            lambda: self.client.request("GET", f"{self.base_url}/v1/accounting/tokens")
+        response = await request_with_transient_retry(
+            lambda: self.client.request("GET", f"{self.base_url}/v1/accounting/tokens"),
+            "accounting tokens",
         )
         response.raise_for_status()
         return [TokenInfo(**t) for t in response.json()["tokens"]]
@@ -226,8 +230,8 @@ class AccountingClient:
                 f"{self.base_url}/v1/accounting/history"
                 f"?offset={page_index}&limit={HISTORY_PAGE_LIMIT}"
             )
-            response = await send_with_retry(
-                lambda: self.client.request("GET", url, headers=headers)
+            response = await request_with_transient_retry(
+                lambda: self.client.request("GET", url, headers=headers), "accounting history"
             )
             response.raise_for_status()
             data = response.json()

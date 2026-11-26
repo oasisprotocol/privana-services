@@ -5,7 +5,7 @@ from typing import Optional
 
 import httpx
 
-from src.clients.http import send_with_retry
+from src.clients.http import request_with_transient_retry
 
 logger = logging.getLogger(__name__)
 
@@ -46,8 +46,9 @@ class CoinGeckoClient:
             return {}
 
         params = {"ids": ",".join(sorted(set(coin_ids))), "vs_currencies": "usd"}
-        response = await send_with_retry(
-            lambda: self.client.get(f"{self.base_url}/simple/price", params=params)
+        response = await request_with_transient_retry(
+            lambda: self.client.get(f"{self.base_url}/simple/price", params=params),
+            "coingecko spot prices",
         )
         response.raise_for_status()
 
@@ -65,8 +66,9 @@ class CoinGeckoClient:
         # points collapse onto their day. (At days=365 the API picks daily on its
         # own; asking makes the coupling explicit.)
         params = {"vs_currency": "usd", "days": min(days, MAX_BACKFILL_DAYS), "interval": "daily"}
-        response = await send_with_retry(
-            lambda: self.client.get(f"{self.base_url}/coins/{coin_id}/market_chart", params=params)
+        response = await request_with_transient_retry(
+            lambda: self.client.get(f"{self.base_url}/coins/{coin_id}/market_chart", params=params),
+            "coingecko price history",
         )
         response.raise_for_status()
 

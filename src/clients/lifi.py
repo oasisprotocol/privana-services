@@ -3,7 +3,7 @@ from typing import Any, Optional
 
 import httpx
 
-from src.clients.http import send_with_retry
+from src.clients.http import request_with_transient_retry
 from src.core.config import load_settings
 
 logger = logging.getLogger(__name__)
@@ -40,8 +40,9 @@ class LiFiClient:
             "options": {"slippage": slippage_bps / 10_000},
         }
         logger.info(f"Li.Fi routes request: {payload}")
-        response = await send_with_retry(
-            lambda: self.client.post(f"{self.api_url}/advanced/routes", json=payload)
+        response = await request_with_transient_retry(
+            lambda: self.client.post(f"{self.api_url}/advanced/routes", json=payload),
+            "lifi routes",
         )
         if response.status_code != 200:
             logger.error(
@@ -71,8 +72,8 @@ class LiFiClient:
         }
         if self.integrator:
             params["integrator"] = self.integrator
-        response = await send_with_retry(
-            lambda: self.client.get(f"{self.api_url}/quote", params=params)
+        response = await request_with_transient_retry(
+            lambda: self.client.get(f"{self.api_url}/quote", params=params), "lifi quote"
         )
         if response.status_code != 200:
             logger.error(
@@ -85,19 +86,23 @@ class LiFiClient:
         self, tx_hash: str, from_chain_id: int, to_chain_id: int
     ) -> dict[str, Any]:
         params = {"txHash": tx_hash, "fromChain": from_chain_id, "toChain": to_chain_id}
-        response = await send_with_retry(
-            lambda: self.client.get(f"{self.api_url}/status", params=params)
+        response = await request_with_transient_retry(
+            lambda: self.client.get(f"{self.api_url}/status", params=params), "lifi status"
         )
         response.raise_for_status()
         return response.json()
 
     async def get_tokens(self) -> dict[str, Any]:
-        response = await send_with_retry(lambda: self.client.get(f"{self.api_url}/tokens"))
+        response = await request_with_transient_retry(
+            lambda: self.client.get(f"{self.api_url}/tokens"), "lifi tokens"
+        )
         response.raise_for_status()
         return response.json()
 
     async def get_chains(self) -> dict[str, Any]:
-        response = await send_with_retry(lambda: self.client.get(f"{self.api_url}/chains"))
+        response = await request_with_transient_retry(
+            lambda: self.client.get(f"{self.api_url}/chains"), "lifi chains"
+        )
         response.raise_for_status()
         return response.json()
 

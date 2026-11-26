@@ -17,7 +17,7 @@ def _client_returning(payload):
     client = AccountingClient.__new__(AccountingClient)
     client.base_url = "https://accounting.test"
     client.client = AsyncMock(spec=httpx.AsyncClient)
-    client.client.request = AsyncMock(
+    client.client.get = AsyncMock(
         return_value=httpx.Response(
             status_code=200,
             content=json.dumps(payload),

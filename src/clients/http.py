@@ -16,15 +16,20 @@ _TRANSIENT_HTTP_ATTEMPTS = 3
 _TRANSIENT_HTTP_BACKOFF_SEC = 1.0
 
 
-async def request_with_transient_retry(factory, op: str):
-    """Run an idempotent HTTP read, retrying dropped connections, timeouts and 5xx.
+async def get_retry(client: httpx.AsyncClient, url: str, **kwargs) -> httpx.Response:
+    return await _retry(client.get, url, **kwargs)
 
-    A write could land and still look dropped, so only reads go through here.
-    Returns the last response; callers check its status as before.
-    """
+
+async def post_retry(client: httpx.AsyncClient, url: str, **kwargs) -> httpx.Response:
+    """Only for POSTs that read (e.g. a route quote): a write could land and still look dropped."""
+    return await _retry(client.post, url, **kwargs)
+
+
+async def _retry(send, url: str, **kwargs) -> httpx.Response:
+    """Retry dropped connections, timeouts and 5xx; return the last response for the caller to check."""
     for attempt in range(1, _TRANSIENT_HTTP_ATTEMPTS + 1):
         try:
-            response = await factory()
+            response = await send(url, **kwargs)
         except TRANSIENT_HTTP_ERRORS as exc:
             if attempt == _TRANSIENT_HTTP_ATTEMPTS:
                 raise
@@ -34,8 +39,8 @@ async def request_with_transient_retry(factory, op: str):
                 return response
             failure = f"HTTP {response.status_code}"
         logger.warning(
-            "Transient %s request failure (attempt %d/%d), retrying: %s",
-            op,
+            "Transient request failure for %s (attempt %d/%d), retrying: %s",
+            url,
             attempt,
             _TRANSIENT_HTTP_ATTEMPTS,
             failure,

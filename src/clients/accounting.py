@@ -11,7 +11,7 @@ from eth_account.messages import encode_defunct
 from web3 import Web3
 from web3.contract import Contract
 
-from src.clients.http import TRANSIENT_HTTP_ERRORS, request_with_transient_retry
+from src.clients.http import TRANSIENT_HTTP_ERRORS, get_retry
 from src.clients.sapphire import call_with_transient_retry, sapphire_http_provider
 from src.core.abi import load_abi
 from src.core.config import load_settings
@@ -137,19 +137,15 @@ class AccountingClient:
 
     async def get_token_info(self, token_id: str) -> TokenInfo:
         if token_id not in self._token_infos:
-            response = await request_with_transient_retry(
-                lambda: self.client.request("GET", f"{self.base_url}/v1/accounting/tokens/{token_id}"),
-                "accounting token info",
+            response = await get_retry(
+                self.client, f"{self.base_url}/v1/accounting/tokens/{token_id}"
             )
             response.raise_for_status()
             self._token_infos[token_id] = TokenInfo(**response.json())
         return self._token_infos[token_id]
 
     async def list_all_tokens(self) -> list[TokenInfo]:
-        response = await request_with_transient_retry(
-            lambda: self.client.request("GET", f"{self.base_url}/v1/accounting/tokens"),
-            "accounting tokens",
-        )
+        response = await get_retry(self.client, f"{self.base_url}/v1/accounting/tokens")
         response.raise_for_status()
         return [TokenInfo(**t) for t in response.json()["tokens"]]
 
@@ -230,9 +226,7 @@ class AccountingClient:
                 f"{self.base_url}/v1/accounting/history"
                 f"?offset={page_index}&limit={HISTORY_PAGE_LIMIT}"
             )
-            response = await request_with_transient_retry(
-                lambda: self.client.request("GET", url, headers=headers), "accounting history"
-            )
+            response = await get_retry(self.client, url, headers=headers)
             response.raise_for_status()
             data = response.json()
             page = [HistoryEntry(**entry) for entry in data["history"]]

@@ -133,8 +133,7 @@ class TestAccountingClient:
         assert isinstance(result, TokenInfo)
         assert mock_http_client.get.call_count == 2
 
-    async def test_get_token_info_does_not_retry_on_4xx(self, client, mock_http_client, monkeypatch):
-        monkeypatch.setattr("src.clients.accounting.RETRY_DELAY", 0.0)
+    async def test_get_token_info_does_not_retry_on_4xx(self, client, mock_http_client):
         err = self._mock_response({}, status_code=404)
         err.raise_for_status.side_effect = httpx.HTTPStatusError(
             "not found", request=MagicMock(), response=err
@@ -160,17 +159,17 @@ class TestAccountingClient:
 
     async def test_get_lp_balance_retries_on_5xx(self, client, mock_http_client, monkeypatch):
         import asyncio
-        monkeypatch.setattr("src.clients.accounting.RETRY_DELAY", 0.0)
+        monkeypatch.setattr("src.clients.http._TRANSIENT_HTTP_BACKOFF_SEC", 0.0)
         client._siwe_token = "test-siwe"
         client._jwt_token = "test-jwt"
         client._auth_timestamp = asyncio.get_event_loop().time()
         err = self._mock_response({}, status_code=500)
         ok = self._mock_response(SAMPLE_BALANCE)
-        mock_http_client.request.side_effect = [err, ok]
+        mock_http_client.get.side_effect = [err, ok]
 
         result = await client.get_lp_balance("0xtoken")
         assert isinstance(result, Balance)
-        assert mock_http_client.request.call_count == 2
+        assert mock_http_client.get.call_count == 2
 
     async def test_get_transfer_nonce_reads_on_chain(self, client):
         """get_transfer_nonce must read transferNonces(user) from the
@@ -197,13 +196,13 @@ class TestAccountingClient:
         client._siwe_token = "test-siwe"
         client._jwt_token = "test-jwt"
         client._auth_timestamp = asyncio.get_event_loop().time()
-        mock_http_client.request.return_value = self._mock_response(SAMPLE_BALANCE)
+        mock_http_client.get.return_value = self._mock_response(SAMPLE_BALANCE)
 
         result = await client.get_lp_balance("0xtoken")
         assert isinstance(result, Balance)
         assert result.balance == "1000000000000000000"
-        mock_http_client.request.assert_called_once_with(
-            "GET", "http://test:8000/v1/accounting/balances/0xtoken",
+        mock_http_client.get.assert_called_once_with(
+            "http://test:8000/v1/accounting/balances/0xtoken",
             headers={"Authorization": "Bearer test-jwt"},
         )
 

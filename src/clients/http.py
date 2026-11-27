@@ -5,7 +5,7 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-TRANSIENT_HTTP_ERRORS = (
+_TRANSIENT_HTTP_ERRORS = (
     httpx.ConnectError,
     httpx.ReadError,
     httpx.RemoteProtocolError,
@@ -30,7 +30,7 @@ async def _retry(send, url: str, **kwargs) -> httpx.Response:
     for attempt in range(1, _TRANSIENT_HTTP_ATTEMPTS + 1):
         try:
             response = await send(url, **kwargs)
-        except TRANSIENT_HTTP_ERRORS as exc:
+        except _TRANSIENT_HTTP_ERRORS as exc:
             if attempt == _TRANSIENT_HTTP_ATTEMPTS:
                 raise
             failure = exc

@@ -11,6 +11,7 @@ from eth_account.messages import encode_defunct
 from web3 import Web3
 from web3.contract import Contract
 
+from src.clients.http import get_retry
 from src.clients.sapphire import call_with_transient_retry, sapphire_http_provider
 from src.core.abi import load_abi
 from src.core.config import load_settings
@@ -22,11 +23,8 @@ from src.models.common import (
 
 logger = logging.getLogger(__name__)
 
-MAX_RETRIES = 3
-RETRY_DELAY = 1.0
 JWT_SIWE_CACHE_SKEW_SECONDS = 30
 HISTORY_PAGE_LIMIT = 100
-TRANSIENT_HTTP_ERRORS = (httpx.ConnectError, httpx.ReadError, httpx.RemoteProtocolError, httpx.TimeoutException)
 
 
 @dataclass(frozen=True)
@@ -42,27 +40,6 @@ class JwtIdentity:
 
     siwe_token: str
     address: str
-
-
-async def _request_with_retry(client: httpx.AsyncClient, method: str, url: str, **kwargs) -> httpx.Response:
-    for attempt in range(MAX_RETRIES):
-        try:
-            response = await client.request(method, url, **kwargs)
-            response.raise_for_status()
-            return response
-        except TRANSIENT_HTTP_ERRORS as exc:
-            if attempt == MAX_RETRIES - 1:
-                raise
-            logger.warning(f"Accounting API request failed (attempt {attempt + 1}), retrying: {exc}")
-            await asyncio.sleep(RETRY_DELAY * (attempt + 1))
-        except httpx.HTTPStatusError as exc:
-            if exc.response.status_code < 500 or attempt == MAX_RETRIES - 1:
-                raise
-            logger.warning(
-                f"Accounting API returned {exc.response.status_code} "
-                f"(attempt {attempt + 1}), retrying"
-            )
-            await asyncio.sleep(RETRY_DELAY * (attempt + 1))
 
 
 class AccountingClient:
@@ -119,57 +96,39 @@ class AccountingClient:
     def _auth_headers(self) -> dict:
         return {"Authorization": f"Bearer {self._jwt_token}"}
 
-    async def _authenticated_request(self, method: str, url: str) -> httpx.Response:
+    async def _authenticated_get(self, url: str) -> httpx.Response:
         await self._ensure_authenticated()
-        for attempt in range(MAX_RETRIES):
-            try:
-                response = await self.client.request(method, url, headers=self._auth_headers())
-            except TRANSIENT_HTTP_ERRORS as exc:
-                if attempt == MAX_RETRIES - 1:
-                    raise
-                logger.warning(f"Accounting API request failed (attempt {attempt + 1}), retrying: {exc}")
-                await asyncio.sleep(RETRY_DELAY * (attempt + 1))
-                continue
-            is_auth_error = response.status_code == 401 or (
-                response.status_code == 400 and "SIWE" in response.text
-            )
-            if is_auth_error:
-                self._siwe_token = None
-                self._jwt_token = None
-                self._auth_timestamp = None
-                await self._ensure_authenticated()
-                response = await self.client.request(method, url, headers=self._auth_headers())
-            if response.status_code >= 500 and attempt < MAX_RETRIES - 1:
-                logger.warning(
-                    f"Accounting API returned {response.status_code} "
-                    f"(attempt {attempt + 1}), retrying"
-                )
-                await asyncio.sleep(RETRY_DELAY * (attempt + 1))
-                continue
-            response.raise_for_status()
-            return response
+        response = await get_retry(self.client, url, headers=self._auth_headers())
+        is_auth_error = response.status_code == 401 or (
+            response.status_code == 400 and "SIWE" in response.text
+        )
+        if is_auth_error:
+            self._siwe_token = None
+            self._jwt_token = None
+            self._auth_timestamp = None
+            await self._ensure_authenticated()
+            response = await get_retry(self.client, url, headers=self._auth_headers())
+        response.raise_for_status()
+        return response
 
     async def get_lp_balance(self, token_id: str) -> Balance:
-        response = await self._authenticated_request(
-            "GET",
-            f"{self.base_url}/v1/accounting/balances/{token_id}",
+        response = await self._authenticated_get(
+            f"{self.base_url}/v1/accounting/balances/{token_id}"
         )
         return Balance(**response.json())
 
     async def get_token_info(self, token_id: str) -> TokenInfo:
         if token_id not in self._token_infos:
-            response = await _request_with_retry(
-                self.client, "GET",
-                f"{self.base_url}/v1/accounting/tokens/{token_id}",
+            response = await get_retry(
+                self.client, f"{self.base_url}/v1/accounting/tokens/{token_id}"
             )
+            response.raise_for_status()
             self._token_infos[token_id] = TokenInfo(**response.json())
         return self._token_infos[token_id]
 
     async def list_all_tokens(self) -> list[TokenInfo]:
-        response = await _request_with_retry(
-            self.client, "GET",
-            f"{self.base_url}/v1/accounting/tokens",
-        )
+        response = await get_retry(self.client, f"{self.base_url}/v1/accounting/tokens")
+        response.raise_for_status()
         return [TokenInfo(**t) for t in response.json()["tokens"]]
 
     async def _exchange_jwt_for_siwe_auth(self, jwt_token: str) -> _JwtSiweAuth:
@@ -245,13 +204,12 @@ class AccountingClient:
         entries: list[HistoryEntry] = []
         page_index = 0
         while True:
-            response = await _request_with_retry(
-                self.client,
-                "GET",
+            url = (
                 f"{self.base_url}/v1/accounting/history"
-                f"?offset={page_index}&limit={HISTORY_PAGE_LIMIT}",
-                headers=headers,
+                f"?offset={page_index}&limit={HISTORY_PAGE_LIMIT}"
             )
+            response = await get_retry(self.client, url, headers=headers)
+            response.raise_for_status()
             data = response.json()
             page = [HistoryEntry(**entry) for entry in data["history"]]
             entries.extend(page)

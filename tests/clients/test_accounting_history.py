@@ -38,7 +38,7 @@ def _client_with_pages(pages):
     client = AccountingClient.__new__(AccountingClient)
     client.base_url = "https://accounting.test"
     client.client = AsyncMock(spec=httpx.AsyncClient)
-    client.client.request = AsyncMock(side_effect=pages)
+    client.client.get = AsyncMock(side_effect=pages)
     return client
 
 
@@ -52,16 +52,16 @@ class TestGetUserHistory:
 
         assert [e.kind for e in history] == ["deposit", "withdraw"]
         assert all(isinstance(e, HistoryEntry) for e in history)
-        assert client.client.request.await_count == 1
+        assert client.client.get.await_count == 1
 
     async def test_sends_siwe_token_header_and_pages_from_oldest(self):
         client = _client_with_pages([_response([_entry("deposit", 100)], total=1)])
 
         await client.get_user_history("siwe-token")
 
-        call = client.client.request.await_args
+        call = client.client.get.await_args
         assert call.kwargs["headers"] == {"X-SIWE-Token": "siwe-token"}
-        assert f"offset=0&limit={HISTORY_PAGE_LIMIT}" in call.args[1]
+        assert f"offset=0&limit={HISTORY_PAGE_LIMIT}" in call.args[0]
 
     async def test_walks_every_page_until_total(self):
         first = [_entry("deposit", ts) for ts in range(HISTORY_PAGE_LIMIT)]
@@ -74,8 +74,8 @@ class TestGetUserHistory:
         history = await client.get_user_history("siwe-token")
 
         assert len(history) == HISTORY_PAGE_LIMIT + 1
-        assert client.client.request.await_count == 2
-        second_url = client.client.request.await_args_list[1].args[1]
+        assert client.client.get.await_count == 2
+        second_url = client.client.get.await_args_list[1].args[0]
         assert "offset=1" in second_url
 
     async def test_short_page_terminates_even_if_total_overstates(self):
@@ -86,7 +86,7 @@ class TestGetUserHistory:
         history = await client.get_user_history("siwe-token")
 
         assert len(history) == 1
-        assert client.client.request.await_count == 1
+        assert client.client.get.await_count == 1
 
     async def test_result_is_sorted_by_timestamp(self):
         client = _client_with_pages([

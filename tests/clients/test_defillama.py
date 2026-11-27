@@ -31,6 +31,7 @@ SAMPLE_META = {
 
 def _response(payload: dict) -> MagicMock:
     response = MagicMock(spec=httpx.Response)
+    response.status_code = 200
     response.json.return_value = payload
     response.raise_for_status.return_value = None
     return response
